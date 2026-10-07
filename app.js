@@ -3900,8 +3900,26 @@ function captureBody(body) {
   // (a page marks the lines that say who said it, and a chapter the speech
   // after a scene break, for the screen only)
   // (and a script's page breaks, (CONT'D) and suggestions)
-  return body.innerHTML.replace(/<(b|i|em|strong|u|s|strike|sub|sup)\s+style="[^"]*"/g, '<$1').replace(/<p\b[^>]*>/g, (tag) => tag.replace(/ data-(?:attr|speech|first|walk)=""/g, '')
+  return dropJunkSpans(body.innerHTML).replace(/<(b|i|em|strong|u|s|strike|sub|sup)\s+style="[^"]*"/g, '<$1').replace(/<p\b[^>]*>/g, (tag) => tag.replace(/ data-(?:attr|speech|first|walk)=""/g, '')
     .replace(/ data-(?:pg|fill|contd|ghost|ghost-empty|sp-paste)(?:="[^"]*")?/g, ''));
+}
+
+// The engine's style spans (stripJunkSpans), left out of what's saved. A
+// cut, Backspace or Delete across paragraphs wraps the words it joins in
+// them (the indent and white-space of the paragraph they came from); taken
+// off the page there and then, they'd break ⌘Z, which puts back what the
+// engine itself took away. So the page keeps them until the chapter is next
+// opened, and the file never has them. NEO's own spans (placeholder flags)
+// stay.
+function dropJunkSpans(html) {
+  if (html.indexOf('<span') < 0) return html;
+  const junk = [];
+  return html.replace(/<span\b[^>]*>|<\/span>/g, (tag) => {
+    if (tag[1] === '/') return junk.pop() ? '' : tag;
+    const drop = !/\sclass="[^"]*\bph-mark\b/.test(tag);
+    junk.push(drop);
+    return drop ? '' : tag;
+  });
 }
 
 // A chapter that opens on a line of dialogue sets no drop cap: the dash
@@ -6275,7 +6293,8 @@ function spMoveScene(k, to) {
 
 // A scene card's Delete: the scene's lines leave the script for Darlings
 // (saved there first), its note goes with it, and ⌘Z puts it all back
-async function deleteSceneToDarlings(cell) {
+function deleteSceneToDarlings(...args) { return slogWith({ src: 'move', cause: 'darling' }, () => deleteSceneToDarlingsNow(...args)); }
+async function deleteSceneToDarlingsNow(cell) {
   const sc = sceneOfCell(cell);
   if (!sc || !sc.s.p.isConnected) return;
   const nodes = sceneNodes(sc.s);
@@ -8920,7 +8939,8 @@ async function cardMenu(cell, x, y) {
 
 // A section card's Delete: its writing leaves the manuscript for Darlings
 // (saved there before the chapter is), its note goes, and ⌘Z puts it back
-async function deleteSectionToDarlings(chId, segIdx) {
+function deleteSectionToDarlings(...args) { return slogWith({ src: 'move', cause: 'darling' }, () => deleteSectionToDarlingsNow(...args)); }
+async function deleteSectionToDarlingsNow(chId, segIdx) {
   const body = chapterBodyEl(chId);
   const seg = chapterSegments(chId)[segIdx];
   if (!body || !seg) return;
@@ -9120,7 +9140,8 @@ function sectionToLoose(chId, segIdx, virtualSec) {
   renderBoard();
 }
 
-async function writtenSectionToLoose(chId, seg) {
+function writtenSectionToLoose(...args) { return slogWith({ src: 'move', cause: 'outline' }, () => writtenSectionToLooseNow(...args)); }
+async function writtenSectionToLooseNow(chId, seg) {
   if (seg.flag) { toast(t('That section has a placeholder in it. Drag it to another chapter instead.')); return; }
   const body = chapterBodyEl(chId);
   if (!body) return;
@@ -9781,7 +9802,12 @@ function saveLooseCard(id, val) {
   scheduleMetaSave();
 }
 
-async function removeLooseCard(id) {
+// (a card holding writing sends it to Darlings: a move)
+function removeLooseCard(id) {
+  const card = book && (book.looseCards || []).find((x) => x.id === id);
+  return card && card.html ? slogWith({ src: 'move', cause: 'darling' }, () => removeLooseCardNow(id)) : removeLooseCardNow(id);
+}
+async function removeLooseCardNow(id) {
   const card = (book.looseCards || []).find((x) => x.id === id);
   if (!card) return;
   // words on the card go to Darlings first; the card goes only once they're safe there
@@ -10504,7 +10530,7 @@ function slogCauseOf(label) {
   if (l === 'chapter split') return { src: 'move', cause: 'split' };
   if (l === 'chapters merged' || l === 'chapter joined') return { src: 'move', cause: 'join' };
   if (l === 'replace' || l === 'replace all') return { src: 'typed', cause: 'replace' };
-  if (l === 'darling' || l === 'darling restore' || l === 'chapter delete') return { src: 'move', cause: 'darling' };
+  if (l === 'darling' || l === 'darling restore' || l === 'chapter delete' || l === 'section delete' || l === 'scene delete') return { src: 'move', cause: 'darling' };
   if (l === 'darling delete') return { src: 'typed', cause: 'darling' };
   if (/^(card moved|card to chapter|card to loose|loose card placed|scene moved|chapter reorder|outline section to chapter)$/.test(l)) return { src: 'move', cause: 'outline' };
   if (/^(outline|card|scene|loose card) /.test(l)) return { src: 'typed', cause: 'outline' };
@@ -13497,14 +13523,17 @@ async function printPaperback() {
   await saveMeta();
   await writeLibrary(library);
   // a dedication typed here becomes the book's own Dedication page
+  // (typed by the writer in the dialog, so the log says typed)
   if (opts.dedication && !hasDedication) {
-    const at = book.chapterOrder.findIndex((c) => !['copyright'].includes(chapterKind(c)));
-    const chId = newEntryId();
-    book.chapterOrder.splice(at < 0 ? 0 : at, 0, chId);
-    setChapterKind(chId, 'dedication');
-    chapterHTML[chId] = `<p>${escHtml(opts.dedication)}</p>`;
-    await persistChapter(chId);
-    await saveMeta();
+    await slogWith({ src: 'typed' }, async () => {
+      const at = book.chapterOrder.findIndex((c) => !['copyright'].includes(chapterKind(c)));
+      const chId = newEntryId();
+      book.chapterOrder.splice(at < 0 ? 0 : at, 0, chId);
+      setChapterKind(chId, 'dedication');
+      chapterHTML[chId] = `<p>${escHtml(opts.dedication)}</p>`;
+      await persistChapter(chId);
+      await saveMeta();
+    });
     renderChapters();
   }
   const d = bookExportData();

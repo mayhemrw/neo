@@ -640,13 +640,17 @@ ipcMain.handle('book:duplicate', (_e, bookId, title) => {
     Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
   const dest = bookDir(id);
   // a chapter iCloud hasn't brought down yet would be missing from the copy
-  const waiting = (dir) => fs.readdirSync(dir, { withFileTypes: true }).some((e) => (e.isDirectory() ? waiting(path.join(dir, e.name)) : /\.icloud$/.test(e.name)));
+  // (the Scribe's Log isn't copied, so its chunks needn't be down)
+  const waiting = (dir) => fs.readdirSync(dir, { withFileTypes: true }).some((e) => (e.isDirectory() ? !(dir === src && e.name === slog.LOG_DIR) && waiting(path.join(dir, e.name)) : /\.icloud$/.test(e.name)));
   if (waiting(src)) throw new Error('Some of this book is still downloading from iCloud. Try again in a moment');
   const copyDir = (from, to) => {
     fs.mkdirSync(to, { recursive: true });
     for (const ent of fs.readdirSync(from, { withFileTypes: true })) {
       // (a write caught halfway, a spare copy, a placeholder: not the book)
       if (/\.(tmp|bak|icloud)$/.test(ent.name) || ent.name === 'book.json') continue;
+      // (the original's Scribe's Log stays its own: the copy starts a log of
+      // its own, from a baseline of what was copied, the first time it's opened)
+      if (from === src && ent.name === slog.LOG_DIR) continue;
       const a = path.join(from, ent.name);
       const b = path.join(to, ent.name);
       if (ent.isDirectory()) copyDir(a, b);

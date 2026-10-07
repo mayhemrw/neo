@@ -10,7 +10,7 @@
 
 'use strict';
 
-const { app, BrowserWindow, clipboard } = require('electron');
+const { app, BrowserWindow, clipboard, ipcMain } = require('electron');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
@@ -125,6 +125,8 @@ const pause = () => tick(1400); // a burst ends after a second's quiet
 const BORROWED = 'Borrowed words that are not the writer\'s own.';
 const GULLS = 'Gulls wheeled over the empty slips.';
 const HARBOR = 'The harbor was quiet before the storm.';
+const DEDICATION = 'For the harbor folk, who counted the boats.';
+const notes = {}; // what the run saw along the way, for the checks
 
 async function main() {
   await app.whenReady();
@@ -197,6 +199,30 @@ async function main() {
     wc.paste();
     await tick(300);
     await pause();
+    // a cut across two paragraphs, taken back with ⌘Z: the engine wraps the
+    // joined words in style spans, which the page keeps (for ⌘Z) and the
+    // file never gets
+    await js(`(() => {
+      const body = document.querySelectorAll('.chapter-body')[0];
+      body.focus();
+      const ps = body.querySelectorAll('p');
+      const r = document.createRange();
+      r.setStart(ps[3].firstChild, 5);
+      r.setEnd(ps[4].firstChild, 4);
+      getSelection().removeAllRanges();
+      getSelection().addRange(r);
+    })()`);
+    await tick(100);
+    const beforeCut = await js('chapterHTML[book.chapterOrder[0]]');
+    wc.cut();
+    await tick(300);
+    notes.cutPage = await js(`document.querySelectorAll('.chapter-body')[0].innerHTML`);
+    notes.cutSaved = await js('chapterHTML[book.chapterOrder[0]]');
+    await pause();
+    wc.undo();
+    await tick(300);
+    notes.cutUndone = (await js('chapterHTML[book.chapterOrder[0]]')) === beforeCut;
+    await pause();
     // a triple Enter at the start of a paragraph: a new chapter from there
     await caret(0, 3, false);
     await type('\n\n\n', 60);
@@ -214,6 +240,34 @@ async function main() {
     // …and NEO's own undo puts it back
     await js(`structuralUndo()`);
     await tick(500);
+    await pause();
+    // a section with words set aside on a loose card, then dragged back
+    const seg = await js(`(() => {
+      for (const ch of book.chapterOrder) {
+        const segs = chapterSegments(ch);
+        if (segs.length < 2) continue;
+        for (let i = segs.length - 1; i >= 0; i--) if (segs[i].words && !segs[i].flag) return { ch, i };
+      }
+      return null;
+    })()`);
+    assert.ok(seg, 'a chapter with a section to set aside');
+    notes.looseWords = await js(`chapterSegments(${JSON.stringify(seg.ch)})[${seg.i}].first`);
+    await js(`sectionToLoose(${JSON.stringify(seg.ch)}, ${seg.i})`);
+    await tick(800);
+    await pause();
+    const card = await js(`(book.looseCards || []).find((c) => c.html) || null`);
+    assert.ok(card, 'the words went onto a loose card');
+    await js(`looseToSection(${JSON.stringify(card.id)}, { ch: ${JSON.stringify(seg.ch)}, before: null })`);
+    await tick(800);
+    await pause();
+    assert.ok(!(await js(`(book.looseCards || []).some((c) => c.html)`)), 'the card\'s words went back in');
+    // …then the same section deleted from its card's menu (to Darlings), and ⌘Z
+    const last = await js(`chapterSegments(${JSON.stringify(seg.ch)}).length - 1`);
+    await js(`deleteSectionToDarlings(${JSON.stringify(seg.ch)}, ${last})`);
+    await tick(800);
+    await pause();
+    await js(`structuralUndo()`);
+    await tick(800);
     await pause();
     // notes
     await js(`switchTab('notes')`);
@@ -249,6 +303,19 @@ async function main() {
     await caret(1, 0, true);
     await type(' Back on.');
     await pause();
+    // a dedication typed in the Paperback for KDP dialog becomes a page
+    // (the pages themselves aren't set: that's the print tests' business)
+    ipcMain.removeHandler('print:paperback');
+    ipcMain.handle('print:paperback', () => null);
+    await js(`(() => { printPaperback(); })()`);
+    while (!(await js(`!!document.getElementById('pm-dedication')`))) await tick(50);
+    await js(`(() => {
+      document.getElementById('pm-dedication').value = ${JSON.stringify(DEDICATION)};
+      document.querySelector('.print-modal .m-ok').click();
+    })()`);
+    while (await js(`!!printPaperback.busy || !!document.getElementById('pm-dedication')`)) await tick(50);
+    await tick(800);
+    assert.ok(await js(`book.chapterOrder.some((c) => chapterKind(c) === 'dedication')`), 'the dedication is a page');
     // closing the book ends its chunk
     await js(`backToShelf()`);
     await tick(1500);
@@ -310,7 +377,21 @@ async function main() {
       ['the card move is labeled', () => assert.ok(edits.some((e) => e.src === 'move' && e.cause === 'outline'))],
       ['Darlings are labeled', () => assert.ok(edits.some((e) => e.doc === 'darlings' && e.src === 'move' && e.cause === 'darling'))],
       ['notes are typed', () => assert.ok(edits.some((e) => e.doc === 'notes' && e.src === 'typed'))],
-      ['the chunk closed when the book did', () => assert.ok(entries.some((e) => e.kind === 'close' && e.why === 'close'))]
+      ['the chunk closed when the book did', () => assert.ok(entries.some((e) => e.kind === 'close' && e.why === 'close'))],
+      ['a cut across paragraphs: the page keeps the engine\'s spans for ⌘Z, the file never has them', () => {
+        assert.match(notes.cutPage, /<span style=/, 'the engine wrapped the joined words (if not, this check tests nothing)');
+        assert.doesNotMatch(notes.cutSaved, /<span/);
+        assert.equal(notes.cutUndone, true, '⌘Z put both paragraphs back as they were');
+        for (const f of fs.readdirSync(path.join(bookDir, 'chapters'))) assert.doesNotMatch(fs.readFileSync(path.join(bookDir, 'chapters', f), 'utf8'), /<span(?! class="ph-mark")/, f);
+      }],
+      ['a section\'s words onto a loose card and back are moves', () => {
+        const out = edits.find((e) => e.doc === 'book' && e.src === 'move' && e.cause === 'outline' && e.x && e.x.ins.join('').includes(notes.looseWords.slice(0, 20)));
+        assert.ok(out && out.from, 'into book.json, from the chapter');
+        const back = edits.find((e) => e.n > out.n && /^ch-/.test(e.doc) && e.src === 'move' && e.cause === 'outline' && e.x && e.x.ins.join('').includes(notes.looseWords.slice(0, 20)));
+        assert.ok(back && back.from, 'back into the chapter, from the card');
+      }],
+      ['a section deleted to Darlings is a move there', () => assert.ok(edits.some((e) => e.doc === 'darlings' && e.src === 'move' && e.cause === 'darling' && e.from && e.x.ins.join('').includes(notes.looseWords.slice(0, 20))))],
+      ['a dedication typed in the paperback dialog is typed', () => assert.ok(edits.some((e) => /^ch-/.test(e.doc) && e.src === 'typed' && e.x && e.x.ins.join('').includes(DEDICATION)))]
     ];
     for (const [name, fn] of checks) {
       try { fn(); console.log('ok   ' + name); } catch (err) {

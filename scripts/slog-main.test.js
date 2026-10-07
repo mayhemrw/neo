@@ -213,6 +213,30 @@ describe('Scribe\'s Log in main.js', { concurrency: 1 }, () => {
     assertChecks(dir);
   });
 
+  test('a duplicated book starts a log of its own; the original\'s is left as it was', async () => {
+    const lib = tempLibrary();
+    const book = main.call('book:create', { title: 'Twin' });
+    const dir = path.join(lib, book.id);
+    main.call('slog:open', book.id);
+    main.call('slog:observe', book.id, 'chapter', 'ch-1', '<p>Only once.</p>', { src: 'typed', dur: 500, ev: 4 });
+    main.call('chapter:write', book.id, 'ch-1', '<p>Only once.</p>');
+    await main.call('slog:event', book.id, { type: 'close' });
+    const before = fs.readdirSync(path.join(dir, slog.LOG_DIR)).sort();
+    const copy = await main.call('book:duplicate', book.id, 'Twin (copy)');
+    const copyDir = path.join(lib, copy.id);
+    assert.equal(fs.readFileSync(path.join(copyDir, 'chapters', 'ch-1.html'), 'utf8'), '<p>Only once.</p>');
+    assert.equal(fs.existsSync(path.join(copyDir, slog.LOG_DIR)), false, 'no log copied');
+    assert.deepEqual(fs.readdirSync(path.join(dir, slog.LOG_DIR)).sort(), before);
+    // opened, the copy's words are a baseline in a log with its own id
+    main.call('slog:open', copy.id);
+    await main.call('slog:event', copy.id, { type: 'close' });
+    const e = entries(copyDir);
+    assert.ok(e.some((x) => x.kind === 'base' && x.doc === 'ch-1' && x.src === 'baseline'));
+    assert.notEqual(e[0].log, entries(dir)[0].log);
+    assertChecks(dir);
+    assertChecks(copyDir);
+  });
+
   test('names from the window still pass libName', () => {
     tempLibrary();
     const book = main.call('book:create', { title: 'Safe' });
