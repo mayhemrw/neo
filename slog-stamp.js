@@ -89,11 +89,19 @@ class Stamper {
     setTimeout(() => this.tick().catch((err) => this.onError('stamp', err)), 5000).unref?.();
   }
 
-  // Quitting: no new requests; open receipt files finish their writes.
-  // What's still to send waits in stamps.json for the next start.
-  async stop() {
+  // Quitting: no new requests. Stamps already on their way (a session's
+  // last hash, sent as NEO quits) get up to `wait` ms to come back; open
+  // receipt files finish their writes. Anything still unsent waits in
+  // stamps.json for the next start.
+  async stop({ wait = 2500 } = {}) {
     clearInterval(this.timer);
     this.timer = null;
+    const inFlight = [...this.sending.values()].map((p) => p.catch(() => {}));
+    if (inFlight.length) {
+      let timer;
+      await Promise.race([Promise.all(inFlight), new Promise((resolve) => { timer = setTimeout(resolve, wait); })]);
+      clearTimeout(timer);
+    }
     this.stopped = true;
     this._save();
     await Promise.all([...this.files.values()].map((f) => f.writer.flush()));
@@ -113,13 +121,14 @@ class Stamper {
     this._save();
   }
 
-  // a chunk closed: its last hash is stamped (or kept, when NEO is quitting)
-  // (it's queued first, so a quit that cuts the request off loses nothing)
+  // a chunk closed: its last hash is stamped, quitting included (stop()
+  // gives it a moment). It's queued first, so a quit that cuts the request
+  // off loses nothing: it goes at the next start.
   closed(b) {
     const head = { dir: b.dir, bookId: b.bookId, logId: b.logId, dev: b.dev, n: b.n, head: b.head };
     this._queue(head);
     this._save();
-    if (b.why === 'quit' || this.stopped) return;
+    if (this.stopped) return;
     this._send(head).catch((err) => this.onError('stamp', err));
   }
 

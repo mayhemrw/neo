@@ -225,7 +225,7 @@ describe('Stamper', { concurrency: 1 }, () => {
     assertChecks(env);
   });
 
-  test('quitting keeps the last hash for the next start', async () => {
+  test('quitting sends the session\'s last hash before NEO goes', async () => {
     const env = setup();
     const rec = env.recorder();
     const st = env.stamper(rec);
@@ -233,7 +233,25 @@ describe('Stamper', { concurrency: 1 }, () => {
     env.type(rec, 'Last words.');
     await rec.closeAll('quit');
     await st.stop();
-    assert.equal(env.net.calls.length, 0);
+    assert.equal(tsaCalls(env), 1);
+    assert.deepEqual(st.state.queue, {});
+    const close = entries(env).filter((e) => e.kind === 'close').pop();
+    assert.ok(readReceipts(env.dir).some((r) => r.line.svc === 'freetsa' && r.line.n === close.n && r.line.h === hashOf(close)));
+    assert.equal(Object.values(st.state.entries).flat().length, 2, 'its stamp entries wait for the next chunk');
+  });
+
+  test('a network too slow at quitting: NEO goes anyway, and the hash goes at the next start', async () => {
+    const env = setup();
+    const rec = env.recorder();
+    const hang = () => new Promise(() => {});
+    const st = env.stamper(rec, { fetch: hang });
+    rec.open(env.dir, 'book-a');
+    env.type(rec, 'Last words.');
+    await rec.closeAll('quit');
+    const t0 = Date.now();
+    await st.stop({ wait: 200 });
+    assert.ok(Date.now() - t0 < 2000, 'quitting didn\'t wait on the network');
+    assert.equal(Object.keys(st.state.queue).length, 1);
     // NEO starts again
     env.later(8 * 3600e3);
     const rec2 = env.recorder();

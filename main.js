@@ -3153,7 +3153,8 @@ app.on('will-quit', (e) => {
   e.preventDefault();
   slogQuitting = true;
   const wait = new Promise((resolve) => setTimeout(resolve, 3000));
-  // (the chunks' last lines first: their hashes wait for the next start)
+  // (the chunks' last lines first; their hashes are sent, and get the rest
+  // of the few seconds to come back, else they go at the next start)
   const done = Promise.resolve(slogTap((s) => s.closeAll('quit'))).then(() => slogStamper && slogStamper.stop());
   Promise.race([done, wait])
     .catch((err) => logError('scribe\'s log', err))
