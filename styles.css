@@ -514,6 +514,32 @@ body.night .ps-paper .ps-body.empty::before, body.night .ps-paper .tp-field:empt
 }
 .modal input:focus { outline: none; border-color: var(--accent); }
 
+/* File → Export → Paperback for KDP… */
+.print-modal { max-height: calc(100vh - 48px); overflow-y: auto; }
+.print-modal .pm-review-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.print-modal .pm-review-row .pm-edit { font-size: 12px; padding: 2px 6px; opacity: 0; transition: opacity 0.15s; }
+.print-modal .pm-review-row:hover .pm-edit, .print-modal .pm-edit:focus-visible { opacity: 1; }
+.print-modal #pm-review-text { margin: 4px 0 10px; }
+.print-modal label.pm-also { display: block; margin-top: 6px; }
+.print-modal .pm-hint { font-size: 13px; color: var(--muted); margin-bottom: 16px; }
+.print-modal h3 { font-weight: 400; font-size: 14px; color: var(--accent); margin: 8px 0 12px; }
+.print-modal .pm-row { display: flex; gap: 14px; }
+.print-modal .pm-row > label { flex: 1; min-width: 0; }
+.print-modal .pm-trims { gap: 8px; margin-bottom: 16px; }
+.print-modal .pm-trims .fr-choice { flex: 1; padding: 10px 6px; text-align: center; }
+.print-modal .pm-trims .fr-choice strong { margin-bottom: 3px; font-size: 13px; }
+.print-modal .pm-trims .fr-choice span { font-size: 11px; }
+.print-modal .fr-choice.sel { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.print-modal .fr-choice:focus:not(:focus-visible) { outline: none; }
+.print-modal select, .print-modal textarea {
+  display: block; width: 100%; margin-top: 6px; padding: 8px 10px;
+  background: var(--bg); border: 1px solid #3a3a3a; border-radius: 6px; color: #eee; font: inherit; font-size: 14px;
+}
+.print-modal textarea { resize: vertical; }
+.print-modal label.pm-check { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.print-modal label.pm-check input { display: inline-block; width: auto; margin: 0; }
+body.light .print-modal select, body.light .print-modal textarea { background: #fff; border-color: #cfcac0; color: #1c1a17; }
+
 /* the two button voices every dialog speaks in */
 .btn-gold {
   background: var(--accent); border: none; border-radius: 6px;
@@ -1944,3 +1970,10 @@ body.night #paper.script #chapters { box-shadow: 0 4px 30px rgba(0,0,0,0.7); }
 #nav-pane.script .nav-item.sp-scene .n-row { justify-content: flex-start; gap: 8px; }
 #nav-pane.script .nav-item.sp-scene .n-words { margin-left: auto; }
 body.light #nav-pane.script .nav-item.sp-scene .n-num { color: #8f8a80; }
+
+/* a script's title, set bold, underlined or italic as a whole (⌘B ⌘U ⌘I) */
+#paper.script #tp-title.tp-b { font-weight: bold; }
+#paper.script #tp-title.tp-u { text-decoration: underline; }
+#paper.script #tp-title.tp-i { font-style: italic; }
+/* a loose card that holds writing set aside from the manuscript: how many words */
+.ob-held { margin-top: 6px; font-size: 11px; letter-spacing: 0.04em; color: var(--muted); }

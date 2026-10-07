@@ -259,6 +259,45 @@
       await writeJSONFile(p(id, 'stickies.json'), []);
       return book;
     },
+    // a copy of a book: every file in its folder (chapters, notes, covers)
+    // read and written into a new folder, then book.json under the new id
+    // and title. Spare copies (.bak, .tmp) stay behind; a chapter iCloud
+    // hasn't brought down stops the copy rather than leave it out. A
+    // half-made copy is removed; the original is only read.
+    duplicateBook: async (bookId, title) => {
+      await ready;
+      await fetchCloud(bookId, 8000);
+      const meta = JSON.parse(await readText(p(bookId, 'book.json')));
+      const seed = title ? slugify(title) : '';
+      const id = 'book-' + (seed ? seed + '-' : '') + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+      const files = [];
+      const walk = async (rel) => {
+        const ls = await FS().readdir(at(p(bookId, rel).replace(/\/$/, '')));
+        for (const f of ls.files || []) {
+          const name = (f && f.name) || f;
+          const sub = rel ? rel + '/' + name : name;
+          if (/\.icloud$/.test(name)) throw new Error('Some of this book is still downloading from iCloud. Try again in a moment');
+          if (f && f.type === 'directory') await walk(sub);
+          else if (!/\.(tmp|bak)$/.test(name) && sub !== 'book.json') files.push(sub);
+        }
+      };
+      try {
+        await walk('');
+        await ensureDir(p(id, 'chapters'));
+        for (const f of files) {
+          const r = await FS().readFile(at(p(bookId, f))); // base64: covers are pictures
+          await FS().writeFile({ ...at(p(id, f)), data: r.data, recursive: true });
+        }
+        const now = new Date().toISOString();
+        const copy = { ...meta, id, title: title || meta.title, created: now, modified: now };
+        delete copy.uuid;
+        await writeJSONFile(p(id, 'book.json'), copy);
+        return copy;
+      } catch (err) {
+        try { await FS().rmdir({ ...at(id), recursive: true }); } catch { /* nothing made */ }
+        throw err;
+      }
+    },
     // the folder moves to "Deleted Books" inside the library, where it can
     // be found and moved back (Files on iOS, any file manager on Android);
     // nothing is erased
@@ -348,12 +387,28 @@
     // Export: the page builds the file (txt/md/html as text, docx/epub as
     // zip entries); it is written to the app's cache and handed to the
     // system share sheet — AirDrop, Files, Mail, whatever the writer picks.
-    exportSave: async ({ format, defaultName, content, zipEntries }) => {
+    exportSave: async ({ format, defaultName, content, zipEntries, print }) => {
       try {
         const Share = window.Capacitor.Plugins.Share;
         if (!Share) throw new Error('Sharing is not available in this build');
-        if (format === 'pdf') { if (typeof toast === 'function') toast('PDF export happens on the desktop — html, docx and epub work here'); return null; }
         const name = (defaultName || 'book') + '.' + format;
+        // A PDF is laid out by the phone's own printing (NeoPdf, in the
+        // native projects): Android opens its print screen, where Save as
+        // PDF is one of the printers; iOS makes the file and hands it to the
+        // share sheet. A book gets the desktop's inch of margin; a script
+        // lays out its own pages, on US letter as scripts always are.
+        if (format === 'pdf') {
+          let pdf = null;
+          try { pdf = window.Capacitor.registerPlugin('NeoPdf'); } catch { /* older shell */ }
+          if (!pdf) throw new Error('This version of Pocket can’t make PDFs yet');
+          const screenplay = print === 'screenplay';
+          const html = screenplay ? content : String(content).replace('</head>', '<style>@page { margin: 1in; }</style></head>');
+          const region = (navigator.language || '').split('-')[1] || '';
+          const letter = screenplay || ['US', 'CA', 'MX', 'PH', 'CL', 'CO', 'VE', 'GT', 'CR', 'PA', 'DO', 'PR', 'SV', 'HN', 'NI', 'BZ'].includes(region.toUpperCase());
+          const r = await pdf.print({ html, name: defaultName || 'book', letter, screenplay });
+          if (r && r.uri) await Share.share({ title: name, url: r.uri });
+          return r && r.uri ? name : null; // (Android's print screen speaks for itself)
+        }
         let data;
         let encoding = 'utf8';
         if (zipEntries) {
