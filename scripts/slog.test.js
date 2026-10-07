@@ -358,13 +358,71 @@ describe('labels and clocks', () => {
   test('a label from the window is cut down to what the format allows', () => {
     assert.deepEqual(slog.cleanLabel({ src: 'typed', dur: 900, ev: 4, cause: 'undo', extra: 'x' }), { src: 'typed', cause: 'undo', dur: 900, ev: 4 });
     assert.deepEqual(slog.cleanLabel({ src: 'baseline' }), { src: 'unlogged' });
-    assert.deepEqual(slog.cleanLabel({ src: 'move', from: { n: 3, op: 0, off: 2 } }), { src: 'move', from: { n: 3, op: 0, off: 2 } });
-    assert.deepEqual(slog.cleanLabel({ src: 'typed', from: { n: 3, op: 0, off: 2 }, dur: 1.5 }), { src: 'typed' });
+    // where moved text came from is the log's to work out, not the window's
+    assert.deepEqual(slog.cleanLabel({ src: 'move', from: { n: 3, op: 0, at: 2 } }), { src: 'move' });
+    assert.deepEqual(slog.cleanLabel({ src: 'move', book: 'book-b-1', cause: 'split' }), { src: 'move', cause: 'split', book: 'book-b-1' });
+    assert.deepEqual(slog.cleanLabel({ src: 'typed', book: 'book-b-1', dur: 1.5 }), { src: 'typed' });
+    assert.deepEqual(slog.cleanLabel({ src: 'move', book: '../x/y' }), { src: 'move' });
+    assert.deepEqual(slog.cleanLabel({ src: 'move', copy: true }), { src: 'move', copy: true });
+    assert.deepEqual(slog.cleanLabel({ src: 'paste', copy: true }), { src: 'paste' });
     assert.deepEqual(slog.cleanLabel(null), { src: 'unlogged' });
   });
   test('a clock jump is the wall clock against the steady one', () => {
     assert.equal(slog.clockJump(0, 0, 60000, 60000), 0);
     assert.equal(slog.clockJump(0, 0, 3660000, 60000), 3600000);
     assert.equal(slog.clockJump(0, 0, -100000, 60000), -160000);
+  });
+});
+
+describe('moved text', () => {
+  const LONG = 'twenty-some letters of plain prose here';
+  test('a JSON document is read as the characters its escapes stand for', () => {
+    const v = slog.viewOf('a\\"b\\n\\u00e9c', true);
+    assert.equal(v.text, 'a"b\né' + 'c');
+    assert.deepEqual(v.at, [0, 1, 3, 4, 6, 12, 13]);
+    assert.equal(slog.viewOf('a\\"b', false).text, 'a\\"b');
+  });
+  test('a match is cut into pieces where one side writes a character differently', () => {
+    const t = slog.viewOf('say \\"hi\\" now', true);
+    const s = slog.viewOf('say "hi" now', false);
+    assert.equal(t.text, s.text);
+    assert.deepEqual(slog.rawPieces(t, s, 0, t.text.length, 0), [
+      [0, 4, 0, 4], [4, 2, 4, 1], [6, 2, 5, 2], [8, 2, 7, 1], [10, 4, 8, 4]
+    ]);
+    // written the same way on both sides, an escape is just more of the run
+    assert.deepEqual(slog.rawPieces(t, t, 0, t.text.length, 0), [[0, 14, 0, 14]]);
+  });
+  test('deleted text is found again inside a longer insertion; a short phrase isn\'t', () => {
+    const g = new slog.Graveyard();
+    g.bury({ view: slog.viewOf('<p>' + LONG + '</p>', false), ref: { n: 4, op: 1 } });
+    g.bury({ view: slog.viewOf('<p>she said no</p>', false), ref: { n: 5, op: 0 } });
+    const pools = [{ src: g }];
+    assert.deepEqual(slog.movedPieces(0, 'Then ' + LONG + ', she said no.', false, pools),
+      [[0, 5, LONG.length, { n: 4, op: 1, at: 3 }]]);
+    // only markup in common isn't a move
+    assert.deepEqual(slog.movedPieces(0, '<p class="scene-break">***</p><p>Hi</p>', false, pools), []);
+    // told it was moved, the short one is found whole
+    assert.deepEqual(slog.movedPieces(0, 'she said no', false, pools, { moved: true }), [[0, 0, 11, { n: 5, op: 0, at: 3 }]]);
+  });
+  test('the newest deletion wins a tie, and a dropped one is forgotten', () => {
+    const g = new slog.Graveyard();
+    const old = g.add({ view: slog.viewOf(LONG, false), ref: { n: 1, op: 0 } });
+    g.bury({ view: slog.viewOf(LONG, false), ref: { n: 2, op: 0 } });
+    assert.equal(slog.movedPieces(0, LONG, false, [{ src: g }])[0][3].n, 2);
+    g.clear();
+    assert.ok(old.dead);
+    assert.deepEqual(slog.movedPieces(0, LONG, false, [{ src: g }]), []);
+  });
+  test('the graveyard lets the oldest go past its size', () => {
+    const g = new slog.Graveyard(100);
+    for (let n = 1; n <= 10; n++) g.bury({ view: slog.viewOf(LONG + n, false), ref: { n, op: 0 } });
+    assert.ok(g.size <= 100);
+    assert.deepEqual([...g.records()].map((r) => r.ref.n), [10, 9]);
+  });
+  test('the manuscript\'s writing leaves out tags, scene breaks and what NEO keeps out of exports', () => {
+    const html = '<p>Ab <i>cd</i></p><p class="scene-break">***</p><p>e<span class="ph-mark">[x]</span>f</p>';
+    const mask = slog.proseMask(html);
+    const kept = [...html].filter((_, i) => mask[i]).join('');
+    assert.equal(kept, 'Ab cdef');
   });
 });

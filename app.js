@@ -9903,25 +9903,31 @@ function slogDocs() {
 
 // Tell the log about every document that changed since it last heard, under
 // the label in force. A chapter that has left the book has lost its words
-// here (its file goes after book.json lets go of it).
+// here (its file goes after book.json lets go of it). What lost text goes
+// first, most first, so words moved from one document to another are
+// deleted before they turn up again, and the log can say where they were.
 function slogFlush() {
   const live = slogLive();
   clearTimeout(slogState.timer);
   slogState.timer = null;
   if (live) {
     const seen = slogState.seen;
+    const out = [];
     for (const [kind, name, value] of slogDocs()) {
       const key = slogKey(kind, name);
       const sig = slogSig(kind, value);
-      if (seen[key] === sig) continue;
-      seen[key] = sig;
-      slogSend(book.id, kind, name, value, slogLabel(kind, name));
+      if (seen[key] !== sig) out.push({ key, sig, kind, name, value });
     }
     const order = new Set(book.chapterOrder);
     for (const key of Object.keys(seen)) {
-      if (!key.startsWith('chapter:') || order.has(key.slice(8))) continue;
-      delete seen[key];
-      slogSend(book.id, 'chapter', key.slice(8), '', slogLabel('chapter'));
+      if (key.startsWith('chapter:') && !order.has(key.slice(8))) out.push({ key, sig: null, kind: 'chapter', name: key.slice(8), value: '' });
+    }
+    for (const d of out) d.loss = Math.min(0, (d.sig === null ? 0 : String(d.sig).length) - String(seen[d.key] || '').length);
+    out.sort((a, b) => a.loss - b.loss);
+    for (const d of out) {
+      if (d.sig === null) delete seen[d.key];
+      else seen[d.key] = d.sig;
+      slogSend(book.id, d.kind, d.name, d.value, slogLabel(d.kind, d.name));
     }
   }
   slogState.burst = null;
@@ -10034,21 +10040,26 @@ function slogStructural(label) {
 }
 
 // The clipboard. Text copied or cut in NEO and pasted back is a move (the
-// main process ties it to where it came from); anything else pasted is
-// from outside. A cut is an entry of its own, so the paste can point at it.
+// main process finds where it came from: still in the book, deleted by the
+// cut, or in another book open earlier); anything else pasted is from
+// outside. A cut is an entry of its own, so the paste can point at it.
 const slogInBook = (el) => !!(el && el.closest && el.closest('#editor-view'));
 for (const type of ['copy', 'cut']) {
   document.addEventListener(type, (e) => {
     if (!slogLive() || !slogInBook(e.target)) return;
     const text = slogClipText(window.getSelection());
-    slogState.clip = text ? { text, cut: type === 'cut' } : null;
+    slogState.clip = text ? { text, cut: type === 'cut', bookId: book.id } : null;
     if (type === 'cut') slogTask({ src: 'typed' });
   }, true);
 }
 document.addEventListener('paste', (e) => {
   if (!slogLive() || !slogInBook(e.target)) return;
   const text = slogClipText(e.clipboardData && e.clipboardData.getData('text/plain'));
-  slogTask({ src: slogState.clip && text && text === slogState.clip.text ? 'move' : 'paste' });
+  const clip = slogState.clip;
+  if (!clip || !text || text !== clip.text) { slogTask({ src: 'paste' }); return; }
+  const how = clip.cut ? { src: 'move' } : { src: 'move', copy: true };
+  if (clip.bookId !== book.id) how.book = clip.bookId;
+  slogTask(how);
 }, true);
 document.addEventListener('drop', (e) => {
   if (!slogLive() || !slogInBook(e.target) || !e.target.closest('[contenteditable="true"]')) return;

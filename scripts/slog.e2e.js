@@ -2,9 +2,10 @@
 // manuscript comes in through Import, then is written in the way a writer
 // does (typed, pasted from outside, copied and pasted back, split with a
 // triple Enter, a card moved, a passage sent to Darlings, undone, notes
-// typed), and the book is closed and NEO quit. The log is then checked the
-// way scripts/slog-check.js does: chains intact, replay equal to the disk,
-// every entry labeled. Run with `npm run test:slog` (under xvfb-run on a
+// typed, a paste deleted and brought back, a cut pasted elsewhere), and the
+// book is closed and NEO quit. The log is then checked the way
+// scripts/slog-check.js does: chains intact, replay equal to the disk,
+// every entry labeled, every move traced to where its words were. Run with `npm run test:slog` (under xvfb-run on a
 // machine without a display).
 
 'use strict';
@@ -94,7 +95,36 @@ async function selectWords(ch, p, from, to) {
   })()`);
   await tick(100);
 }
+// select `needle` where it sits in one text node of chapter `ch`
+async function selectText(ch, needle) {
+  const found = await js(`(() => {
+    const body = document.querySelectorAll('.chapter-body')[${ch}];
+    body.focus();
+    const walk = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+    for (let t; (t = walk.nextNode());) {
+      const i = t.data.indexOf(${JSON.stringify(needle)});
+      if (i < 0) continue;
+      const r = document.createRange();
+      r.setStart(t, i);
+      r.setEnd(t, i + ${needle.length});
+      getSelection().removeAllRanges();
+      getSelection().addRange(r);
+      return true;
+    }
+    return false;
+  })()`);
+  assert.ok(found, 'found "' + needle + '" to select');
+  await tick(100);
+}
+async function key(keyCode) {
+  wc.sendInputEvent({ type: 'keyDown', keyCode });
+  wc.sendInputEvent({ type: 'keyUp', keyCode });
+  await tick(200);
+}
 const pause = () => tick(1400); // a burst ends after a second's quiet
+const BORROWED = 'Borrowed words that are not the writer\'s own.';
+const GULLS = 'Gulls wheeled over the empty slips.';
+const HARBOR = 'The harbor was quiet before the storm.';
 
 async function main() {
   await app.whenReady();
@@ -129,7 +159,7 @@ async function main() {
     await tick(300);
     await pause();
     // copied in NEO and pasted back: a move
-    await selectWords(0, 1, 0, 'Gulls wheeled'.length);
+    await selectWords(0, 1, 0, GULLS.length);
     wc.copy();
     await tick(200);
     await caret(0, 4, true);
@@ -142,6 +172,29 @@ async function main() {
     await type(' Three times.', 30);
     await pause();
     wc.undo();
+    await tick(300);
+    await pause();
+    // pasted from outside, deleted, and brought back with ⌘Z: still a paste
+    clipboard.writeText(BORROWED);
+    await caret(0, 0, true);
+    await type(' ');
+    wc.paste();
+    await tick(300);
+    await pause();
+    await selectText(0, BORROWED);
+    await key('Backspace');
+    await pause();
+    wc.undo();
+    await tick(300);
+    await pause();
+    // cut in NEO and pasted somewhere else: a move from what the cut deleted
+    await selectText(0, HARBOR);
+    wc.cut();
+    await tick(300);
+    await pause();
+    await caret(0, 4, true);
+    await type(' ');
+    wc.paste();
     await tick(300);
     await pause();
     // a triple Enter at the start of a paragraph: a new chapter from there
@@ -207,11 +260,31 @@ async function main() {
   try {
     const res = checkBook(bookDir);
     console.log(report(bookDir, res));
+    const dev = res.devices[res.devices.length - 1];
+    // where the words of `needle` came from, wherever in the book it ended up
+    const originsOf = (needle) => {
+      for (const d of Object.values(dev.traced)) {
+        const at = d.text === null ? -1 : d.text.indexOf(needle);
+        if (at >= 0) return slog.originsAt(d, at, needle.length).map(([, o]) => o);
+      }
+      return null;
+    };
     const logDir = path.join(bookDir, slog.LOG_DIR);
     const entries = fs.readdirSync(logDir).filter(slog.isChunkName).sort()
       .flatMap((n) => slog.parseChunk(fs.readFileSync(path.join(logDir, n), 'utf8')).entries);
     const edits = entries.filter((e) => e.kind === 'edit' || e.kind === 'base');
-    for (const e of edits) console.log(`  ${e.kind} ${e.doc} ${e.src}${e.cause ? '/' + e.cause : ''}${e.ev ? ' ev ' + e.ev : ''}  ${JSON.stringify(e.x ? e.x.ins.map((s) => s.slice(0, 50)) : e.ops)}`);
+    for (const e of edits) console.log(`  ${e.n} ${e.kind} ${e.doc} ${e.src}${e.cause ? '/' + e.cause : ''}${e.ev ? ' ev ' + e.ev : ''}${e.from ? ' from ' + JSON.stringify(e.from.map((p) => p[3].n || p[3].doc || 'log')) : ''}  ${JSON.stringify(e.x ? e.x.ins.map((s) => s.slice(0, 50)) : e.ops)}`);
+    // the stretches of text whose move wasn't traced, to say which failed
+    const untraced = () => Object.entries(dev.traced).flatMap(([doc, d]) => {
+      let at = 0;
+      const out = [];
+      for (const [len, o] of d.runs) {
+        if (o === 'move') out.push(doc + ': ' + JSON.stringify(d.text.slice(at, at + len)));
+        at += len;
+      }
+      return out;
+    }).join('\n');
+    const moves = (cause) => edits.filter((e) => e.src === 'move' && e.cause === cause && e.x);
     const checks = [
       ['the log is intact and ends in what\'s on disk', () => assert.equal(res.ok, true)],
       ['nothing is unlogged (but what changed while the log was off)', () => assert.deepEqual(edits.filter((e) => e.src === 'unlogged' && e.cause !== 'off').map((e) => e.doc), [])],
@@ -223,7 +296,15 @@ async function main() {
       ['the book came in as an import', () => assert.ok(edits.some((e) => e.kind === 'base' && e.src === 'import' && e.file))],
       ['typing is typed, in bursts', () => assert.ok(edits.some((e) => e.src === 'typed' && e.ev > 3 && e.x && e.x.ins.join('').includes('The wind rose.')))],
       ['a paste from outside is a paste', () => assert.ok(edits.some((e) => e.src === 'paste' && e.x.ins.join('').includes('somewhere else')))],
-      ['NEO\'s own words pasted back are a move', () => assert.ok(edits.some((e) => e.src === 'move' && !e.cause && e.x.ins.join('').includes('Gulls wheeled')))],
+      ['NEO\'s own words pasted back are a move from where they still are', () => assert.ok(edits.some((e) => e.src === 'move' && !e.cause && e.x.ins.join('').includes(GULLS) && e.from && e.from.some((p) => p[3].doc)))],
+      ['a cut pasted elsewhere is a move from what the cut deleted', () => assert.ok(edits.some((e) => e.src === 'move' && !e.cause && e.x.ins.join('').includes(HARBOR) && e.from && e.from.some((p) => p[3].n)))],
+      ['pasted, deleted and undone is still pasted', () => assert.deepEqual(originsOf(BORROWED), ['paste'])],
+      ['…and the undo says where the words were', () => assert.ok(edits.some((e) => e.cause === 'undo' && e.x && e.x.ins.join('').includes(BORROWED) && e.from))],
+      ['the split, the card move and Darlings say where their words were', () => {
+        for (const cause of ['split', 'outline', 'darling']) assert.ok(moves(cause).length && moves(cause).some((e) => e.from), cause);
+      }],
+      ['nothing moved in the manuscript is untraced', () => assert.equal((dev.made || {}).move || 0, 0, untraced())],
+      ['the manuscript\'s words came from import, typing, pasting and another device', () => assert.deepEqual(Object.keys(dev.made).sort(), ['arrived', 'import', 'paste', 'typed', 'while off'])],
       ['an undo is labeled', () => assert.ok(edits.some((e) => e.cause === 'undo'))],
       ['the split is labeled', () => assert.ok(edits.some((e) => e.src === 'move' && e.cause === 'split'))],
       ['the card move is labeled', () => assert.ok(edits.some((e) => e.src === 'move' && e.cause === 'outline'))],

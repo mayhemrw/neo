@@ -94,7 +94,7 @@ Ops apply in order, and each `at` refers to the text as it stands after the ops 
 | `typed` | Written in NEO |
 | `paste` | Pasted from outside NEO (size and time only) |
 | `drop` | Dragged in from outside NEO |
-| `move` | From elsewhere in NEO; `from` says where |
+| `move` | Moved or copied from elsewhere in NEO; `from` says where, when the log could tell |
 | `import` | Read in from a file. On a `base`, `file` gives that file's `mtime` (ms) and `sha256` (hex of its bytes); never its name |
 | `arrived` | Written on another device and found on disk |
 | `baseline` | In the book before the log began |
@@ -104,11 +104,19 @@ An edit that only deletes uses `src` for how the change was made: `typed` for th
 
 `cause` optionally names what in NEO made the change (`undo`, `redo`, `replace`, `outline`, `split`, `join`, `spell`, `darling`, `placeholder`, `off`).
 
-`from`, for `move`, says where the text was when the log knows (a `move` without it is text from elsewhere in the same NEO, place not recorded). It's one of:
+### Where moved text came from
 
-- `{ "n": <entry>, "op": <index>, "off": <offset> }`: text deleted by op `op` of entry `n` in this chain, starting `off` units into what it deleted. The moved text keeps the origin it had there.
-- `{ "doc": <document>, "at": <offset> }`: copied from text still in that document, at that offset when this entry was made.
-- `{ "log": <log id> }`: from another NEO book.
+`from`, on any `edit`, says which stretches of its inserted text were already in the book, so they keep the origin they had: text deleted and brought back (an undo, a cut pasted back, a passage sent to Darlings and restored), carried from one document to another (a chapter split, a card moved), or copied. It's a list of pieces, each `[op, at, len, source]`: units `at` to `at + len` of the string inserted by op `op` of this entry came from `source`, one of:
+
+- `{ "n": <entry>, "op": <index>, "at": <offset> }`: text deleted by op `op` of entry `n` in this chain, starting `at` units into what that op deleted. The entry can be this one, for an op at or before the piece's own (an op's deletion happens before its insertion).
+- `{ "doc": <document>, "at": <offset> }`: text in that document as it stood just before this entry, at that offset (a copy, or text whose deletion is logged after this entry).
+- `{ "log": <log id> }`: text from another NEO book. Where in it isn't recorded.
+
+The first two carry `"len": <units>` when the source's length differs from `len`. That happens only for a piece that's one character written two ways, such as `\"` in a JSON document and `"` in a chapter: the piece's units then all take the origin of the source's first unit. Otherwise the piece maps unit for unit.
+
+Pieces are in order of `op`, then `at`, and don't overlap. Units no piece covers take the entry's `src`; in a `move` entry, that's text moved within NEO whose place wasn't recorded.
+
+NEO records a piece for an exact match of at least 20 units of text outside tags, so a common phrase typed again isn't mistaken for a move. When the window says text was moved (a paste of NEO's own clipboard, an undo or redo, one of NEO's tools), a shorter insertion found whole counts too, and so does one of the last few deletions found whole inside it. NEO keeps the deleted text it matches against for the session only; a checker keeps whatever a `from` points at.
 
 `keys`, for edits to `book`, lists which top-level fields changed (such as `["author"]`), so a change of author name shows without the name.
 
@@ -147,5 +155,10 @@ For each device:
 3. Walk the entries in order. `n` must rise by exactly 1, and each `prev` must equal the hash of the entry before it.
 4. With the key and words present, each `c` must match, each inserted string must have its recorded length, and each `markup` list must match the tags in its string.
 5. Replay the ops from empty documents. Every op must fit the text it applies to. With words, this rebuilds every document exactly; without them, it still checks every length.
+6. Follow every `from`: each piece must point at text that exists (a deletion earlier in the chain, or at or before its own op; a document as it stood before the entry) and fit inside it. With words, the two stretches must be the same text, or one character written two ways (which takes the origin of the source's first unit, as above).
 
 The replayed documents of a device are the book as that device last saw it. A `close` entry's `ms` can be compared with a manuscript's hash.
+
+### Origins
+
+Replaying while carrying each unit's origin gives, for every unit of every document, where it first came from: the `src` of the entry that inserted it, unless a `from` piece covered it, in which case the origin of the unit it came from. A `base` gives its whole text its `src`; `unlogged` with `cause: "off"` is text changed while the log was off. Text from another book is labeled as such. Counting the units of the manuscript's chapters by origin, leaving out tags, scene breaks and the elements the manuscript hash leaves out, shows how much was typed, pasted, imported, and so on.

@@ -245,6 +245,297 @@ function applyLengths(length, ops) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Where moved text came from                                         */
+/* ------------------------------------------------------------------ */
+
+// Text that turns up again keeps the origin it had. Deleted and brought
+// back (an undo, a cut pasted back, a passage sent to Darlings and
+// restored), carried from one chapter to another (a split, a card moved),
+// or copied from elsewhere in the book: its edit says where it was, in
+// `from`, and a checker carries the origin across. So pasting words from
+// outside, deleting them and undoing the delete still leaves them pasted.
+//
+// Matches are exact and hold at least MOVE_MIN units of text outside tags,
+// so a common phrase typed again isn't taken for a move. When the window
+// says words were moved (a paste of NEO's own clipboard, an undo, one of
+// NEO's tools), a shorter insertion found whole counts too, and so does a
+// recent deletion found whole inside it (a short passage sent to Darlings
+// arrives wrapped in the list's JSON). `from` is a list
+// of pieces, [op, at, len, source]: units at..at+len of op `op`'s inserted
+// string came from `source`, which is one of
+//   { n, op, at }   text deleted by op `op` of entry `n` in this chain
+//   { doc, at }     text in a document as it stood just before this entry
+//   { log }         text from another NEO book
+// with `len` in the source when its length differs (one character written
+// two ways, like `\"` in a JSON document and `"` in a chapter).
+
+const MOVE_MIN = 20;
+const GRAM = 12;           // the index's keys are this long…
+const STEP = 8;            // …and taken every STEP units, so any match of GRAM + STEP - 1 or more is found
+const HITS = 48;           // places looked at per key, newest first
+const GRAVE_MAX = 4 * 1024 * 1024; // units of deleted text kept to match against, per book…
+const GRAVE_COUNT = 20000;         // …in at most this many deletions
+const RECENT = 8;                  // deletions looked for whole in a move, however short…
+const RECENT_MIN = 4;              // …down to this many units of text
+const isJsonDoc = (doc) => doc === 'book' || doc === 'darlings' || doc === 'stickies';
+const ESCAPES = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' };
+
+// A string as the characters it stands for: a JSON document's escapes
+// decoded, with where each character starts in the raw string (`at`, or
+// null when they're the same)
+function viewOf(raw, json) {
+  if (!json || raw.indexOf('\\') < 0) return { raw, text: raw, at: null };
+  const chars = [];
+  const at = [];
+  let i = 0;
+  while (i < raw.length) {
+    at.push(i);
+    if (raw.charCodeAt(i) === 92 && i + 1 < raw.length) {
+      const c = raw[i + 1];
+      const hex = raw.slice(i + 2, i + 6);
+      if (c === 'u' && /^[0-9a-fA-F]{4}$/.test(hex)) { chars.push(String.fromCharCode(parseInt(hex, 16))); i += 6; continue; }
+      if (Object.hasOwn(ESCAPES, c)) { chars.push(ESCAPES[c]); i += 2; continue; }
+    }
+    chars.push(raw[i]);
+    i++;
+  }
+  at.push(raw.length);
+  return { raw, text: chars.join(''), at };
+}
+const rawAt = (v, k) => (v.at ? v.at[k] : k);
+// one character, however it's written
+const sameChar = (a, b) => a === b || viewOf(a, true).text === viewOf(b, true).text;
+
+// How many units before each position are outside tags
+function textBefore(s) {
+  const out = new Uint32Array(s.length + 1);
+  let inTag = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 60) inTag = true;
+    out[i + 1] = out[i] + (inTag ? 0 : 1);
+    if (c === 62) inTag = false;
+  }
+  return out;
+}
+
+// Texts to find moved words in, indexed by GRAM-long keys every STEP units.
+// A record is { view, ref }; a dropped one stays in the index, skipped,
+// until the dead outweigh the living and it's rebuilt.
+class Sources {
+  constructor() {
+    this.index = new Map();
+    this.recs = new Set();
+    this.size = 0;
+    this.dead = 0;
+  }
+  add(rec) {
+    rec.dead = false;
+    this.recs.add(rec);
+    const t = rec.view.text;
+    for (let p = 0; p + GRAM <= t.length; p += STEP) {
+      const g = t.slice(p, p + GRAM);
+      const list = this.index.get(g);
+      if (list) list.push(rec, p);
+      else this.index.set(g, [rec, p]);
+    }
+    this.size += t.length;
+    return rec;
+  }
+  drop(rec) {
+    if (!rec || !this.recs.delete(rec)) return;
+    rec.dead = true;
+    this.size -= rec.view.text.length;
+    this.dead += rec.view.text.length;
+    if (this.dead > Math.max(this.size, 65536)) this.rebuild();
+  }
+  rebuild() {
+    const recs = [...this.recs];
+    this.index = new Map();
+    this.recs = new Set();
+    this.size = 0;
+    this.dead = 0;
+    for (const r of recs) this.add(r);
+  }
+  clear() {
+    for (const r of this.recs) r.dead = true;
+    this.index = new Map();
+    this.recs = new Set();
+    this.size = 0;
+    this.dead = 0;
+  }
+}
+
+// Text deleted this session, oldest let go first past GRAVE_MAX
+class Graveyard extends Sources {
+  constructor(max = GRAVE_MAX) {
+    super();
+    this.max = max;
+    this.queue = [];
+  }
+  bury(rec) {
+    if (!rec.view.text.length) return;
+    this.add(rec);
+    this.queue.push(rec);
+    while ((this.size > this.max || this.queue.length > GRAVE_COUNT) && this.queue.length > 1) this.drop(this.queue.shift());
+  }
+  *records() {
+    for (let i = this.queue.length - 1; i >= 0; i--) if (!this.queue[i].dead) yield this.queue[i];
+  }
+  clear() {
+    super.clear();
+    this.queue = [];
+  }
+}
+
+// Every document of a book as it stands, kept indexed (refreshed only when
+// asked, and only the documents that changed)
+class LiveDocs extends Sources {
+  constructor() {
+    super();
+    this.byDoc = new Map();
+  }
+  refresh(docs) {
+    for (const [doc, rec] of this.byDoc) {
+      if (docs[doc] === rec.view.raw) continue;
+      this.drop(rec);
+      this.byDoc.delete(doc);
+    }
+    for (const [doc, text] of Object.entries(docs)) {
+      if (this.byDoc.has(doc) || typeof text !== 'string' || !text) continue;
+      this.byDoc.set(doc, this.add({ view: viewOf(text, isJsonDoc(doc)), ref: { doc } }));
+    }
+  }
+  clear() {
+    super.clear();
+    this.byDoc = new Map();
+  }
+  records() {
+    return this.byDoc.values();
+  }
+}
+
+// A short insertion the window says was moved, found whole: the newest
+// deletion that holds it, or else a document that does
+function findWhole(view, pools) {
+  const t = view.text;
+  const vis = textBefore(t);
+  if (!vis[t.length]) return [];
+  for (const pool of pools) {
+    for (const rec of pool.src.records()) {
+      const at = rec.view.text.indexOf(t);
+      if (at >= 0) return [{ at: 0, len: t.length, rec, src: at, pool }];
+    }
+  }
+  return [];
+}
+
+// The stretches of an inserted string (a view) found in the sources, left
+// to right: [{ at, len, rec, src, pool }] in the view's characters. Pools
+// are looked in by priority; a longer match wins.
+function findMoved(view, pools) {
+  const t = view.text;
+  const vis = textBefore(t);
+  const out = [];
+  let floor = 0;
+  let p = 0;
+  while (p + GRAM <= t.length) {
+    const g = t.slice(p, p + GRAM);
+    let best = null;
+    for (let k = 0; k < pools.length; k++) {
+      const list = pools[k].src.index.get(g);
+      if (!list) continue;
+      let looked = 0;
+      for (let h = list.length - 2; h >= 0 && looked < HITS; h -= 2) {
+        const rec = list[h];
+        if (rec.dead) continue;
+        looked++;
+        const sp = list[h + 1];
+        const s = rec.view.text;
+        let b = 0;
+        while (p - b > floor && sp - b > 0 && t.charCodeAt(p - b - 1) === s.charCodeAt(sp - b - 1)) b++;
+        let f = GRAM;
+        while (p + f < t.length && sp + f < s.length && t.charCodeAt(p + f) === s.charCodeAt(sp + f)) f++;
+        if (!best || b + f > best.len) best = { at: p - b, len: b + f, rec, src: sp - b, pool: pools[k] };
+      }
+    }
+    if (best && vis[best.at + best.len] - vis[best.at] >= MOVE_MIN) {
+      out.push(best);
+      floor = p = best.at + best.len;
+    } else p++;
+  }
+  return out;
+}
+
+// A match in characters, as pieces of raw units: [at, len, srcAt, srcLen].
+// Stretches written the same way on both sides are one piece; a character
+// written two ways (an escape on one side only) is a piece of its own.
+function rawPieces(tv, sv, at, len, sAt) {
+  if (!tv.at && !sv.at) return [[at, len, sAt, len]];
+  const out = [];
+  let run = null;
+  for (let k = 0; k < len; k++) {
+    const t0 = rawAt(tv, at + k);
+    const t1 = rawAt(tv, at + k + 1);
+    const s0 = rawAt(sv, sAt + k);
+    const s1 = rawAt(sv, sAt + k + 1);
+    const same = t1 - t0 === s1 - s0 && tv.raw.slice(t0, t1) === sv.raw.slice(s0, s1);
+    if (same && run && run.same && run.p[0] + run.p[1] === t0 && run.p[2] + run.p[3] === s0) {
+      run.p[1] += t1 - t0;
+      run.p[3] += s1 - s0;
+      continue;
+    }
+    run = { same, p: [t0, t1 - t0, s0, s1 - s0] };
+    out.push(run.p);
+  }
+  return out;
+}
+
+// The last few deletions, each found whole where nothing else was
+function findRecent(view, found, pool) {
+  const t = view.text;
+  const out = found.slice();
+  const free = (a, b) => out.every((m) => b <= m.at || a >= m.at + m.len);
+  let k = 0;
+  for (const rec of pool.src.records()) {
+    if (k++ >= RECENT) break;
+    const s = rec.view.text;
+    const vis = textBefore(s);
+    if (vis[s.length] < RECENT_MIN) continue;
+    for (let i = t.indexOf(s); i >= 0; i = t.indexOf(s, i + 1)) {
+      if (free(i, i + s.length)) out.push({ at: i, len: s.length, rec, src: 0, pool });
+    }
+  }
+  return out.sort((a, b) => a.at - b.at);
+}
+
+// The `from` pieces for one op's inserted string, looking in `pools` in
+// order. `moved`: the window says these words were moved, so shorter ones
+// count (above); `recent`: the graveyard whose last deletions those are
+// (none for a copy, which deleted nothing).
+function movedPieces(op, ins, json, pools, { moved = false, recent = null } = {}) {
+  const tv = viewOf(ins, json);
+  const out = [];
+  let found = findMoved(tv, pools);
+  if (!found.length && moved && tv.text.length < MOVE_MIN * 4) found = findWhole(tv, pools);
+  if (moved && recent) found = findRecent(tv, found, recent);
+  for (const m of found) {
+    if (m.pool.as) {
+      // another book: where in it isn't recorded, only that it came from it
+      const a = rawAt(tv, m.at);
+      out.push([op, a, rawAt(tv, m.at + m.len) - a, { ...m.pool.as }]);
+      continue;
+    }
+    for (const [a, l, sa, sl] of rawPieces(tv, m.rec.view, m.at, m.len, m.src)) {
+      const source = { ...m.rec.ref, at: sa };
+      if (sl !== l) source.len = sl;
+      out.push([op, a, l, source]);
+    }
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Chain: numbering, linking and committing entries                   */
 /* ------------------------------------------------------------------ */
 
@@ -498,6 +789,205 @@ function replay(entries, { docs = {}, from = 0 } = {}) {
     }
   }
   return { docs: text, lengths: length, problems };
+}
+
+// Runs of units that share an origin: [[length, origin], …]. A run is
+// never changed in place, so a list can be copied by its array alone.
+function runsSplit(runs, pos) {
+  let acc = 0;
+  for (let i = 0; i < runs.length; i++) {
+    if (acc === pos) return i;
+    const [len, o] = runs[i];
+    if (pos < acc + len) {
+      runs.splice(i, 1, [pos - acc, o], [acc + len - pos, o]);
+      return i + 1;
+    }
+    acc += len;
+  }
+  if (acc === pos) return runs.length;
+  throw new Error('op out of range');
+}
+function runsCut(runs, at, len) {
+  const i = runsSplit(runs, at);
+  const j = runsSplit(runs, at + len);
+  return runs.splice(i, j - i);
+}
+function runsSlice(runs, at, len) {
+  const copy = runs.slice();
+  return runsCut(copy, at, len);
+}
+function runsInsert(runs, at, add) {
+  runs.splice(runsSplit(runs, at), 0, ...add);
+}
+function runsTidy(runs) {
+  let w = 0;
+  for (const r of runs) {
+    if (!r[0]) continue;
+    if (w && runs[w - 1][1] === r[1]) runs[w - 1] = [runs[w - 1][0] + r[0], r[1]];
+    else runs[w++] = r;
+  }
+  runs.length = w;
+  return runs;
+}
+
+// Where an entry's own words come from, when no `from` piece says otherwise
+function originOf(e) {
+  if (e.kind === 'edit' && e.src === 'unlogged' && e.cause === 'off') return 'while off';
+  return typeof e.src === 'string' ? e.src : 'unlogged';
+}
+
+// Replay one device's chain keeping, for every unit of every document,
+// where it first came from: typed, paste, drop, import, arrived, baseline,
+// unlogged, "while off", "other book", or "move" for text moved within NEO
+// whose place wasn't recorded. Each `from` is checked as it's used: that
+// it points at text that exists, and (with the words) that the text is
+// the same. Returns { docs: { id: { text, runs } }, problems }.
+function trace(entries) {
+  const wanted = new Set();
+  for (const e of entries) {
+    if (e.kind !== 'edit' || !Array.isArray(e.from)) continue;
+    for (const p of e.from) if (Array.isArray(p) && p[3] && Number.isSafeInteger(p[3].n)) wanted.add(p[3].n + ':' + p[3].op);
+  }
+  const docs = {};
+  const graves = new Map();
+  const problems = [];
+  const whole = (v) => Number.isSafeInteger(v) && v >= 0;
+  for (const e of entries) {
+    const where = { n: e.n, doc: e.doc };
+    try {
+      if (e.kind === 'base') {
+        if (docs[e.doc] && docs[e.doc].len) throw new Error('base over a document that already has text');
+        const len = e.ops.reduce((a, op) => a + op[2], 0);
+        const text = e.x && Array.isArray(e.x.ins) ? e.x.ins.join('') : null;
+        docs[e.doc] = { text, len, runs: len ? [[len, originOf(e)]] : [] };
+      } else if (e.kind === 'doc') {
+        if (e.act === 'new') docs[e.doc] = { text: '', len: 0, runs: [] };
+        else if (e.act === 'del') delete docs[e.doc];
+      } else if (e.kind === 'edit') {
+        const d = docs[e.doc];
+        if (!d) throw new Error('edit to a document the log never saw');
+        const words = e.x && Array.isArray(e.x.ins) ? e.x.ins : null;
+        const pieces = e.from === undefined ? [] : e.from;
+        if (!Array.isArray(pieces)) throw new Error('from isn\'t a list');
+        const before = pieces.some((p) => p && p[3] && p[3].doc === e.doc) ? { text: d.text, len: d.len, runs: d.runs.slice() } : null;
+        const own = originOf(e);
+        let last = [-1, 0];
+        e.ops.forEach((op, i) => {
+          const [at, del, len] = op;
+          if (!(whole(at) && whole(del) && whole(len) && at + del <= d.len)) throw new Error('op out of range');
+          const gone = runsCut(d.runs, at, del);
+          const key = e.n + ':' + i;
+          if (wanted.has(key)) graves.set(key, { text: d.text === null ? null : d.text.slice(at, at + del), len: del, runs: gone });
+          const put = words ? words[i] : null;
+          const add = len ? [[len, own]] : [];
+          for (const p of pieces) {
+            if (!Array.isArray(p) || p[0] !== i) continue;
+            const [, pa, pl, source] = p;
+            const bad = (problem) => problems.push({ ...where, piece: p, problem });
+            if (!(whole(pa) && Number.isSafeInteger(pl) && pl > 0 && pa + pl <= len)) { bad('from piece out of range'); continue; }
+            if (i < last[0] || (i === last[0] && pa < last[1])) { bad('from pieces overlap or are out of order'); continue; }
+            last = [i, pa + pl];
+            if (!source || typeof source !== 'object') { bad('from piece has no source'); continue; }
+            const sl = source.len === undefined ? pl : source.len;
+            let src = null;
+            if (typeof source.log === 'string') src = { text: null, runs: [[pl, 'other book']], at: 0, len: pl, sl: pl };
+            else if (Number.isSafeInteger(source.n)) {
+              if (source.n > e.n || (source.n === e.n && !(source.op <= i))) { bad('from points ahead of itself'); continue; }
+              const g = graves.get(source.n + ':' + source.op);
+              if (!g) { bad('from points at nothing deleted'); continue; }
+              src = g;
+            } else if (typeof source.doc === 'string') {
+              src = source.doc === e.doc ? before : docs[source.doc];
+              if (!src) { bad('from points at a document that isn\'t there'); continue; }
+            } else { bad('from piece has no source'); continue; }
+            const sa = source.log === undefined ? source.at : 0;
+            if (!(whole(sa) && Number.isSafeInteger(sl) && sl > 0 && sa + sl <= src.len)) { bad('from points past the text it names'); continue; }
+            if (put !== null && src.text !== null && src.text !== undefined) {
+              const mine = put.slice(pa, pa + pl);
+              const theirs = src.text.slice(sa, sa + sl);
+              if (mine !== theirs && !sameChar(mine, theirs)) { bad('moved text doesn\'t match where it came from'); continue; }
+            }
+            const runs = runsSlice(src.runs, sa, sl);
+            const take = sl === pl && (put === null || src.text == null || put.slice(pa, pa + pl) === src.text.slice(sa, sa + sl))
+              ? runs
+              : [[pl, runs.length ? runs[0][1] : own]];
+            runsCut(add, pa, pl);
+            runsInsert(add, pa, take);
+          }
+          runsInsert(d.runs, at, add);
+          if (d.text !== null) d.text = put !== null ? d.text.slice(0, at) + put + d.text.slice(at + del) : (len ? null : d.text.slice(0, at) + d.text.slice(at + del));
+          d.len += len - del;
+        });
+        runsTidy(d.runs);
+      }
+    } catch (err) {
+      problems.push({ ...where, problem: err.message });
+    }
+  }
+  return { docs, problems };
+}
+
+// Units of a chapter's text that are the writing: outside tags, and outside
+// what the manuscript hash leaves out (scene breaks, unwritten outline
+// sections, placeholder flags, Darlings anchors). 1 for each such unit.
+function proseMask(html) {
+  const mask = new Uint8Array(html.length).fill(1);
+  const stack = [];
+  let skip = 0;
+  let last = 0;
+  const TAG = /<(\/?)([a-zA-Z][\w-]*)([^>]*)>/g;
+  let m;
+  while ((m = TAG.exec(html))) {
+    if (skip) mask.fill(0, last, m.index);
+    mask.fill(0, m.index, TAG.lastIndex);
+    last = TAG.lastIndex;
+    const name = m[2].toLowerCase();
+    if (!m[1]) {
+      if (VOID_TAGS.has(name) || /\/\s*$/.test(m[3])) continue;
+      const cls = classesOf(m[3]);
+      const out = cls.has('scene-break') || LEFT_OUT.some((c) => cls.has(c));
+      stack.push({ name, out });
+      if (out) skip++;
+      continue;
+    }
+    let i = stack.length - 1;
+    while (i >= 0 && stack[i].name !== name) i--;
+    if (i < 0) continue;
+    while (stack.length > i) if (stack.pop().out) skip--;
+  }
+  if (skip) mask.fill(0, last);
+  return mask;
+}
+
+// What the manuscript is made of: units of its writing (proseMask) in each
+// chapter, in the book's order, counted by where they came from. Needs the
+// words; returns null without them.
+function composition(docs) {
+  const book = docs.book && docs.book.text;
+  let meta = null;
+  try { meta = JSON.parse(book); } catch { /* no book document */ }
+  const order = meta && Array.isArray(meta.chapterOrder) ? meta.chapterOrder : Object.keys(docs).filter((d) => docChapter(d) !== null).map(docChapter).sort();
+  const kinds = (meta && meta.chapterKinds) || {};
+  const out = {};
+  for (const id of order) {
+    const d = docs[chapterDoc(id)];
+    if (!d || kinds[id] === 'contents') continue;
+    if (d.text === null) return null;
+    const mask = proseMask(d.text);
+    let pos = 0;
+    for (const [len, origin] of d.runs) {
+      let n = 0;
+      for (let k = pos; k < pos + len; k++) n += mask[k];
+      if (n) out[origin] = (out[origin] || 0) + n;
+      pos += len;
+    }
+  }
+  return out;
+}
+
+// The origins of units at..at+len of a traced document, as [[len, origin], …]
+function originsAt(doc, at, len) {
+  return runsTidy(runsSlice(doc.runs, at, len));
 }
 
 /* ------------------------------------------------------------------ */
@@ -796,24 +1286,18 @@ const WINDOW_SRC = new Set(['typed', 'paste', 'drop', 'move', 'import', 'arrived
 const CAUSES = new Set(['undo', 'redo', 'replace', 'outline', 'split', 'join', 'spell', 'darling', 'placeholder']);
 
 const wholeAtLeast = (v, min) => Number.isSafeInteger(v) && v >= min;
-function cleanFrom(f) {
-  if (!f || typeof f !== 'object') return undefined;
-  if (wholeAtLeast(f.n, 1) && wholeAtLeast(f.op, 0) && wholeAtLeast(f.off, 0)) return { n: f.n, op: f.op, off: f.off };
-  if (typeof f.doc === 'string' && f.doc && f.doc.length <= 200 && wholeAtLeast(f.at, 0)) return { doc: f.doc, at: f.at };
-  if (typeof f.log === 'string' && /^[0-9a-f]{16}$/.test(f.log)) return { log: f.log };
-  return undefined;
-}
-// A label from the window, cut down to what the format allows
+// A label from the window, cut down to what the format allows. Where moved
+// text came from is the log's to work out; the window can only say that it
+// came from another book it had open (`book`) or was copied rather than cut
+// (`copy`), neither of which goes in the log.
 function cleanLabel(label) {
   const l = label && typeof label === 'object' ? label : {};
   const how = { src: WINDOW_SRC.has(l.src) ? l.src : 'unlogged' };
   if (CAUSES.has(l.cause)) how.cause = l.cause;
   if (wholeAtLeast(l.dur, 0)) how.dur = l.dur;
   if (wholeAtLeast(l.ev, 0)) how.ev = l.ev;
-  if (how.src === 'move') {
-    const from = cleanFrom(l.from);
-    if (from) how.from = from;
-  }
+  if (how.src === 'move' && typeof l.book === 'string' && /^[\w.-]{1,200}$/.test(l.book)) how.book = l.book;
+  if (how.src === 'move' && l.copy === true) how.copy = true;
   return how;
 }
 
@@ -1041,7 +1525,8 @@ class Recorder {
         bookId, dir, on: !(meta && meta.scribesLog === false),
         info: null, key: null, unreadable: false, chain: null, docs: {}, disk: {},
         chunk: null, last: null, count: 0, failed: 0, idle: null, closing: null, saved: 0,
-        imported: null, importUntil: 0, observed: {}
+        imported: null, importUntil: 0, observed: {},
+        graves: new Graveyard(), live: new LiveDocs()
       };
       this.sessions.set(bookId, s);
       const raw = readQuiet(path.join(dir, LOG_DIR, LOG_INFO));
@@ -1082,6 +1567,8 @@ class Recorder {
     s.saved = st.n;
     s.docs = { ...st.docs };
     s.disk = { ...st.docs };
+    s.graves.clear();
+    s.live.clear();
     if (s.on) this._reconcile(s, mode, file);
   }
 
@@ -1133,15 +1620,19 @@ class Recorder {
     for (const [doc, t] of Object.entries(docs)) s.disk[doc] = t;
   }
 
-  // Bring the log's copy to `target`, entry by entry
+  // Bring the log's copy to `target`, entry by entry: documents gone first,
+  // then those that shrank (most first), then the rest in order, so text
+  // that moved is deleted before it turns up somewhere else and can be
+  // traced to where it was
   _sync(s, target, mode, held = new Set(), file = null) {
-    for (const [doc, text] of Object.entries(target)) {
-      if (s.docs[doc] !== text) this._put(s, doc, text, this._how(mode, doc, s.docs[doc] === undefined, file));
-    }
     for (const doc of Object.keys(s.docs)) {
       if (doc in target || held.has(doc) || docChapter(doc) === null) continue;
       this._remove(s, doc, this._how(mode, doc, false, file));
     }
+    const grow = (doc) => Math.min(0, target[doc].length - (s.docs[doc] || '').length);
+    const changed = Object.keys(target).filter((doc) => s.docs[doc] !== target[doc]);
+    changed.sort((a, b) => grow(a) - grow(b));
+    for (const doc of changed) this._put(s, doc, target[doc], this._how(mode, doc, s.docs[doc] === undefined, file));
   }
 
   _how(mode, doc, isNew, file) {
@@ -1174,11 +1665,12 @@ class Recorder {
     const before = s.docs[doc];
     const { ops, ins } = diff(before, text);
     const fields = { doc, src: how.src || 'unlogged', ops: recordOps(ops, ins) };
-    for (const k of ['cause', 'from', 'dur', 'ev']) if (how[k] !== undefined) fields[k] = how[k];
+    for (const k of ['cause', 'dur', 'ev']) if (how[k] !== undefined) fields[k] = how[k];
     // a move's other half, the text leaving: nothing came from anywhere
-    if (fields.src === 'move' && !ins.some((t) => t)) {
-      fields.src = 'typed';
-      delete fields.from;
+    if (fields.src === 'move' && !ins.some((t) => t)) fields.src = 'typed';
+    if (this._ready(s)) {
+      const from = this._moved(s, doc, before, ops, ins, how, s.chain.n + 1);
+      if (from.length) fields.from = from;
     }
     if (doc === 'book') {
       const keys = bookKeys(before, text);
@@ -1196,6 +1688,7 @@ class Recorder {
     if (old) {
       const fields = { doc, src: how.src || 'unlogged', ops: [[0, old.length, 0]] };
       if (how.cause) fields.cause = how.cause;
+      if (this._ready(s)) this._moved(s, doc, old, fields.ops, [''], how, s.chain.n + 1);
       this._append(s, 'edit', fields);
     }
     this._append(s, 'doc', { doc, act: 'del' });
@@ -1204,18 +1697,61 @@ class Recorder {
     delete s.observed[doc];
   }
 
+  // Where an edit's inserted words were before, as `from` pieces, for the
+  // edit about to be entry `n`. Each op's deleted text joins the graveyard
+  // as it goes (an op's own insertion can come from its deletion: a
+  // stretch rewritten with most of it unchanged). Words the window says
+  // were moved within NEO are also looked for in the book as it stands, and
+  // in another book they were copied from.
+  _moved(s, doc, before, ops, ins, how, n) {
+    const json = isJsonDoc(doc);
+    const graves = { src: s.graves };
+    const pools = [graves];
+    const moved = how.src === 'move';
+    if (moved && ins.some((t) => t.length)) {
+      s.live.refresh(s.docs);
+      // a copy is looked for in the book first; anything else in what was deleted
+      if (how.copy) pools.unshift({ src: s.live });
+      else pools.push({ src: s.live });
+      const o = how.book && how.book !== s.bookId ? this.sessions.get(how.book) : null;
+      if (o && o.info) {
+        o.live.refresh(o.docs);
+        pools.push({ src: o.graves, as: { log: o.info.logId } }, { src: o.live, as: { log: o.info.logId } });
+      }
+    }
+    const from = [];
+    let cur = before;
+    ops.forEach(([at, del, len], i) => {
+      if (del) s.graves.bury({ view: viewOf(cur.slice(at, at + del), json), ref: { n, op: i } });
+      if (len) from.push(...movedPieces(i, ins[i], json, pools, { moved, recent: how.copy ? null : graves }));
+      cur = cur.slice(0, at) + ins[i] + cur.slice(at + del);
+    });
+    return from;
+  }
+
   /* ---- chunks ---- */
 
-  _append(s, kind, fields, ins = null) {
-    if (!s.info) return null;
+  // Ready to write: a chunk open (the chain's next number is the entry's)
+  _ready(s) {
+    if (!s.info) return false;
     if (s.failed) {
       // the disk refused a write: the chain on disk is behind the one in
       // memory. A little later, pick it up from the disk and log what
       // happened meanwhile as unlogged.
-      if (this.now() - s.failed < RETRY_MS || !this._recover(s)) return null;
+      if (this.now() - s.failed < RETRY_MS || !this._recover(s)) return false;
     }
     try {
       if (!s.chunk) this._open(s);
+      return true;
+    } catch (err) {
+      this._failed(s, s.chunk, err);
+      return false;
+    }
+  }
+
+  _append(s, kind, fields, ins = null) {
+    if (!this._ready(s)) return null;
+    try {
       return this._write(s, kind, fields, ins);
     } catch (err) {
       this._failed(s, s.chunk, err);
@@ -1260,11 +1796,14 @@ class Recorder {
     clearTimeout(s.idle);
     this.onError('write', err);
     s.failed = this.now();
+    // entry numbers past the disk's will be given out again
+    s.graves.clear();
   }
 
   _recover(s) {
     s.failed = 0;
     s.chunk = null;
+    s.graves.clear();
     let st;
     try { st = this._chainState(s, false); } catch (err) {
       this.onError('recover', err);
@@ -1321,5 +1860,7 @@ module.exports = {
   orderChunks, verifyChain, replay,
   AUX_DOCS, JSON_DOCS, chapterDoc, docChapter, docOf, bookText, jsonText, bookKeys,
   chapterLines, manuscriptText, readBookDocs, fileFacts, clockJump, cleanLabel,
+  MOVE_MIN, viewOf, Sources, Graveyard, LiveDocs, findMoved, rawPieces, movedPieces, proseMask,
+  trace, composition, originsAt,
   Recorder, IDLE_MS, MAX_CHUNK
 };

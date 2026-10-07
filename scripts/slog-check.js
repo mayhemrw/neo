@@ -8,7 +8,10 @@
 // replayed from empty, and compared with the documents on disk. The chain
 // written last should end in exactly what's on disk. Also counts entries by
 // where their text came from: "unlogged" should be rare ("while off" is
-// what changed while the log was switched off, and is expected).
+// what changed while the log was switched off, and is expected). Every
+// moved stretch's `from` is followed and checked, and the manuscript is
+// counted by where each letter first came from ("move" there is text moved
+// within NEO whose place wasn't recorded, which should be rare too).
 //
 // Exit code 0 when every chain is intact and the newest one matches the
 // disk, 1 otherwise.
@@ -44,6 +47,10 @@ function checkBook(dir) {
     const byName = new Map(chunks.map((c) => [c.name, c]));
     const entries = v.chunks.flatMap((n) => byName.get(n).entries);
     const r = slog.replay(entries);
+    const traced = slog.trace(entries);
+    const made = slog.composition(traced.docs);
+    let movedEntries = 0;
+    for (const e of entries) if (Array.isArray(e.from) && e.from.length) movedEntries++;
     const sources = {};
     const kinds = {};
     for (const e of entries) {
@@ -58,9 +65,9 @@ function checkBook(dir) {
       .filter((d) => docs[d] !== disk[d]).sort();
     const last = entries[entries.length - 1];
     out.devices.push({
-      dev, ok: v.ok, problems: [...v.problems, ...r.problems], notes: v.notes,
+      dev, ok: v.ok, problems: [...v.problems, ...r.problems, ...traced.problems], notes: v.notes,
       chunks: v.chunks.length, entries: entries.length, lastTs: last ? last.ts : 0,
-      kinds, sources, differ, docs
+      kinds, sources, differ, docs, traced: traced.docs, made, moves: movedEntries
     });
   }
   out.devices.sort((a, b) => a.lastTs - b.lastTs);
@@ -78,6 +85,12 @@ function report(dir, res) {
     lines.push(`device ${d.dev.slice(0, 8)}${newest ? ' (wrote last)' : ''}: ${d.chunks} chunk(s), ${d.entries} entries, ${d.ok && !d.problems.length ? 'intact' : 'DAMAGED'}`);
     lines.push('  kinds:   ' + Object.entries(d.kinds).map(([k, n]) => `${k} ${n}`).join(', '));
     lines.push('  sources: ' + (Object.entries(d.sources).map(([k, n]) => `${k} ${n}`).join(', ') || '(none)'));
+    lines.push(`  moves traced: ${d.moves} entr${d.moves === 1 ? 'y' : 'ies'}`);
+    if (d.made) {
+      const all = Object.values(d.made).reduce((a, n) => a + n, 0);
+      lines.push('  manuscript: ' + (Object.entries(d.made).sort((a, b) => b[1] - a[1])
+        .map(([k, n]) => `${k} ${n} (${Math.round(1000 * n / all) / 10}%)`).join(', ') || '(empty)'));
+    }
     for (const p of d.problems.slice(0, 20)) lines.push('  problem: ' + JSON.stringify(p));
     for (const n of d.notes) lines.push('  note: ' + JSON.stringify(n));
     lines.push(d.differ.length

@@ -187,10 +187,12 @@ describe('Recorder', { concurrency: 1 }, () => {
     const e = entries(env);
     const second = e.slice(e.findIndex((x, i) => i > 0 && x.kind === 'open'));
     assert.deepEqual(second.map((x) => [x.kind, x.doc || '', x.src || x.act || '']), [
-      ['open', '', ''], ['edit', 'book', 'arrived'], ['edit', 'ch-1', 'arrived'],
-      ['edit', 'ch-2', 'arrived'], ['doc', 'ch-2', 'del'], ['close', '', '']
+      // a document gone goes first, then one that shrank, so text that
+      // moved is deleted before it turns up elsewhere
+      ['open', '', ''], ['edit', 'ch-2', 'arrived'], ['doc', 'ch-2', 'del'],
+      ['edit', 'book', 'arrived'], ['edit', 'ch-1', 'arrived'], ['close', '', '']
     ]);
-    assert.deepEqual(second[1].keys, ['chapterOrder']);
+    assert.deepEqual(second[3].keys, ['chapterOrder']);
     const names = fs.readdirSync(path.join(env.dir, slog.LOG_DIR)).filter(slog.isChunkName).sort();
     assert.deepEqual([second[0].prevChunk, names.length], [names[0], 2]);
     assertChecks(env);
@@ -435,5 +437,186 @@ describe('Recorder', { concurrency: 1 }, () => {
     save(rec, env, 'ch-1', '<p>Hello?</p>');
     assert.deepEqual(fs.readdirSync(path.join(env.dir, slog.LOG_DIR)), [slog.LOG_INFO]);
     assert.ok(env.errors.some((x) => /log\.json/.test(x)));
+  });
+});
+
+// Moved text, followed: each test writes the way the window describes it,
+// then traces the log and checks where the words in the end came from.
+describe('Moves and the graveyard', { concurrency: 1 }, () => {
+  const PASTED = 'A sentence the writer found somewhere else entirely.';
+  const OWN = 'Words the writer typed here, slowly, one by one.';
+  // the newest chain, traced
+  function traced(env) {
+    const res = assertChecks(env);
+    return res.devices[res.devices.length - 1];
+  }
+  // where each stretch of `needle` in document `doc` came from
+  function origins(dev, doc, needle) {
+    const d = dev.traced[doc];
+    const at = d.text.indexOf(needle);
+    assert.ok(at >= 0, `"${needle}" is in ${doc}`);
+    return slog.originsAt(d, at, needle.length).map(([, o]) => o);
+  }
+  const observe = (rec, env, doc, text, how) => rec.observe(env.dir, 'book-a', doc, text, how);
+
+  test('pasted, deleted, undone: still pasted', async () => {
+    const env = setup({ chapters: { 'ch-1': '<p>Start.</p>' } });
+    const rec = env.recorder();
+    rec.open(env.dir, 'book-a');
+    observe(rec, env, 'ch-1', `<p>Start. ${OWN}</p>`, { src: 'typed', ev: 40 });
+    observe(rec, env, 'ch-1', `<p>Start. ${OWN} ${PASTED}</p>`, { src: 'paste', ev: 1 });
+    observe(rec, env, 'ch-1', `<p>Start. ${OWN}</p>`, { src: 'typed', ev: 1 });
+    observe(rec, env, 'ch-1', `<p>Start. ${OWN} ${PASTED}</p>`, { src: 'move', cause: 'undo', ev: 1 });
+    save(rec, env, 'ch-1', `<p>Start. ${OWN} ${PASTED}</p>`);
+    await rec.close('book-a');
+    const edits = entries(env).filter((e) => e.kind === 'edit');
+    const undo = edits[edits.length - 1];
+    assert.equal(undo.cause, 'undo');
+    assert.deepEqual(undo.from, [[0, 0, PASTED.length + 1, { n: edits[2].n, op: 0, at: 0 }]]);
+    const dev = traced(env);
+    assert.deepEqual(origins(dev, 'ch-1', PASTED), ['paste']);
+    assert.deepEqual(origins(dev, 'ch-1', OWN), ['typed']);
+    assert.equal(dev.made.paste, PASTED.length + 1);
+    assert.equal(dev.made.move, undefined, 'nothing moved is left untraced');
+  });
+
+  test('cut and pasted back: the paste points at the cut', async () => {
+    const env = setup({ chapters: { 'ch-1': `<p>${OWN}</p><p>Second.</p>` } });
+    const rec = env.recorder();
+    rec.open(env.dir, 'book-a');
+    observe(rec, env, 'ch-1', '<p></p><p>Second.</p>', { src: 'typed' });
+    observe(rec, env, 'ch-1', `<p></p><p>Second. ${OWN}</p>`, { src: 'move' });
+    save(rec, env, 'ch-1', `<p></p><p>Second. ${OWN}</p>`);
+    await rec.close('book-a');
+    const edits = entries(env).filter((e) => e.kind === 'edit');
+    assert.equal(edits[1].from[0][3].n, edits[0].n);
+    assert.deepEqual(origins(traced(env), 'ch-1', OWN), ['baseline']);
+  });
+
+  test('copied and pasted: the paste points at the text still there', async () => {
+    const env = setup({ chapters: { 'ch-1': `<p>${OWN}</p>`, 'ch-2': '<p>Two.</p>' } });
+    const rec = env.recorder();
+    rec.open(env.dir, 'book-a');
+    // the same words were deleted once, too: a copy is looked for in the
+    // book first, so a match as long there wins
+    observe(rec, env, 'ch-2', `<p>Two.</p><p>${OWN}</p>`, { src: 'typed' });
+    observe(rec, env, 'ch-2', '<p>Two.</p>', { src: 'typed' });
+    observe(rec, env, 'ch-2', `<p>Two. ${OWN}</p>`, { src: 'move', copy: true });
+    save(rec, env, 'ch-2', `<p>Two. ${OWN}</p>`);
+    await rec.close('book-a');
+    const edit = entries(env).filter((e) => e.kind === 'edit').pop();
+    assert.deepEqual(edit.from, [[0, 1, OWN.length, { doc: 'ch-1', at: 3 }]]);
+    const dev = traced(env);
+    assert.deepEqual(origins(dev, 'ch-2', OWN), ['baseline']);
+  });
+
+  test('a split traces the new chapter to the old, whichever arrives first', async () => {
+    for (const newFirst of [false, true]) {
+      const env = setup({ chapters: { 'ch-1': `<p>One.</p><p>${PASTED}</p><p>${OWN}</p>` }, book: { chapterOrder: ['ch-1', 'ch-2'] } });
+      const rec = env.recorder();
+      rec.open(env.dir, 'book-a');
+      const how = { src: 'move', cause: 'split' };
+      const moved = `<p>${PASTED}</p><p>${OWN}</p>`;
+      if (newFirst) observe(rec, env, 'ch-2', moved, how);
+      observe(rec, env, 'ch-1', '<p>One.</p>', how);
+      if (!newFirst) observe(rec, env, 'ch-2', moved, how);
+      save(rec, env, 'ch-1', '<p>One.</p>');
+      save(rec, env, 'ch-2', moved);
+      await rec.close('book-a');
+      const arriving = entries(env).find((e) => e.kind === 'edit' && e.doc === 'ch-2');
+      assert.deepEqual(arriving.from, [[0, 0, moved.length, newFirst ? { doc: 'ch-1', at: 11 } : { n: arriving.n - 2, op: 0, at: 0 }]]);
+      const dev = traced(env);
+      assert.deepEqual(dev.made, { baseline: 'One.'.length + PASTED.length + OWN.length });
+    }
+  });
+
+  test('to Darlings and back: escapes in JSON are followed, origins kept', async () => {
+    const quoted = `<p class="talk">"${PASTED}" she said, "and ${OWN}"</p>`;
+    const env = setup({ chapters: { 'ch-1': `<p>Kept.</p>${quoted}` } });
+    const rec = env.recorder();
+    rec.open(env.dir, 'book-a');
+    const how = { src: 'move', cause: 'darling' };
+    const darling = slog.jsonText([{ id: 'd-1', html: quoted, text: `"${PASTED}" she said, "and ${OWN}"` }]);
+    rec.observe(env.dir, 'book-a', 'darlings', darling, how);
+    observe(rec, env, 'ch-1', '<p>Kept.</p>', how);
+    // …and restored
+    rec.observe(env.dir, 'book-a', 'darlings', '[]', how);
+    observe(rec, env, 'ch-1', `<p>Kept.</p>${quoted}`, how);
+    save(rec, env, 'ch-1', `<p>Kept.</p>${quoted}`);
+    fs.writeFileSync(path.join(env.dir, 'darlings.json'), '[]');
+    await rec.close('book-a');
+    const edits = entries(env).filter((e) => e.kind === 'edit');
+    const toDarlings = edits.find((e) => e.doc === 'darlings' && e.from);
+    assert.ok(toDarlings.from.some((p) => p[3].len === 1 && p[2] === 2), 'an escaped quote is a piece of its own');
+    const dev = traced(env);
+    assert.deepEqual(dev.made, { baseline: 'Kept.'.length + quoted.replace(/<[^>]*>/g, '').length });
+  });
+
+  test('a burst rewritten as one replacement keeps the origins of what it didn\'t change', async () => {
+    const words = Array.from({ length: 300 }, (_, i) => 'word' + i);
+    const tail = PASTED + ' ' + OWN;
+    const before = `<p>${words.join(' ')} ${tail} end</p>`;
+    const after = `<p>${words.map((w) => w.toUpperCase()).join(' ')} ${tail} END</p>`;
+    const env = setup({ chapters: { 'ch-1': '<p>x</p>' } });
+    const rec = env.recorder();
+    rec.open(env.dir, 'book-a');
+    observe(rec, env, 'ch-1', before, { src: 'paste' });
+    observe(rec, env, 'ch-1', after, { src: 'typed', ev: 900 });
+    save(rec, env, 'ch-1', after);
+    await rec.close('book-a');
+    const last = entries(env).filter((e) => e.kind === 'edit').pop();
+    assert.equal(last.ops.length, 1, 'past the word-level diff\'s reach: one replacement');
+    assert.ok(last.from.some((p) => p[3].n === last.n && p[3].op === 0), 'pointing at its own deletion');
+    assert.deepEqual(origins(traced(env), 'ch-1', tail), ['paste']);
+  });
+
+  test('a short phrase typed again isn\'t a move', async () => {
+    const env = setup({ chapters: { 'ch-1': '<p>She said no.</p>' } });
+    const rec = env.recorder();
+    rec.open(env.dir, 'book-a');
+    observe(rec, env, 'ch-1', '<p></p>', { src: 'typed' });
+    observe(rec, env, 'ch-1', '<p>She said no.</p>', { src: 'typed' });
+    save(rec, env, 'ch-1', '<p>She said no.</p>');
+    await rec.close('book-a');
+    assert.ok(entries(env).every((e) => e.from === undefined));
+  });
+
+  test('copied from another open book: the paste names that book\'s log', async () => {
+    const env = setup({ chapters: { 'ch-1': '<p>A.</p>' } });
+    const other = path.join(env.root, 'book-b');
+    fs.mkdirSync(path.join(other, 'chapters'), { recursive: true });
+    fs.writeFileSync(path.join(other, 'book.json'), JSON.stringify({ id: 'book-b', title: 'B', chapterOrder: ['ch-9'] }));
+    fs.writeFileSync(path.join(other, 'chapters', 'ch-9.html'), `<p>${PASTED}</p>`);
+    const rec = env.recorder();
+    rec.open(other, 'book-b');
+    await rec.close('book-b');
+    rec.open(env.dir, 'book-a');
+    observe(rec, env, 'ch-1', `<p>A. ${PASTED}</p>`, { src: 'move', book: 'book-b' });
+    save(rec, env, 'ch-1', `<p>A. ${PASTED}</p>`);
+    await rec.close('book-a');
+    const logB = JSON.parse(fs.readFileSync(path.join(other, slog.LOG_DIR, slog.LOG_INFO), 'utf8')).logId;
+    const edit = entries(env).find((e) => e.kind === 'edit');
+    assert.deepEqual(edit.from, [[0, 1, PASTED.length, { log: logB }]]);
+    assert.deepEqual(origins(traced(env), 'ch-1', PASTED), ['other book']);
+  });
+
+  test('a checker catches a from that lies', () => {
+    const key = Buffer.alloc(32, 7);
+    const chain = new slog.Chain({ dev: 'a'.repeat(32), key, now: () => 1 });
+    const e = [];
+    const add = (kind, fields, ins) => e.push(chain.entry(kind, fields, ins).entry);
+    add('base', { doc: 'ch-1', src: 'paste', ops: [[0, 0, PASTED.length]] }, [PASTED]);
+    add('edit', { doc: 'ch-1', src: 'typed', ops: [[0, PASTED.length, 0]] });
+    add('edit', { doc: 'ch-1', src: 'typed', ops: [[0, 0, OWN.length]], from: [[0, 0, OWN.length, { n: 2, op: 0, at: 0 }]] }, [OWN]);
+    add('edit', { doc: 'ch-1', src: 'typed', ops: [[0, 0, 5]], from: [[0, 0, 5, { n: 9, op: 0, at: 0 }]] }, ['Ahead']);
+    const t = slog.trace(e);
+    assert.deepEqual(t.problems.map((p) => [p.n, p.problem]), [
+      [3, 'moved text doesn\'t match where it came from'],
+      [4, 'from points ahead of itself']
+    ]);
+    // without the words, lengths are still checked and origins still carried
+    const bare = e.map(({ x, ...clear }) => clear);
+    assert.deepEqual(slog.trace(bare).problems.map((p) => p.n), [4]);
+    assert.deepEqual(slog.trace(bare).docs['ch-1'].runs, [[5, 'typed'], [OWN.length, 'paste']]);
   });
 });
