@@ -2,7 +2,7 @@
 
 The Scribe's Log is a tamper-evident record of how a book was written in NEO. This document defines the files well enough for anyone to write their own checker. NEO's own implementation is `slog.js`.
 
-Draft status: the parts below are implemented and tested. Where timestamp receipts are kept (`stamp` entries), exports and signatures are reserved and will be specified when they're built.
+Draft status: the parts below are implemented and tested. Exports and signatures are reserved and will be specified when they're built.
 
 ## What it can and can't show
 
@@ -16,6 +16,7 @@ Each book folder holds a `scribes-log/` folder:
 
 - `log.json`: `{ "v": 1, "logId": "<16 hex>", "key": "<32 bytes, base64>" }`, written once. The key salts text commitments. It's never included in a log shared without its text.
 - Chunk files, `YYYYMMDDTHHMMSSZ-<8 hex>.slog`: one session on one device. The time is the session's start in UTC; the hex is the first 8 characters of the device id. A name already taken gets `-2`, `-3`, and so on before `.slog`. Names sort by time, but chain order is decided by links (below), never by names.
+- `stamps/`: outside timestamp receipts (see Outside timestamps), in files named like chunks but ending `.stamps`, and `stamps/certs/<sha256 of the certificate>.der`, each certificate the receipts are checked with, once.
 
 A device id is 128 random bits, made once per installation. It's never derived from hardware.
 
@@ -49,7 +50,7 @@ Every entry has a **clear part** and, while it's on the writer's computer, an op
 
 | `kind` | Meaning | Fields |
 |---|---|---|
-| `open` | Starts a chunk | `v` (format, `1`), `log` (log id), `dev` (device id, 32 hex), `prevChunk` (name of this device's previous chunk, or `null`), `app` (NEO version, then `+slog1`) |
+| `open` | Starts a chunk | `v` (format: `2`, or `1` for a chunk with no `stamp` entries written before them), `log` (log id), `dev` (device id, 32 hex), `prevChunk` (name of this device's previous chunk, or `null`), `app` (NEO version, then `+slog1`) |
 | `edit` | One burst of changes to one document | `doc`, `src`, `ops`, `c` if text was inserted, and optionally `dur`, `ev`, `cause`, `from`, `keys` |
 | `base` | A document's whole text, with no process record behind it | `doc`, `src` (`baseline`, `import` or `arrived`), `ops` (a single `[0, 0, length]`), `c`, optionally `file` or `from` |
 | `doc` | A document created or deleted | `doc`, `act` (`new` or `del`). A deleted document's text is first deleted by an `edit`, so a later move can point at it |
@@ -57,7 +58,7 @@ Every entry has a **clear part** and, while it's on the writer's computer, an op
 | `sleep`, `wake` | The computer went to sleep or woke | |
 | `clock` | The wall clock jumped against the computer's steady clock | `jump` (ms, negative for backward) |
 | `close` | Ends a chunk | `why` (`close`, `quit`, `idle`, `off`, `size`, `error`), `ms` (manuscript hash) |
-| `stamp` | Reserved: an outside timestamp receipt | |
+| `stamp` | An outside timestamp's receipt arrived | `svc` (`freetsa` or another RFC 3161 service, or `ots`), `of` (the entry stamped, on this chain), `r` (SHA-256 hex of the receipt: the token, or the proof as first kept), `t` (the token's time, RFC 3161 only) |
 
 Reserved field: `sig` (a signature, added in a later version without changing anything else).
 
@@ -150,13 +151,26 @@ A manuscript exported as plain text from NEO gives the same `T` once its title p
 
 ## Outside timestamps
 
-Draft: the proofs are settled; where they're kept, and the `stamp` entry, come with the stamping itself.
-
 **What's stamped** is an entry's hash: the 32 bytes whose hex is the next entry's `prev`. A receipt for entry `n`'s hash shows entry `n`, and every entry before it on that device's chain, existed by the receipt's time.
 
-**RFC 3161** (FreeTSA, or any time-stamp authority): a TimeStampToken whose message imprint is SHA-256 of nothing more than those 32 bytes as the hashed message. A token checks when its imprint is that hash; its signed attributes name TSTInfo as the content, carry the digest of the TSTInfo, and name the signing certificate (ESS signing-certificate, v1 or v2); its signature verifies with that certificate; the certificate is for timestamping only (extended key usage `timeStamping`, critical) and chains to a trusted root; and every certificate in the chain was valid at the token's time. Revocation isn't checked. The token's time is its `genTime`.
+**RFC 3161** (FreeTSA, or any time-stamp authority): a TimeStampToken whose message imprint names SHA-256 and holds those 32 bytes. A token checks when its imprint is that hash; its signed attributes name TSTInfo as the content, carry the digest of the TSTInfo, and name the signing certificate (ESS signing-certificate, v1 or v2); its signature verifies with that certificate; the certificate is for timestamping only (extended key usage `timeStamping`, critical) and chains to a trusted root; and every certificate in the chain was valid at the token's time. Revocation isn't checked. The token's time is its `genTime`.
 
 **OpenTimestamps**: a standard detached proof (`.ots`) whose file hash is SHA-256 and whose file digest is those 32 bytes, so `ots verify -d <hash>` checks it too. NEO's proofs start with an append of 16 random bytes and a SHA-256, which is what the calendars see. A Bitcoin attestation checks when its message equals the merkle root in the header of the block at its height (bytes 36 to 68, as stored); the block's own time then bounds the entry's.
+
+**When.** While a book is being written, NEO stamps its chain's newest entry every 15 minutes if the chain has moved (its own `stamp` entries don't count), and at the end of each session (the `close` entry). Offline, only each book's newest unstamped entry waits, and goes when the network's back: a late stamp proves no more than one sent then.
+
+**Receipt files** (`stamps/*.stamps`): JSON Lines, like chunks, with the same rule for a final line cut short. Each line is one receipt:
+
+```json
+{"svc":"freetsa","dev":"<device id>","n":1205,"h":"<entry hash>","ts":1791388512345,"tsr":"<base64 TimeStampToken>"}
+{"svc":"ots","dev":"<device id>","n":1205,"h":"<entry hash>","ts":1791388512345,"ots":"<base64 .ots proof>"}
+```
+
+`n` and `h` are the entry stamped and its hash; `ts` is when NEO sent the request, by its own clock. A file is appended to while its session lasts and never changes once closed. An OpenTimestamps proof is kept first as the calendars' pending answer; when the calendars have put it in a Bitcoin block (hours later), NEO writes the finished proof as a new line in a new file, and the pending one stays. Receipts stand on their own: which file holds a line doesn't matter, and a reader takes every file.
+
+**Stamp entries.** Each receipt is also recorded in the chain as a `stamp` entry: in the chunk being written, or at the start of that device's next chunk if the session had ended. A `stamp` entry names its receipt by hash, so a receipt that goes missing from `stamps/` is a visible gap. Requests carry nothing but the hash (for OpenTimestamps, a hash of it with a random nonce): no title, name, device id or text.
+
+**Certificates.** RFC 3161 tokens are requested without certificates; `stamps/certs/` holds the signing certificate and its root, so tokens stay checkable after the certificates expire.
 
 ## Checking a log
 

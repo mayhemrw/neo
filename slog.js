@@ -24,7 +24,9 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 
-const FORMAT = 1;
+const FORMAT = 1;          // log.json's version
+const CHUNK_FORMAT = 2;    // a chunk's (its open line's v); 2 adds stamp entries, and 1 still reads
+const CHUNK_FORMATS = new Set([1, 2]);
 const LOG_DIR = 'scribes-log';
 const LOG_INFO = 'log.json';
 const KINDS = new Set(['open', 'edit', 'base', 'doc', 'on', 'off', 'sleep', 'wake', 'clock', 'close', 'stamp']);
@@ -754,7 +756,7 @@ function verifyChain(chunks, { key = null } = {}) {
     if (c.partialTail) notes.push({ chunk: c.name, note: 'last write cut short (crash or power loss)' });
     for (const p of c.problems || []) problems.push({ chunk: c.name, ...p });
     const open = c.entries[0];
-    if (open.v !== FORMAT) problems.push({ chunk: c.name, problem: 'unknown format version ' + open.v });
+    if (!CHUNK_FORMATS.has(open.v)) problems.push({ chunk: c.name, problem: 'unknown format version ' + open.v });
     if (dev === null) dev = open.dev;
     else if (open.dev !== dev) problems.push({ chunk: c.name, problem: 'device changes mid-chain' });
     const m = CHUNK_RE.exec(c.name);
@@ -1382,6 +1384,37 @@ class Recorder {
     this.sessions = new Map();
     this.imports = new Map();
     this.dev = null;
+    // told when a chunk opens or closes (the stamper, slog-stamp.js)
+    this.watcher = null;
+  }
+
+  _tell(what, s, extra) {
+    if (!this.watcher || typeof this.watcher[what] !== 'function') return;
+    try {
+      this.watcher[what]({ dir: s.dir, bookId: s.bookId, logId: s.info.logId, dev: this.device(), ...extra });
+    } catch (err) { this.onError('watcher', err); }
+  }
+
+  // An outside timestamp's receipt arrived: a stamp entry, in the chunk
+  // being written. Returns the entry, or null when no chunk of that book's
+  // log is open on this device (the caller keeps it for the next one).
+  stamped(dir, bookId, logId, fields) {
+    const s = this.sessions.get(bookId);
+    if (!s || s.dir !== dir || !s.on || !s.info || s.info.logId !== logId || !s.chunk || s.failed) return null;
+    try {
+      return this._write(s, 'stamp', fields);
+    } catch (err) {
+      this._failed(s, s.chunk, err);
+      return null;
+    }
+  }
+  // Where each open chunk's chain stands: [{ dir, bookId, logId, dev, n, head }]
+  heads() {
+    const out = [];
+    for (const s of this.sessions.values()) {
+      if (s.on && s.info && s.chunk && !s.failed) out.push({ dir: s.dir, bookId: s.bookId, logId: s.info.logId, dev: this.device(), n: s.chain.n, head: s.chain.head });
+    }
+    return out;
   }
 
   // 128 random bits, made once per installation
@@ -1564,7 +1597,7 @@ class Recorder {
 
   status(dir, bookId) {
     const s = this.sessions.get(bookId);
-    if (s && s.dir === dir) return { on: s.on, logging: !!s.info, n: s.chain ? s.chain.n : 0, chunk: s.chunk ? s.chunk.name : null };
+    if (s && s.dir === dir) return { on: s.on, logging: !!s.info, n: s.chain ? s.chain.n : 0, chunk: s.chunk ? s.chunk.name : null, logId: s.info ? s.info.logId : null, dev: this.device() };
     const meta = parseQuiet(readQuiet(path.join(dir, 'book.json')));
     return { on: !(meta && meta.scribesLog === false), logging: fs.existsSync(path.join(dir, LOG_DIR, LOG_INFO)), n: null, chunk: null };
   }
@@ -1852,7 +1885,8 @@ class Recorder {
     s.chunk = { name, writer: new ChunkWriter(path.join(logDir, name)), bytes: 0, failed: false };
     s.last = name;
     s.count += 1;
-    this._write(s, 'open', { v: FORMAT, log: s.info.logId, dev, prevChunk, app: this.app });
+    this._write(s, 'open', { v: CHUNK_FORMAT, log: s.info.logId, dev, prevChunk, app: this.app });
+    this._tell('opened', s);
   }
 
   _write(s, kind, fields, ins = null) {
@@ -1860,7 +1894,8 @@ class Recorder {
     const { entry, line } = s.chain.entry(kind, fields, ins);
     chunk.bytes += Buffer.byteLength(line, 'utf8') + 1;
     chunk.writer.append(line).catch((err) => this._failed(s, chunk, err));
-    if (kind !== 'close') {
+    // (an outside timestamp arriving isn't writing: it doesn't keep the session open)
+    if (kind !== 'close' && kind !== 'stamp') {
       this._idle(s);
       if (chunk.bytes >= this.maxChunk) this._close(s, 'size');
     }
@@ -1914,6 +1949,7 @@ class Recorder {
     if (!chunk) return s.closing || Promise.resolve();
     this._write(s, 'close', { why, ms: manuscriptHash(manuscriptText(s.docs)) });
     s.chunk = null;
+    this._tell('closed', s, { why, n: s.chain.n, head: s.chain.head });
     const snap = {
       v: 1, bookId: s.bookId, logId: s.info.logId, dev: this.device(),
       n: s.chain.n, head: s.chain.head, last: chunk.name, count: s.count, size: chunk.bytes, docs: { ...s.docs }
@@ -1936,7 +1972,7 @@ class Recorder {
 }
 
 module.exports = {
-  FORMAT, LOG_DIR, LOG_INFO, KINDS, CHUNK_RE,
+  FORMAT, CHUNK_FORMAT, LOG_DIR, LOG_INFO, KINDS, CHUNK_RE, writeWhole,
   canonical, sha256hex, clearPart, entryHash, saltFor, commitment, keyId,
   normalizeManuscript, manuscriptHash, newDeviceId, newLogInfo,
   diff, markupRanges, recordOps, applyOps, applyLengths,

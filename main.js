@@ -540,6 +540,48 @@ function scribe() {
 function slogTap(fn) {
   try { return fn(scribe()); } catch (err) { logError('scribe\'s log', err); return undefined; }
 }
+// Outside timestamps for the log (slog-stamp.js): the chain's latest hash
+// to FreeTSA and the OpenTimestamps calendars, every 15 minutes while a
+// book is written and at each session's end. Started once the app is ready.
+let slogStamper = null;
+// NEO_SLOG_STAMPS in the environment: "off" stamps nothing; a JSON object
+// ({ services, calendars, anchors, certs }, certificate files as paths)
+// points the stamper elsewhere, as scripts/slog.e2e.js does at local fakes.
+function slogStampsStart() {
+  if (slogStamper) return;
+  const over = (process.env || {}).NEO_SLOG_STAMPS;
+  if (over === 'off') return;
+  let conf = {};
+  try { conf = over ? JSON.parse(over) : {}; } catch (err) { logError('scribe\'s log stamps', err); return; }
+  const { net } = require('electron');
+  const tsa = require('./stamp-tsa.js');
+  const cert = (file) => tsa.pemToDer(fs.readFileSync(path.isAbsolute(file) ? file : path.join(__dirname, 'certs', file), 'utf8'));
+  slogStamper = new (require('./slog-stamp.js').Stamper)({
+    recorder: scribe(),
+    fetch: (url, init) => net.fetch(url, init),
+    home: path.join(app.getPath('userData'), 'slog'),
+    anchors: (conf.anchors || ['freetsa-root.pem']).map(cert),
+    certs: (conf.certs || ['freetsa-tsa.pem']).map(cert),
+    ...(conf.services ? { services: conf.services } : {}),
+    ...(conf.calendars ? { calendars: conf.calendars } : {}),
+    onError: (where, err) => logError('scribe\'s log ' + where, err),
+    onChange: (bookId) => { if (slogMenu.bookId === bookId) slogMenuRefresh(true); }
+  });
+  slogStamper.start();
+}
+// what File → Scribe's Log says about the open book's timestamps
+function slogStampLabel() {
+  if (!slogStamper || !slogMenu.bookId || !slogMenu.on) return null;
+  const st = slogTap((s) => s.status(bookDir(slogMenu.bookId), slogMenu.bookId));
+  if (!st || !st.logId) return null;
+  const { last, waiting } = slogStamper.status(st.logId, st.dev);
+  if (waiting) return t('Timestamps waiting for the network');
+  if (!last) return t('No outside timestamps yet');
+  const d = new Date(last);
+  const today = d.toDateString() === new Date().toDateString();
+  const time = today ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  return t('Last timestamp {time}', { time });
+}
 // a read or write of one of the book's documents: the doc's log name and its text
 const slogText = {
   chapter: (v) => v,
@@ -2427,6 +2469,7 @@ function buildMenu() {
           enabled: !!slogMenu.bookId,
           click: () => sendToWindow({ type: 'scribesLog', bookId: slogMenu.bookId, on: !slogMenu.on })
         },
+        ...(slogStampLabel() ? [{ label: slogStampLabel(), enabled: false }] : []),
         { label: t('Email Settings…'), click: () => sendToWindow({ type: 'emailSettings' }) },
         { label: t('Cover Art…'), click: () => sendToWindow({ type: 'coverArt' }) },
         {
@@ -3083,6 +3126,7 @@ app.whenReady().then(() => {
     setInterval(() => { dailyBackup().catch(() => {}); }, 60 * 60 * 1000).unref?.();
     try { checkForUpdates(); } catch (err) { logError('updater', err); }
     try { slogWatch(); } catch (err) { logError('scribe\'s log', err); }
+    try { slogStampsStart(); } catch (err) { logError('scribe\'s log', err); }
   } catch (err) {
     // catastrophic: tell the human instead of dying in silence
     logError('startup', err);
@@ -3105,11 +3149,13 @@ app.on('window-all-closed', () => {
 // up to a few seconds, then goes ahead.
 let slogQuitting = false;
 app.on('will-quit', (e) => {
-  if (slogQuitting || !slogRecorder || !slogRecorder.busy()) return;
+  if (slogQuitting || !slogRecorder || (!slogRecorder.busy() && !slogStamper)) return;
   e.preventDefault();
   slogQuitting = true;
   const wait = new Promise((resolve) => setTimeout(resolve, 3000));
-  Promise.race([Promise.resolve(slogTap((s) => s.closeAll('quit'))), wait])
+  // (the chunks' last lines first: their hashes wait for the next start)
+  const done = Promise.resolve(slogTap((s) => s.closeAll('quit'))).then(() => slogStamper && slogStamper.stop());
+  Promise.race([done, wait])
     .catch((err) => logError('scribe\'s log', err))
     .then(() => app.quit());
 });

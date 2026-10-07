@@ -29,6 +29,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before adding a feature. The product is 
 | `spell-worker.js` | Hunspell WASM, forked with `utilityProcess`. Messages: `load`, `check`, `suggest`, `add` |
 | `spell-ro.js` | Romanian diacritics, used by the worker. Does not alter the manuscript |
 | `slog.js` | The Scribe's Log: hashing, the chain, chunk files, diff, check and replay, and the `Recorder` the main process keeps each book's log with. Format: `SLOG-FORMAT.md` |
+| `slog-stamp.js` | The main process's stamper: when to stamp, receipt files, the offline queue, fetching finished OpenTimestamps proofs |
 | `slog-hash.js`, `stamp-ots.js`, `stamp-tsa.js` | Outside timestamps for the Scribe's Log, in plain JavaScript that also runs in a browser: SHA-256/HMAC/SHA-1/RIPEMD-160, OpenTimestamps proofs and calendars, RFC 3161 tokens (checked through WebCrypto). The network is a `fetch` passed in. Trusted roots are in `certs/` |
 | `locales/<code>.json` | One language. Regional files (`fr-CA.json`) hold only the strings that differ |
 | `pocket/` | Capacitor shell. It does not contain its own editor |
@@ -75,7 +76,9 @@ Each book's log lives in its `scribes-log/` folder: `log.json` (made once) and o
 - `npm run test:slog` (Electron; `xvfb-run` without a display) writes a book the way a writer does and checks its log has no `unlogged` entries.
 - Pocket's bridge has no `slog`, so nothing in the window logs there.
 - Duplicate (`book:duplicate`) doesn't copy `scribes-log/`: the copy's log starts at once (`Recorder.copied`), its words a baseline whose `from` names the original's log.
-- Outside timestamps (phase 2): `scripts/stamp.test.js` runs on fixtures in `scripts/fixtures/stamps/`; `node scripts/stamp-live.js [folder]` tries FreeTSA, the OpenTimestamps calendars and the block explorers for real (behind a proxy, with `NODE_USE_ENV_PROXY=1`).
+- Outside timestamps: `slog-stamp.js` (`Stamper`, started with the app by `slogStampsStart`) is the recorder's `watcher`. It stamps each open chain's newest entry every 15 minutes if it moved, and every chunk's `close`, with FreeTSA and the OpenTimestamps calendars over `net.fetch`; receipts go to `scribes-log/stamps/*.stamps`, `stamp` entries into the chain (or the device's next chunk), and what waits (offline queue, stamp entries, pending proofs) to `userData/slog/stamps.json`. File → Scribe's Log shows the last timestamp under the checkbox.
+- `NEO_SLOG_STAMPS=off` stops stamping (the tabs, words and caret e2e set it); a JSON object points it at other services (`slog.e2e.js` runs local fakes from `scripts/stamp-fakes.js`, which sign real tokens with a test key).
+- `scripts/stamp.test.js` and `scripts/slog-stamp.test.js` run on fixtures in `scripts/fixtures/stamps/`; `node scripts/stamp-live.js [folder]` tries FreeTSA, the OpenTimestamps calendars and the block explorers for real (behind a proxy, with `NODE_USE_ENV_PROXY=1`).
 - `captureBody` leaves the engine's style spans out of what's saved (`dropJunkSpans`); the page keeps them until the chapter is next opened, because taking them off at once breaks ⌘Z.
 
 ## Paperbacks for KDP

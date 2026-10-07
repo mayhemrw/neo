@@ -3,6 +3,9 @@
 
 'use strict';
 
+// (no outside timestamps from a test run: slog-stamp.js would reach the real services)
+process.env.NEO_SLOG_STAMPS = process.env.NEO_SLOG_STAMPS || 'off';
+
 const { app, BrowserWindow } = require('electron');
 const assert = require('node:assert/strict');
 const fs = require('fs');

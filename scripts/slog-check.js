@@ -75,6 +75,15 @@ function checkBook(dir) {
     });
   }
   out.devices.sort((a, b) => a.lastTs - b.lastTs);
+  // outside timestamps: receipt lines kept, and stamp entries in the chains
+  // (checking them is the verifier's job; this only counts)
+  out.receipts = {};
+  try {
+    for (const r of require('../slog-stamp.js').readReceipts(dir)) {
+      const k = r.line ? r.line.svc : 'unreadable';
+      out.receipts[k] = (out.receipts[k] || 0) + 1;
+    }
+  } catch (err) { out.problems.push('receipts: ' + err.message); }
   const newest = out.devices[out.devices.length - 1];
   if (!newest) out.problems.push('no chunks');
   out.ok = !out.problems.length && out.devices.every((d) => d.ok && !d.problems.length) && !!newest && !newest.differ.length;
@@ -102,6 +111,8 @@ function report(dir, res) {
       ? `  replay differs from disk in: ${d.differ.join(', ')}`
       : '  replay matches the disk exactly');
   });
+  const rc = Object.entries(res.receipts || {});
+  if (rc.length) lines.push('receipts: ' + rc.map(([k, n]) => `${k} ${n}`).join(', '));
   lines.push(res.ok ? 'OK' : 'NOT OK');
   return lines.join('\n');
 }

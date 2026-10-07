@@ -44,8 +44,36 @@ const loadFile = BrowserWindow.prototype.loadFile;
 BrowserWindow.prototype.loadFile = function (file, opts) {
   return loadFile.call(this, path.resolve(__dirname, '..', file), opts);
 };
-require('../main.js');
+// The outside timestamp services, faked on this computer (stamp-fakes.js);
+// NEO is started once they listen, pointed at them
+const http = require('http');
+const fakes = require('./stamp-fakes.js');
+const stampCalls = [];
+const stampServer = http.createServer((req, res) => {
+  const parts = [];
+  req.on('data', (c) => parts.push(c));
+  req.on('end', () => {
+    const body = Buffer.concat(parts);
+    stampCalls.push(req.method + ' ' + req.url);
+    let out = null;
+    if (req.method === 'POST' && req.url === '/tsr') out = fakes.tokenFor(body, Date.now());
+    const m = /^\/(a|b)\/digest$/.exec(req.url);
+    if (req.method === 'POST' && m) out = fakes.calendarAnswer(m[1], body);
+    res.writeHead(out ? 200 : 404);
+    res.end(out || '');
+  });
+});
+stampServer.listen(0, '127.0.0.1', () => {
+  const base = 'http://127.0.0.1:' + stampServer.address().port;
+  process.env.NEO_SLOG_STAMPS = JSON.stringify({
+    services: [{ svc: 'freetsa', url: base + '/tsr' }], calendars: [base + '/a', base + '/b'],
+    anchors: [fakes.ROOT_PEM], certs: [fakes.SIGNER_PEM]
+  });
+  require('../main.js');
+});
 const slog = require('../slog.js');
+const tsa = require('../stamp-tsa.js');
+const { readReceipts } = require('../slog-stamp.js');
 const { checkBook, report } = require('./slog-check.js');
 
 let wc;
@@ -352,6 +380,12 @@ async function main() {
       return out;
     }).join('\n');
     const moves = (cause) => edits.filter((e) => e.src === 'move' && e.cause === cause && e.x);
+    // the outside timestamps: every chunk's close stamped, receipts that check
+    const closes = entries.filter((e) => e.kind === 'close');
+    const receipts = readReceipts(bookDir).map((r) => r.line);
+    notes.closesStamped = closes.map((c) => ['freetsa', 'ots'].every((svc) => receipts.some((l) => l.svc === svc && l.n === c.n && l.h === slog.entryHash(c))));
+    const tok = receipts.find((l) => l.svc === 'freetsa');
+    notes.tokenCheck = tok ? await tsa.verify(new Uint8Array(Buffer.from(tok.tsr, 'base64')), { hash: tok.h, anchors: [fakes.ROOT], certs: [fakes.SIGNER] }) : null;
     const checks = [
       ['the log is intact and ends in what\'s on disk', () => assert.equal(res.ok, true)],
       ['nothing is unlogged (but what changed while the log was off)', () => assert.deepEqual(edits.filter((e) => e.src === 'unlogged' && e.cause !== 'off').map((e) => e.doc), [])],
@@ -372,6 +406,17 @@ async function main() {
       }],
       ['nothing moved in the manuscript is untraced', () => assert.equal((dev.made || {}).move || 0, 0, untraced())],
       ['the manuscript\'s words came from import, typing, pasting and another device', () => assert.deepEqual(Object.keys(dev.made).sort(), ['arrived', 'import', 'paste', 'typed', 'while off'])],
+      ['each chunk\'s end was stamped by both services', () => {
+        assert.ok(closes.length >= 2, 'chunks closed');
+        assert.deepEqual(notes.closesStamped, closes.map(() => true));
+      }],
+      ['a stamp\'s receipts check', () => assert.deepEqual(notes.tokenCheck && notes.tokenCheck.problems, [])],
+      ['the receipts for a chunk closed by switching off open the next chunk', () => {
+        const off = closes.find((c) => c.why === 'off');
+        const at = entries.findIndex((e) => e.kind === 'open' && e.n > off.n);
+        assert.deepEqual(entries.slice(at + 1, at + 3).map((e) => [e.kind, e.of]), [['stamp', off.n], ['stamp', off.n]]);
+      }],
+      ['only hashes were sent, to the services named', () => assert.ok(stampCalls.length >= 2 * 3 && stampCalls.every((c) => /^POST \/(tsr|a\/digest|b\/digest)$/.test(c)))],
       ['the import\'s empty Darlings and stickies are the import\'s', () => {
         for (const doc of ['darlings', 'stickies']) assert.ok(entries.some((e) => e.kind === 'base' && e.doc === doc && e.src === 'import'), doc);
       }],
@@ -407,6 +452,7 @@ async function main() {
     failed++;
     console.error(err);
   } finally {
+    stampServer.close();
     app.exit(failed ? 1 : 0);
   }
 }
