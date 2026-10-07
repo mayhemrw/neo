@@ -367,12 +367,15 @@ describe('Recorder', { concurrency: 1 }, () => {
     fs.writeFileSync(path.join(env.dir, 'book.json'), JSON.stringify({ id: 'book-a', title: 'Novel', author: 'Ada', chapterOrder: [] }));
     fs.writeFileSync(path.join(env.dir, 'notes.html'), '');
     fs.writeFileSync(path.join(env.dir, 'darlings.json'), '[]');
+    fs.writeFileSync(path.join(env.dir, 'stickies.json'), '[]');
     rec.created(env.dir, 'book-a', token);
     save(rec, env, 'ch-9', '<p>It began.</p>');
     await rec.close('book-a');
     const sha = slog.sha256hex(fs.readFileSync(file));
     const bases = entries(env).filter((x) => x.kind === 'base');
-    assert.deepEqual(bases.map((x) => [x.doc, x.src, x.file && x.file.sha256]), [['book', 'import', sha], ['ch-9', 'import', sha]]);
+    assert.deepEqual(bases.map((x) => [x.doc, x.src, x.file && x.file.sha256]).sort(),
+      [['book', 'import', sha], ['ch-9', 'import', sha], ['darlings', 'import', sha], ['stickies', 'import', sha]]);
+    assert.ok(entries(env).every((x) => x.kind !== 'edit'), 'nothing in the scaffold is typed');
     assert.ok(!JSON.stringify(entries(env).map(slog.clearPart)).includes('novel'), 'no file name in the clear');
     assertChecks(env);
   });

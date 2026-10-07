@@ -1686,7 +1686,9 @@ class Recorder {
       case 'arrived': return isNew ? { base: 'arrived', src: 'arrived' } : { src: 'arrived' };
       case 'off': return { src: 'unlogged', cause: 'off' };
       case 'new': return { src: 'typed' };
-      case 'import': return doc === 'book' && isNew ? { base: 'import', src: 'import', file } : { src: 'typed' };
+      // everything book:create laid down for an import is the import's (book.json,
+      // and the empty Darlings and stickies lists)
+      case 'import': return isNew ? { base: 'import', src: 'import', file } : { src: 'typed' };
       default: return { src: 'unlogged' };
     }
   }
