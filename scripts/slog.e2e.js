@@ -372,6 +372,9 @@ async function main() {
       }],
       ['nothing moved in the manuscript is untraced', () => assert.equal((dev.made || {}).move || 0, 0, untraced())],
       ['the manuscript\'s words came from import, typing, pasting and another device', () => assert.deepEqual(Object.keys(dev.made).sort(), ['arrived', 'import', 'paste', 'typed', 'while off'])],
+      ['the import\'s empty Darlings and stickies are the import\'s', () => {
+        for (const doc of ['darlings', 'stickies']) assert.ok(entries.some((e) => e.kind === 'base' && e.doc === doc && e.src === 'import'), doc);
+      }],
       ['an undo is labeled', () => assert.ok(edits.some((e) => e.cause === 'undo'))],
       ['the split is labeled', () => assert.ok(edits.some((e) => e.src === 'move' && e.cause === 'split'))],
       ['the card move is labeled', () => assert.ok(edits.some((e) => e.src === 'move' && e.cause === 'outline'))],
