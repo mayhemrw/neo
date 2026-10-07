@@ -7,7 +7,8 @@
 // Every device's chain is checked (numbering, links, commitments, words),
 // replayed from empty, and compared with the documents on disk. The chain
 // written last should end in exactly what's on disk. Also counts entries by
-// where their text came from: "unlogged" should be rare.
+// where their text came from: "unlogged" should be rare ("while off" is
+// what changed while the log was switched off, and is expected).
 //
 // Exit code 0 when every chain is intact and the newest one matches the
 // disk, 1 otherwise.
@@ -47,7 +48,10 @@ function checkBook(dir) {
     const kinds = {};
     for (const e of entries) {
       kinds[e.kind] = (kinds[e.kind] || 0) + 1;
-      if (e.src) sources[e.src] = (sources[e.src] || 0) + 1;
+      // changes made while the log was switched off are counted on their own:
+      // they're expected, where any other unlogged entry is a gap
+      const src = e.src === 'unlogged' && e.cause === 'off' ? 'while off' : e.src;
+      if (src) sources[src] = (sources[src] || 0) + 1;
     }
     const docs = Object.fromEntries(Object.entries(r.docs).filter(([, t]) => t !== null));
     const differ = [...new Set([...Object.keys(docs), ...Object.keys(disk)])]
