@@ -103,7 +103,14 @@ function chapterName(chId, meta = book) {
 }
 // a chapter's heading as the reader sees it: its name, then any title —
 // once, for an unnumbered chapter, whose name is its title
-function chapterHeading(chId, meta = book, sep = ' — ') {
+// The dash between a chapter's number and its title follows the book's
+// language: an en dash where that's how the language sets its dash
+// (KAPITEL 2 – SZENENWECHSEL), the em dash elsewhere (CHAPTER 2 — TITLE)
+const EN_DASH_LANGUAGES = ['de', 'nl', 'pl', 'ro', 'fr', 'it', 'hu'];
+function headingDash() {
+  return EN_DASH_LANGUAGES.includes(writingLanguage().toLowerCase().split('-')[0]) ? '–' : '—';
+}
+function chapterHeading(chId, meta = book, sep = ' ' + headingDash() + ' ') {
   const title = ((meta.chapterTitles || {})[chId] || '').trim();
   const k = chapterKind(chId, meta);
   if (k === 'unnumbered') return title;
@@ -523,6 +530,14 @@ function coverUrl(meta) {
 async function loadLibrary() {
   libraryDirPath = await window.neo.libraryPath();
   library = await window.neo.readLibrary();
+  // A first shelf is named in the language NEO had when it was made. If the
+  // writer never renamed it, it follows a change of language.
+  const DEFAULT_SHELF = 'Works in Progress';
+  const own = t(DEFAULT_SHELF);
+  // (each writing name has a first shelf of its own, made the same way)
+  const untouched = (library.shelves || []).filter((s) => s.name === DEFAULT_SHELF && own !== DEFAULT_SHELF);
+  for (const s of untouched) s.name = own;
+  if (untouched.length) await writeLibrary(library);
   if (window.neo.writingStyleState) window.neo.writingStyleState(library.writingStyle);
   if (!library.firstRunDone) {
     showFirstRun();
@@ -2338,7 +2353,7 @@ function renderChapters() {
       const sep = document.createElement('span');
       sep.className = 'ch-sep';
       sep.setAttribute('aria-hidden', 'true');
-      sep.textContent = '—';
+      sep.textContent = headingDash();
       const titleSpan = document.createElement('span');
       titleSpan.className = 'ch-title';
       titleSpan.contentEditable = 'true';
@@ -4224,7 +4239,8 @@ const QUOTE_STYLES = {
   pl: { open: '„', close: '”' },
   ro: { open: '„', close: '”' },
   ru: { open: '«', close: '»' },
-  el: { open: '«', close: '»' }
+  el: { open: '«', close: '»' },
+  hu: { open: '„', close: '”' }
 };
 // The single quotation marks, where ' types them: English and Dutch ‘…’;
 // German ‚…‘, or ›…‹ in a book set in »…«, or ‹…› in Swiss «…» (#286).
@@ -4275,6 +4291,7 @@ function bookQuotes(el) {
 const DIALOGUE_DASHES = {
   pt: { open: '—', space: ' ', mid: '—' },   // — Olá — diz ela.
   ru: { open: '—', space: ' ', mid: '—' },
+  hu: { open: '–', space: ' ', mid: '–' },   // – Szia – mondta.
   es: { open: '—', space: '', mid: '—' },    // —Hola —dijo él—.
   en: { open: '—', mid: '–' }                // and every other language: word – word
 };
@@ -4328,6 +4345,26 @@ function frenchTypography() {
   if (!writingLanguage().startsWith('fr')) return false;
   return /^fr-CA$/i.test(NeoI18n.getLocale()) ? 'ca' : 'fr';
 }
+
+// ⌥⌘→ / ⌥⌘← (Ctrl+Alt on Windows and Linux): the next or previous tab,
+// Manuscript → Notes → Outline → Darlings, round again. Caught here, like the
+// chapter keys, so no menu accelerator flashes the menu or takes AltGr input.
+function goToTab(name) {
+  if (!book || $('#editor-view').hidden || name === currentTab) return;
+  if (document.querySelector('.modal-backdrop:not([hidden])')) return;
+  switchTab(name);
+}
+const TAB_ORDER = ['manuscript', 'notes', 'outline', 'darlings'];
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+  const cmd = IS_POCKET ? (e.metaKey !== e.ctrlKey) : (IS_MAC ? e.metaKey : e.ctrlKey);
+  if (!cmd || !e.altKey || e.shiftKey || e.isComposing) return;
+  if ($('#editor-view').hidden || document.querySelector('.modal-backdrop:not([hidden])')) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const step = e.key === 'ArrowRight' ? 1 : TAB_ORDER.length - 1;
+  goToTab(TAB_ORDER[(TAB_ORDER.indexOf(currentTab) + step) % TAB_ORDER.length]);
+}, true);
 
 // Titles, outline lines, notes and shelf names get the same typography as
 // the manuscript (which calls smartKeys itself). Capture phase, because
@@ -5029,7 +5066,8 @@ function spPaginate(items, perPage = SP_LINES_PER_PAGE) {
   const blocks = [];
   for (let i = 0; i < n;) {
     let j = i + 1;
-    if (items[i].type === 'character') while (j < n && (items[j].type === 'dialogue' || items[j].type === 'paren')) j++;
+    // (a line the writer starts a page with begins a block of its own)
+    if (items[i].type === 'character') while (j < n && (items[j].type === 'dialogue' || items[j].type === 'paren') && !items[j].newPage) j++;
     blocks.push([i, j]);
     i = j;
   }
@@ -5046,7 +5084,8 @@ function spPaginate(items, perPage = SP_LINES_PER_PAGE) {
     let need = height(b, used === 0);
     const next = blocks[bi + 1];
     if (items[b[0]].type === 'heading' && next) need += height(next, false);
-    if (used > 0 && used + need > perPage) {
+    // Page Break Here: a new page, however much room is left
+    if (used > 0 && (items[b[0]].newPage || used + need > perPage)) {
       at[b[0]].brk = true;
       at[b[0]].fill = Math.max(0, perPage - used);
       page++;
@@ -5083,10 +5122,15 @@ function spToFountain(lines, title = {}) {
   if (out.length) out.push('');
   let inSpeech = false;
   const gap = () => { if (out.length && out[out.length - 1] !== '') out.push(''); };
+  let newPage = false;
   for (const l of lines) {
     const text = String(l.text || '').trim();
+    newPage = newPage || !!l.newPage;
     if (!text) { inSpeech = false; continue; }
     const caps = text.toUpperCase();
+    // Fountain's page break: === on a line of its own
+    if (newPage && out.some((x) => x !== '' && !/^[A-Za-z ]+:/.test(x))) { inSpeech = false; gap(); out.push('==='); }
+    newPage = false;
     if ((l.type === 'dialogue' || l.type === 'paren') && inSpeech) {
       out.push(l.type === 'paren' && !/^\(/.test(text) ? `(${text})` : text);
       continue;
@@ -5135,15 +5179,18 @@ function spFromFountain(src) {
   // a block's lines run on into one paragraph: Fountain keeps a writer's
   // line breaks, and a script copied from a PDF is broken at every line
   let joinable = false;
+  let breakNext = false;
   const push = (type, t, join = false) => {
     const last = out[out.length - 1];
-    if (join && joinable && last && last.type === type) last.text += ' ' + t;
-    else out.push({ type, text: t });
+    if (join && joinable && last && last.type === type && !breakNext) last.text += ' ' + t;
+    else out.push(breakNext && out.length ? { type, text: t, newPage: true } : { type, text: t });
     joinable = join;
+    breakNext = false;
   };
   for (let k = 0; k < rows.length; k++) {
     const s = rows[k].trim();
     if (!s) { inSpeech = false; joinable = false; continue; }
+    if (/^={3,}$/.test(s)) { breakNext = true; inSpeech = false; continue; }
     // inside a speech, a line is what's said ("#2 pencil", "42."): only a
     // PDF's (MORE) and CONTINUED are left out there
     if (inSpeech ? /^(?:\(MORE\)|\(?CONTINUED\)?:?)$/i.test(s)
@@ -5247,7 +5294,7 @@ function spFdxParas(xml) {
       const style = spXmlAttr(r[1], 'Style').toLowerCase().split('+');
       runs.push({ text, b: style.includes('bold'), i: style.includes('italic'), u: style.includes('underline'), s: style.includes('strikeout') });
     }
-    out.push({ type: spXmlAttr(m[1], 'Type'), align: spXmlAttr(m[1], 'Alignment').toLowerCase(), runs });
+    out.push({ type: spXmlAttr(m[1], 'Type'), align: spXmlAttr(m[1], 'Alignment').toLowerCase(), runs, newPage: /^yes$/i.test(spXmlAttr(m[1], 'StartsNewPage')) });
   }
   return out;
 }
@@ -5255,14 +5302,17 @@ function spFromFdx(xml) {
   xml = String(xml || '');
   const body = (xml.match(/<Content>([\s\S]*?)<\/Content>/) || [])[1] || '';
   const lines = [];
+  let newPage = false;
   for (const p of spFdxParas(body)) {
     const text = p.runs.map((r) => r.text).join('').trim();
+    newPage = newPage || p.newPage;
     if (!text) continue;
     const type = SP_FDX_TYPES[p.type.toLowerCase()] || 'action';
     let runs = p.runs;
     if (type === 'character') runs = [{ text: spDropContd(text), b: false, i: false, u: false, s: false }];
     if (type === 'paren' && !text.startsWith('(')) runs = [{ text: '(' + text + ')', b: false, i: false, u: false, s: false }];
-    lines.push({ type, runs });
+    lines.push(newPage && lines.length ? { type, runs, newPage } : { type, runs });
+    newPage = false;
   }
   // the title page: the centered lines are the title, the credit and the
   // writer; lines set left, below them, the contact; set right, the draft
@@ -5291,10 +5341,14 @@ function spToFdx(lines, title = {}) {
     return `      <Text${style ? ` Style="${style}"` : ''}>${esc(caps ? r.text.toUpperCase() : r.text)}</Text>\n`;
   };
   let out = '<?xml version="1.0" encoding="UTF-8" standalone="no" ?>\n<FinalDraft DocumentType="Script" Template="No" Version="1">\n\n  <Content>\n';
+  let newPage = false;
   for (const l of lines) {
-    const runs = (l.runs || []).filter((r) => r.text);
+    newPage = newPage || !!l.newPage;
+    let runs = (l.runs || []).filter((r) => r.text);
     if (!runs.length) continue;
-    out += `    <Paragraph Type="${NAMES[l.type] || 'Action'}">\n${runs.map((r) => textEl(r, CAPS.includes(l.type))).join('')}    </Paragraph>\n`;
+    if (l.type === 'heading' && title.underlineHeadings) runs = runs.map((r) => ({ ...r, b: true, u: true }));
+    out += `    <Paragraph Type="${NAMES[l.type] || 'Action'}"${newPage ? ' StartsNewPage="Yes"' : ''}>\n${runs.map((r) => textEl(r, CAPS.includes(l.type))).join('')}    </Paragraph>\n`;
+    newPage = false;
   }
   out += '  </Content>\n';
   const para = (text, align) => `    <Paragraph Alignment="${align}">\n      <Text>${esc(text)}</Text>\n    </Paragraph>\n`;
@@ -5339,6 +5393,8 @@ function spSetClass(p, type) {
 }
 function spCleanMarks(p) {
   for (const a of SP_SCREEN_ATTRS) if (p.hasAttribute(a)) p.removeAttribute(a);
+  // (a new line split from one that starts a page doesn't start one too)
+  if (p.hasAttribute('data-newpage')) p.removeAttribute('data-newpage');
 }
 // a page break's fill, as a custom property the stylesheet can read
 (() => {
@@ -5485,6 +5541,14 @@ function scriptKey(e, body) {
     return true;
   }
   if (e.key === 'Backspace' && spCaretAtStart(p)) {
+    // at the top of a line that starts a page, Backspace takes the page
+    // break away first, like the empty lines it stands for
+    if (p.hasAttribute('data-newpage')) {
+      e.preventDefault();
+      p.removeAttribute('data-newpage');
+      spAfterChange(p);
+      return true;
+    }
     const prev = p.previousElementSibling;
     // an empty speech under a name NEO guessed: it was action after all
     if (!p.textContent.trim() && spType(p) === 'dialogue' && prev && spType(prev) === 'character' && spGuessed.has(prev)) {
@@ -5681,13 +5745,13 @@ function spRepaginate() {
   const lines = spLinesOf(ps);
   // (CONT'D) first: it makes a name's line longer
   ps.forEach((p, i) => {
-    const c = lines[i].type === 'character' && spContd(lines, i);
+    const c = spContdOn() && lines[i].type === 'character' && spContd(lines, i);
     if (p.hasAttribute('data-contd') !== c) p.toggleAttribute('data-contd', c);
   });
   const narrow = $('#paper').classList.contains('narrow');
   const live = !narrow && currentTab === 'manuscript' && !$('#paper').hidden;
   const counts = spMeasure(ps, live);
-  const pg = spPaginate(ps.map((p, i) => ({ type: lines[i].type, lines: counts[i] })));
+  const pg = spPaginate(ps.map((p, i) => ({ type: lines[i].type, lines: counts[i], newPage: p.hasAttribute('data-newpage') })));
   ps.forEach((p, i) => {
     const a = pg.at[i];
     const page = a.brk ? String(a.page) : null;
@@ -5768,7 +5832,43 @@ function spHighlightScene() {
 function spReportState() {
   if (!window.neo.scriptState) return;
   const on = !!book && isScript() && !$('#editor-view').hidden;
-  window.neo.scriptState({ on, element: on ? spShownElement || 'action' : null });
+  window.neo.scriptState({ on, element: on ? spShownElement || 'action' : null, underline: on && spUnderlineOn(), contd: on && spContdOn() });
+}
+// the Format menu's two script-style items, and Page Break Here
+function spToggleStyle(key) {
+  if (!book || !isScript()) return;
+  if (key === 'underline') book.underlineHeadings = !spUnderlineOn();
+  else book.contd = spContdOn() ? false : undefined;
+  if (book.underlineHeadings === false) delete book.underlineHeadings;
+  if (book.contd === undefined) delete book.contd;
+  saveMeta();
+  spApplyStyle();
+  spRepaginate();
+  spReportState();
+}
+// the line a right-click landed on, for Page Break Here
+let spContextLine = null;
+document.addEventListener('contextmenu', (e) => {
+  spContextLine = null;
+  if (!book || !isScript() || !window.neo.scriptContext) return;
+  const body = e.target.closest && e.target.closest('.chapter-body.script-body');
+  if (!body) { window.neo.scriptContext(null); return; }
+  const at = document.caretRangeFromPoint ? document.caretRangeFromPoint(e.clientX, e.clientY) : null;
+  let el = at ? at.startContainer : e.target;
+  if (el && el.nodeType === Node.TEXT_NODE) el = el.parentElement;
+  const p = el && el.closest ? el.closest('p') : null;
+  // (the first line of a script already starts its first page)
+  spContextLine = p && body.contains(p) && spParas()[0] !== p ? p : null;
+  window.neo.scriptContext(spContextLine ? { pageBreak: spContextLine.hasAttribute('data-newpage') } : null);
+}, true);
+function spTogglePageBreak() {
+  const p = spContextLine;
+  spContextLine = null;
+  if (!p || !p.isConnected || !book || !isScript()) return;
+  snapshotStructure('page break');
+  p.toggleAttribute('data-newpage');
+  spAfterChange(p);
+  breakRun++;
 }
 function renderScriptNav() {
   const list = $('#nav-list');
@@ -5942,6 +6042,7 @@ function spEditorMode() {
   if (add) add.hidden = on;
   if (!on) setText($('#nav-head span'), t('Chapters'));
   spTitlePage(on);
+  spApplyStyle();
   // the pane stays open beside a script, unless the writer unpinned it there
   if (!NO_HOVER) {
     let kept = {};
@@ -5965,7 +6066,7 @@ function spPaste(e, body, chId) {
     const doc = new DOMParser().parseFromString(html, 'text/html');
     lines = [...doc.body.querySelectorAll('p')].map((p) => ({ type: spType(p), html: paraRuns(p.innerHTML, false).filter((r) => r.text).map(runHtml).join('') }));
   } else if (text && /\n/.test(text.trim())) {
-    lines = spFromFountain(text).map((l) => ({ type: l.type, html: spRunsFromFountain(l.text).map((x) => runHtml(x)).join('') }));
+    lines = spFromFountain(text).map((l) => ({ type: l.type, newPage: l.newPage, html: spRunsFromFountain(l.text).map((x) => runHtml(x)).join('') }));
   }
   if (!lines || !lines.length) return false;
   e.preventDefault();
@@ -6067,6 +6168,7 @@ function spPasteMany(lines, body, chId) {
   for (const l of lines) {
     const q = document.createElement('p');
     if (l.type !== 'action') q.className = 'sp-' + l.type;
+    if (l.newPage) q.setAttribute('data-newpage', '');
     q.innerHTML = l.html || '<br>';
     frag.appendChild(q);
     last = q;
@@ -6092,13 +6194,13 @@ function spPasteMany(lines, body, chId) {
 async function importScript(r, shelf) {
   const parsed = r.script === 'fdx'
     ? spFromFdx(r.source)
-    : { lines: spFromFountain(r.source).map((l) => ({ type: l.type, runs: spRunsFromFountain(l.text) })), title: spFountainTitle(r.source) };
+    : { lines: spFromFountain(r.source).map((l) => ({ type: l.type, newPage: l.newPage, runs: spRunsFromFountain(l.text) })), title: spFountainTitle(r.source) };
   if (!parsed.lines.length) return false;
   const tp = parsed.title || {};
   const title = tp.title || r.name;
   const meta = await window.neo.createBook({ author: tp.author || displayAuthor(), title });
   const chId = 'ch-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
-  const html = parsed.lines.map((l) => `<p${l.type === 'action' ? '' : ` class="sp-${l.type}"`}>${l.runs.map((x) => runHtml(x)).join('') || '<br>'}</p>`).join('');
+  const html = parsed.lines.map((l) => `<p${l.type === 'action' ? '' : ` class="sp-${l.type}"`}${l.newPage ? ' data-newpage=""' : ''}>${l.runs.map((x) => runHtml(x)).join('') || '<br>'}</p>`).join('');
   await window.neo.writeChapter(meta.id, chId, html);
   meta.title = title;
   meta.format = 'screenplay';
@@ -6125,12 +6227,20 @@ function spExportLines() {
     for (const p of holder.querySelectorAll('p')) {
       const runs = paraRuns(p.innerHTML, false).filter((r) => r.text && r.mark === undefined);
       const text = runs.map((r) => r.text).join('').replace(/\s+$/, '');
-      lines.push({ type: spType(p), runs, text });
+      lines.push({ type: spType(p), runs, text, newPage: p.hasAttribute('data-newpage') });
     }
   }
   const plain = lines.map((l) => ({ type: l.type, text: l.text }));
-  lines.forEach((l, i) => { l.contd = l.type === 'character' && spContd(plain, i); });
+  lines.forEach((l, i) => { l.contd = spContdOn() && l.type === 'character' && spContd(plain, i); });
   return lines;
+}
+// The script's own style (Format menu, while a script is open): scene
+// headings underlined as well as bold, which some studios ask for, and
+// whether a returning speaker gets (CONT'D). Kept in the script's book.json.
+const spContdOn = () => !book || book.contd !== false;
+const spUnderlineOn = () => !!(book && book.underlineHeadings);
+function spApplyStyle() {
+  $('#paper').classList.toggle('sp-uline', isScript() && spUnderlineOn());
 }
 const SP_CAPS = ['heading', 'character', 'transition', 'shot'];
 function spRunsHtml(l) {
@@ -6138,7 +6248,10 @@ function spRunsHtml(l) {
   return l.runs.map((r) => runHtml({ ...r, text: caps ? r.text.toUpperCase() : r.text })).join('') + (l.contd ? " (CONT'D)" : '');
 }
 async function spPdfHtml() {
-  const lines = spExportLines().filter((l, i, all) => l.text.trim() || (i > 0 && i < all.length - 1));
+  // (an empty line that starts a page passes its page on to the next one)
+  const all = spExportLines();
+  all.forEach((l, i) => { if (l.newPage && !l.text.trim() && all[i + 1]) all[i + 1].newPage = true; });
+  const lines = all.filter((l, i) => l.text.trim() || (i > 0 && i < all.length - 1));
   // lay the lines out off screen, as they print, to count them
   const holder = document.createElement('div');
   const ps = lines.map((l) => {
@@ -6150,7 +6263,7 @@ async function spPdfHtml() {
   });
   await document.fonts.load('1em "Courier Prime"').catch(() => {});
   const counts = spMeasure(ps, false);
-  const pg = spPaginate(lines.map((l, i) => ({ type: l.type, lines: counts[i] })));
+  const pg = spPaginate(lines.map((l, i) => ({ type: l.type, lines: counts[i], newPage: l.newPage })));
   const pages = [];
   lines.forEach((l, i) => {
     const a = pg.at[i];
@@ -6193,6 +6306,7 @@ p.sp-paren { margin-left: 9.6em; width: 15.3em; }
 p.sp-dialogue { margin-left: 6em; width: 21.3em; }
 p.sp-transition { text-align: right; }
 p.sp-heading, p.sp-shot { font-weight: bold; }
+${spUnderlineOn() ? 'p.sp-heading { text-decoration: underline; }' : ''}
 .title { text-align: center; }
 .tp-main { position: absolute; top: 3.5in; left: 1.5in; width: 6in; }
 .tp-main .gap { margin-top: 2em; }
@@ -6257,6 +6371,7 @@ function spFountain() {
   const marks = [{ key: 'b', open: '**', close: '**' }, { key: 'i', open: '*', close: '*' }, { key: 'u', open: '_', close: '_' }];
   const lines = spExportLines().map((l) => ({
     type: l.type,
+    newPage: l.newPage,
     text: markedRuns(l.runs, marks, (t) => t.replace(/([\\*_])/g, '\\$1'))
   }));
   return spToFountain(lines, spTitleFields());
@@ -6277,7 +6392,7 @@ async function spExport(format) {
   try {
     let payload;
     if (format === 'pdf') payload = { format: 'pdf', defaultName, content: await spPdfHtml(), print: 'screenplay' };
-    else if (format === 'fdx') payload = { format: 'fdx', defaultName, content: spToFdx(spExportLines(), spTitleFields()) };
+    else if (format === 'fdx') payload = { format: 'fdx', defaultName, content: spToFdx(spExportLines(), { ...spTitleFields(), underlineHeadings: spUnderlineOn() }) };
     else payload = { format: 'fountain', defaultName, content: spFountain() };
     const saved = await window.neo.exportSave(payload);
     if (saved) toast(t('Exported: {file}', { file: saved.split('/').pop() }));
@@ -11125,7 +11240,7 @@ function toggleSpellcheck() {
 const SPELL_LANGUAGE_NAMES = {
   'en-US': t('US English'), 'en-GB': t('UK English'), 'en-CA': t('Canadian English'),
   'en-AU': t('Australian English'), fr: t('French'), es: t('Spanish'), de: t('German'),
-  nl: t('Dutch'), pl: t('Polish'), 'pt-BR': t('Brazilian Portuguese'), ro: t('Romanian'), ru: t('Russian')
+  nl: t('Dutch'), pl: t('Polish'), 'pt-BR': t('Brazilian Portuguese'), ro: t('Romanian'), ru: t('Russian'), hu: t('Hungarian')
 };
 async function changeSpellLanguage(code) {
   const ok = await window.neo.setSpellLanguage(code);
@@ -12030,6 +12145,8 @@ function bookShortcutSections() {
       [K('⌘⇧O', 'Ctrl+Shift+O'), tk('Cycle focus mode'), tk('Off → paragraph → sentence → off.')],
       [IS_MAC ? '⌥⌘↓' : ['Ctrl+Alt+↓', 'Ctrl+Page Down'], tk('Go to the next chapter')],
       [IS_MAC ? '⌥⌘↑' : ['Ctrl+Alt+↑', 'Ctrl+Page Up'], tk('Go to the previous chapter')],
+      [K('⌥⌘→', 'Ctrl+Alt+→'), tk('Go to the next tab'), tk('Manuscript, Notes, Outline, Darlings, then round again.')],
+      [K('⌥⌘←', 'Ctrl+Alt+←'), tk('Go to the previous tab')],
       [['F6', K('⌃Tab', 'Ctrl+Tab')], tk('Move between the page, the chapters, the notes and the bottom bar'), tk('Add Shift to go back. Esc returns to the page. On the shelf: the books, then the header.')],
       ...(IS_MAC ? [
         ['⌘H', tk('Hide NEO')],
@@ -12633,8 +12750,11 @@ function docxP(runs, opts = {}) {
     const it = opts.flip ? !r.i : r.i;
     const caps = r.caps !== undefined ? r.caps : opts.caps;
     const size = r.size || opts.size;
+    // italic and bold are character styles (Emphasis, Strong), so an editor
+    // or typesetter can find and restyle them all at once
+    const rStyle = r.b && it ? 'StrongEmphasis' : r.b ? 'Strong' : it ? 'Emphasis' : '';
     // in the order the schema wants them (Word is strict about it)
-    const rPr = (r.b ? '<w:b/>' : '') + (it ? '<w:i/>' : '')
+    const rPr = (rStyle ? `<w:rStyle w:val="${rStyle}"/>` : '')
       + (caps === true ? '<w:caps/>' : caps === false ? '<w:caps w:val="0"/>' : '')
       + (r.s ? '<w:strike/>' : '')
       + (opts.tracking ? `<w:spacing w:val="${opts.tracking}"/>` : '')
@@ -12659,9 +12779,9 @@ function buildDocxEntries(data) {
     body.push(docxP(paraRuns(p.html), Object.assign({ align: 'center', flip: italic && !attr, size: attr ? 20 : undefined, spaceBefore: attr ? 240 : 0 }, lead)));
   });
   // title page
-  body.push(docxP([{ text: d.title, b: true }], { align: 'center', spaceBefore: 3000, size: 56 }));
-  if (d.subtitle) body.push(docxP([{ text: d.subtitle, i: true }], { align: 'center', size: 32 }));
-  body.push(docxP([{ text: d.author }], { align: 'center', spaceBefore: 800 }));
+  body.push(docxP([{ text: d.title }], { style: 'Title' }));
+  if (d.subtitle) body.push(docxP([{ text: d.subtitle }], { style: 'Subtitle' }));
+  body.push(docxP([{ text: d.author }], { style: 'Author' }));
   const contents = () => {
     body.push(docxP([{ text: t('Contents') }], { align: 'center', pageBreak: true, spaceBefore: 1200, size: 28, caps: true }));
     body.push(docxP([], {}));
@@ -12701,26 +12821,43 @@ function buildDocxEntries(data) {
     } else {
       body.push(docxP([], { pageBreak: true })); // headingless story still starts fresh
     }
+    // the prose by paragraph style: Body Text (indented), Body Text No
+    // Indent (a flush paragraph), Poetry, Scene Break; only a centered or
+    // right-set line adds its alignment on top
     for (const p of ch.paras) {
-      if (p.sceneBreak) body.push(docxP([{ text: '***' }], { align: 'center', spaceBefore: 240 }));
-      else if (p.poetry) body.push(docxP(paraRuns(p.html), { align: p.align === 'center' || p.align === 'right' ? p.align : '', poetry: true }));
-      else if (p.align === 'center' || p.align === 'right') body.push(docxP(paraRuns(p.html), { align: p.align }));
-      else body.push(docxP(paraRuns(p.html), { indent: !p.flush }));
+      if (p.sceneBreak) body.push(docxP([{ text: '***' }], { style: 'SceneBreak' }));
+      else if (p.poetry) body.push(docxP(paraRuns(p.html), { style: 'Poetry', align: p.align === 'center' || p.align === 'right' ? p.align : '' }));
+      else if (p.align === 'center' || p.align === 'right') body.push(docxP(paraRuns(p.html), { style: 'BodyTextNoIndent', align: p.align }));
+      else body.push(docxP(paraRuns(p.html), { style: p.flush ? 'BodyTextNoIndent' : 'BodyText' }));
     }
   });
   if (!placed) contents();
   const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body.join('')}
-<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>
+<w:sectPr>${(window.neo.paper || 'Letter') === 'A4' ? '<w:pgSz w:w="11906" w:h="16838"/>' : '<w:pgSz w:w="12240" w:h="15840"/>'}<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>
 </w:body></w:document>`;
-  const headingStyle = (n) => `<w:style w:type="paragraph" w:styleId="Heading${n}"><w:name w:val="heading ${n}"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:uiPriority w:val="9"/><w:qFormat/>
+  // the page's own typeface (on Linux, the bundled face it shows)
+  const font = escXml(firstFamily(exportBodyFont()) || 'Georgia');
+  const para = (id, name, pPr, next = 'BodyText', rPr = '') => `<w:style w:type="paragraph" w:styleId="${id}"><w:name w:val="${name}"/><w:basedOn w:val="Normal"/><w:next w:val="${next}"/><w:qFormat/>${pPr ? '<w:pPr>' + pPr + '</w:pPr>' : ''}${rPr ? '<w:rPr>' + rPr + '</w:rPr>' : ''}</w:style>`;
+  const chr = (id, name, rPr) => `<w:style w:type="character" w:styleId="${id}"><w:name w:val="${name}"/><w:qFormat/><w:rPr>${rPr}</w:rPr></w:style>`;
+  const headingStyle = (n) => `<w:style w:type="paragraph" w:styleId="Heading${n}"><w:name w:val="heading ${n}"/><w:basedOn w:val="Normal"/><w:next w:val="BodyText"/><w:uiPriority w:val="9"/><w:qFormat/>
 <w:pPr><w:keepNext/><w:pageBreakBefore/><w:spacing w:before="1200"/><w:jc w:val="center"/><w:outlineLvl w:val="${n - 1}"/></w:pPr><w:rPr><w:caps/><w:sz w:val="28"/></w:rPr></w:style>`;
   const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/><w:sz w:val="24"/></w:rPr></w:rPrDefault>
+<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="${font}" w:hAnsi="${font}" w:cs="${font}"/><w:sz w:val="24"/></w:rPr></w:rPrDefault>
 <w:pPrDefault><w:pPr><w:spacing w:line="360" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>
 <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>
+${para('BodyText', 'Body Text', '<w:ind w:firstLine="480"/>')}
+${para('BodyTextNoIndent', 'Body Text No Indent', '', 'BodyText')}
+${para('Poetry', 'Poetry', '<w:ind w:left="720" w:right="720"/>')}
+${para('SceneBreak', 'Scene Break', '<w:spacing w:before="240"/><w:jc w:val="center"/>', 'BodyText')}
+${para('Title', 'Title', '<w:spacing w:before="3000"/><w:jc w:val="center"/>', 'Normal', '<w:b/><w:sz w:val="56"/>')}
+${para('Subtitle', 'Subtitle', '<w:jc w:val="center"/>', 'Normal', '<w:i/><w:sz w:val="32"/>')}
+${para('Author', 'Author', '<w:spacing w:before="800"/><w:jc w:val="center"/>')}
 ${[1, 2, 3].map(headingStyle).join('\n')}
+${chr('Emphasis', 'Emphasis', '<w:i/>')}
+${chr('Strong', 'Strong', '<w:b/>')}
+${chr('StrongEmphasis', 'Strong Emphasis', '<w:b/><w:i/>')}
 </w:styles>`;
   return [
     { path: '[Content_Types].xml', content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -13099,7 +13236,7 @@ async function shelfBookData(shelf, opts = {}) {
       else {
         if (role) heading = role === 'prologue' ? t('Prologue') : t('Epilogue');
         else { n += 1; heading = t('Chapter {n}', { n }); }
-        if (chTitle) heading = library.exportCustomChapterTitles ? chTitle : heading + ' — ' + chTitle;
+        if (chTitle) heading = library.exportCustomChapterTitles ? chTitle : heading + ' ' + headingDash() + ' ' + chTitle;
       }
       const lv = underPart ? chLevel + 1 : chLevel;
       const s = push({ kind: 'chapter', heading, level: lv, paras: c.paras, role: role || '' });
@@ -13549,6 +13686,8 @@ window.neo.onMenu(async (msg) => {
   if (msg.type === 'update') updateMessage(msg);
   if (msg.type === 'export') doExport(msg.format);
   if (msg.type === 'scriptElement' && book && isScript()) spSetElement(msg.value);
+  if (msg.type === 'scriptStyle') spToggleStyle(msg.value);
+  if (msg.type === 'scriptPageBreak') spTogglePageBreak();
   if (msg.type === 'markdownEmphasis') {
     if (msg.checked) delete library.markdownOff; else library.markdownOff = true;
     await writeLibrary(library);

@@ -190,7 +190,12 @@
     return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
   }
 
+  // Letter in the Americas and the Philippines, A4 elsewhere (as main.js)
+  const LETTER = ['US', 'CA', 'MX', 'PH', 'CL', 'CO', 'VE', 'GT', 'CR', 'PA', 'DO', 'PR', 'SV', 'HN', 'NI', 'BZ'];
+  const region = (() => { try { return new Intl.Locale(navigator.language).maximize().region || ''; } catch { return ''; } })();
+
   window.neo = {
+    paper: LETTER.includes(region) ? 'Letter' : 'A4',
     /* ---------- library ---------- */
     readLibrary: async () => {
       if (!(await checkAccess())) return { authorName: '', penNames: [], firstRunDone: false, shelves: [{ id: 'shelf-1', name: 'Works in Progress', bookIds: [] }] };
