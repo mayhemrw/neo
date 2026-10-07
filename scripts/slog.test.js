@@ -404,6 +404,34 @@ describe('moved text', () => {
     // told it was moved, the short one is found whole
     assert.deepEqual(slog.movedPieces(0, 'she said no', false, pools, { moved: true }), [[0, 0, 11, { n: 5, op: 0, at: 3 }]]);
   });
+  test('a stretch that starts inside a tag counts that tag as markup', () => {
+    // a scene break deleted, then typed again: the diff's strings start
+    // partway into its <p> (21 units of attributes, 3 of writing)
+    const brk = ' class="scene-break">***</p><p';
+    const g = new slog.Graveyard();
+    g.bury({ view: slog.viewOf(brk, false), ref: { n: 7, op: 0 } });
+    assert.deepEqual(slog.movedPieces(0, brk, false, [{ src: g }]), []);
+    assert.deepEqual(slog.movedPieces(0, 'ene-break">***</p><p>Again', false, [{ src: g }]), []);
+    // words after it still count, so a real move that starts that way is found
+    const words = brk + '>' + LONG;
+    g.bury({ view: slog.viewOf(words, false), ref: { n: 8, op: 0 } });
+    assert.deepEqual(slog.movedPieces(0, words, false, [{ src: g }]), [[0, 0, words.length, { n: 8, op: 0, at: 0 }]]);
+    // in a JSON document a plain > can be part of the words, so there it counts
+    const note = 'a sticky note of thirty letters > yes';
+    const j = new slog.Graveyard();
+    j.bury({ view: slog.viewOf(note, true), ref: { n: 9, op: 0 } });
+    assert.equal(slog.movedPieces(0, note, true, [{ src: j }]).length, 1);
+    assert.equal(slog.movedPieces(0, note, false, [{ src: j }]).length, 0, 'read as HTML, all but " yes" would be a tag');
+  });
+  test('a match that reaches further back wins over the first key found', () => {
+    // words cut and undone (an older, shorter deletion), then moved whole
+    // (a newer deletion whose keys sit two units later)
+    const words = 'Mara counted the boats twice, and then once more.';
+    const g = new slog.Graveyard();
+    g.bury({ view: slog.viewOf(words.slice(5), false), ref: { n: 1, op: 0 } });
+    g.bury({ view: slog.viewOf('xy' + words, false), ref: { n: 2, op: 0 } });
+    assert.deepEqual(slog.movedPieces(0, words, false, [{ src: g }]), [[0, 0, words.length, { n: 2, op: 0, at: 2 }]]);
+  });
   test('the newest deletion wins a tie, and a dropped one is forgotten', () => {
     const g = new slog.Graveyard();
     const old = g.add({ view: slog.viewOf(LONG, false), ref: { n: 1, op: 0 } });

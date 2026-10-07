@@ -261,6 +261,38 @@ describe('Recorder', { concurrency: 1 }, () => {
     assertChecks(env);
   });
 
+  test('off and straight back on: closing waits for both chunks\' last lines', async () => {
+    const env = setup();
+    const rec = env.recorder();
+    // the first chunk's disk is slow
+    const drain = slog.ChunkWriter.prototype.drain;
+    let first = null;
+    slog.ChunkWriter.prototype.drain = async function () {
+      if (!first) first = this;
+      if (this === first) await new Promise((resolve) => setTimeout(resolve, 150));
+      return drain.call(this);
+    };
+    try {
+      rec.open(env.dir, 'book-a');
+      save(rec, env, 'ch-1', '<p>Hello, logged.</p>');
+      const off = { ...env.meta, scribesLog: false };
+      rec.beforeMeta(env.dir, 'book-a', off);
+      env.writeMeta(off);
+      rec.metaWritten(env.dir, 'book-a', off);
+      const on = { ...env.meta };
+      rec.beforeMeta(env.dir, 'book-a', on);
+      env.writeMeta(on);
+      rec.metaWritten(env.dir, 'book-a', on);
+      await rec.close('book-a');
+      assert.equal(rec.busy(), false);
+      const kinds = entries(env).map((x) => x.kind);
+      assert.deepEqual(kinds.filter((k) => ['open', 'off', 'on', 'close'].includes(k)), ['open', 'off', 'close', 'open', 'on', 'close']);
+    } finally {
+      slog.ChunkWriter.prototype.drain = drain;
+    }
+    assertChecks(env);
+  });
+
   test('a book switched off before it was ever logged gets no log at all', () => {
     const env = setup({ book: { scribesLog: false } });
     const rec = env.recorder();

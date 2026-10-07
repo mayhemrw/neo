@@ -284,7 +284,7 @@ const ESCAPES = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: 
 // decoded, with where each character starts in the raw string (`at`, or
 // null when they're the same)
 function viewOf(raw, json) {
-  if (!json || raw.indexOf('\\') < 0) return { raw, text: raw, at: null };
+  if (!json || raw.indexOf('\\') < 0) return { raw, text: raw, at: null, json: !!json };
   const chars = [];
   const at = [];
   let i = 0;
@@ -300,16 +300,25 @@ function viewOf(raw, json) {
     i++;
   }
   at.push(raw.length);
-  return { raw, text: chars.join(''), at };
+  return { raw, text: chars.join(''), at, json: true };
 }
 const rawAt = (v, k) => (v.at ? v.at[k] : k);
 // one character, however it's written
 const sameChar = (a, b) => a === b || viewOf(a, true).text === viewOf(b, true).text;
 
-// How many units before each position are outside tags
-function textBefore(s) {
+// How many units before each position are outside tags. In HTML (`html`),
+// a stretch that starts inside a tag, as an edit's inserted string can
+// (` class="scene-break">***`), starts with markup up to its first `>`: in
+// a chapter's HTML a `>` in the words is always written `&gt;`. (A JSON
+// document's text can hold a plain `>`, so there it's counted as before.)
+function textBefore(s, html = false) {
   const out = new Uint32Array(s.length + 1);
   let inTag = false;
+  if (html) {
+    const gt = s.indexOf('>');
+    const lt = s.indexOf('<');
+    inTag = gt >= 0 && (lt < 0 || gt < lt);
+  }
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i);
     if (c === 60) inTag = true;
@@ -419,7 +428,7 @@ class LiveDocs extends Sources {
 // deletion that holds it, or else a document that does
 function findWhole(view, pools) {
   const t = view.text;
-  const vis = textBefore(t);
+  const vis = textBefore(t, !view.json);
   if (!vis[t.length]) return [];
   for (const pool of pools) {
     for (const rec of pool.src.records()) {
@@ -435,11 +444,11 @@ function findWhole(view, pools) {
 // are looked in by priority; a longer match wins.
 function findMoved(view, pools) {
   const t = view.text;
-  const vis = textBefore(t);
+  const vis = textBefore(t, !view.json);
   const out = [];
   let floor = 0;
-  let p = 0;
-  while (p + GRAM <= t.length) {
+  // the longest match through position p, reaching back as far as `floor`
+  const matchAt = (p) => {
     const g = t.slice(p, p + GRAM);
     let best = null;
     for (let k = 0; k < pools.length; k++) {
@@ -459,10 +468,23 @@ function findMoved(view, pools) {
         if (!best || b + f > best.len) best = { at: p - b, len: b + f, rec, src: sp - b, pool: pools[k] };
       }
     }
-    if (best && vis[best.at + best.len] - vis[best.at] >= MOVE_MIN) {
-      out.push(best);
-      floor = p = best.at + best.len;
-    } else p++;
+    return best && vis[best.at + best.len] - vis[best.at] >= MOVE_MIN ? best : null;
+  };
+  let p = 0;
+  while (p + GRAM <= t.length) {
+    let best = matchAt(p);
+    if (!best) { p++; continue; }
+    // A source's keys are taken every STEP units, so the first key found
+    // can belong to a shorter match that starts later (words deleted twice:
+    // a passage cut and undone, then moved whole). The next few positions
+    // are looked at too, and the match reaching furthest back wins (then
+    // the longest), so the words before it aren't left without an origin.
+    for (let q = p + 1; q < p + STEP && q + GRAM <= t.length; q++) {
+      const m = matchAt(q);
+      if (m && (m.at < best.at || (m.at === best.at && m.len > best.len))) best = m;
+    }
+    out.push(best);
+    floor = p = best.at + best.len;
   }
   return out;
 }
@@ -500,7 +522,7 @@ function findRecent(view, found, pool) {
   for (const rec of pool.src.records()) {
     if (k++ >= RECENT) break;
     const s = rec.view.text;
-    const vis = textBefore(s);
+    const vis = textBefore(s, !rec.view.json);
     if (vis[s.length] < RECENT_MIN) continue;
     for (let i = t.indexOf(s); i >= 0; i = t.indexOf(s, i + 1)) {
       if (free(i, i + s.length)) out.push({ at: i, len: s.length, rec, src: 0, pool });
@@ -1838,7 +1860,11 @@ class Recorder {
       v: 1, bookId: s.bookId, logId: s.info.logId, dev: this.device(),
       n: s.chain.n, head: s.chain.head, last: chunk.name, count: s.count, size: chunk.bytes, docs: { ...s.docs }
     };
-    const done = chunk.writer.flush().then(() => {
+    // (after any chunk still closing: switching off, then on, leaves the
+    // first chunk's last lines on their way while the next one is written,
+    // and quitting or closing waits for both)
+    const before = s.closing;
+    const done = Promise.resolve(before).catch(() => {}).then(() => chunk.writer.flush()).then(() => {
       if (chunk.writer.broken || chunk.failed || chunk.writer.size !== snap.size || snap.n < s.saved) return;
       s.saved = snap.n;
       try {

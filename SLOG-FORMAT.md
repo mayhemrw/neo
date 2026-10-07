@@ -116,7 +116,7 @@ The first two carry `"len": <units>` when the source's length differs from `len`
 
 Pieces are in order of `op`, then `at`, and don't overlap. Units no piece covers take the entry's `src`; in a `move` entry, that's text moved within NEO whose place wasn't recorded.
 
-NEO records a piece for an exact match of at least 20 units of text outside tags, so a common phrase typed again isn't mistaken for a move. When the window says text was moved (a paste of NEO's own clipboard, an undo or redo, one of NEO's tools), a shorter insertion found whole counts too, and so does one of the last few deletions found whole inside it. NEO keeps the deleted text it matches against for the session only; a checker keeps whatever a `from` points at.
+NEO records a piece for an exact match of at least 20 units of text outside tags, so a common phrase typed again isn't mistaken for a move. (An HTML string that starts partway into a tag, as an edit's inserted string can, counts everything up to its first `>` as tag.) When the window says text was moved (a paste of NEO's own clipboard, an undo or redo, one of NEO's tools), a shorter insertion found whole counts too, and so does one of the last few deletions found whole inside it. NEO keeps the deleted text it matches against for the session only; a checker keeps whatever a `from` points at.
 
 `keys`, for edits to `book`, lists which top-level fields changed (such as `["author"]`), so a change of author name shows without the name.
 

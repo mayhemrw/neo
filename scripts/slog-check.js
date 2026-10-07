@@ -102,7 +102,9 @@ function report(dir, res) {
 }
 
 if (require.main === module) {
-  const dir = process.argv[2];
+  // (PowerShell's Tab completion ends a folder with \, and \" before the
+  // closing quote reaches here as a quote of its own)
+  const dir = process.argv[2] && process.argv[2].replace(/"+$/, '');
   if (!dir) {
     console.error('usage: node scripts/slog-check.js "<book folder>"');
     process.exit(2);

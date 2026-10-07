@@ -119,9 +119,11 @@ describe('Scribe\'s Log in main.js', { concurrency: 1 }, () => {
     const lib = tempLibrary();
     const book = main.call('book:create', { title: 'Old' });
     const dir = path.join(lib, book.id);
-    // as if made by an older NEO
-    fs.rmSync(path.join(dir, slog.LOG_DIR), { recursive: true });
+    // as if made by an older NEO (the log let go first, as book:delete
+    // does: removing the folder while book:create's lines were still being
+    // written failed now and then with ENOTEMPTY)
     await main.get('slogRecorder').drop(book.id);
+    fs.rmSync(path.join(dir, slog.LOG_DIR), { recursive: true });
     fs.writeFileSync(path.join(dir, 'chapters', 'ch-a.html'), '<p>Written long ago.</p>');
     const meta = main.call('book:readMeta', book.id);
     main.call('chapter:read', book.id, 'ch-a');
