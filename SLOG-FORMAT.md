@@ -2,7 +2,7 @@
 
 The Scribe's Log is a tamper-evident record of how a book was written in NEO. This document defines the files well enough for anyone to write their own checker. NEO's own implementation is `slog.js`.
 
-Draft status: the parts below are implemented and tested. Timestamp receipts (`stamp` entries), exports and signatures are reserved and will be specified when they're built.
+Draft status: the parts below are implemented and tested. Where timestamp receipts are kept (`stamp` entries), exports and signatures are reserved and will be specified when they're built.
 
 ## What it can and can't show
 
@@ -147,6 +147,16 @@ c    = hex(SHA-256(salt || UTF-8(canonical(x.ins))))
 4. The lines are joined with line breaks, converted to Unicode NFC, every run of whitespace (no-break spaces included) replaced by one space, and trimmed.
 
 A manuscript exported as plain text from NEO gives the same `T` once its title page and chapter headings are taken out (a part's title, which an export prints in the part's heading, is a line of its part page here).
+
+## Outside timestamps
+
+Draft: the proofs are settled; where they're kept, and the `stamp` entry, come with the stamping itself.
+
+**What's stamped** is an entry's hash: the 32 bytes whose hex is the next entry's `prev`. A receipt for entry `n`'s hash shows entry `n`, and every entry before it on that device's chain, existed by the receipt's time.
+
+**RFC 3161** (FreeTSA, or any time-stamp authority): a TimeStampToken whose message imprint is SHA-256 of nothing more than those 32 bytes as the hashed message. A token checks when its imprint is that hash; its signed attributes name TSTInfo as the content, carry the digest of the TSTInfo, and name the signing certificate (ESS signing-certificate, v1 or v2); its signature verifies with that certificate; the certificate is for timestamping only (extended key usage `timeStamping`, critical) and chains to a trusted root; and every certificate in the chain was valid at the token's time. Revocation isn't checked. The token's time is its `genTime`.
+
+**OpenTimestamps**: a standard detached proof (`.ots`) whose file hash is SHA-256 and whose file digest is those 32 bytes, so `ots verify -d <hash>` checks it too. NEO's proofs start with an append of 16 random bytes and a SHA-256, which is what the calendars see. A Bitcoin attestation checks when its message equals the merkle root in the header of the block at its height (bytes 36 to 68, as stored); the block's own time then bounds the entry's.
 
 ## Checking a log
 
