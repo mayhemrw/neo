@@ -281,29 +281,46 @@ const isJsonDoc = (doc) => doc === 'book' || doc === 'darlings' || doc === 'stic
 const ESCAPES = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' };
 
 // A string as the characters it stands for: a JSON document's escapes
-// decoded, with where each character starts in the raw string (`at`, or
-// null when they're the same)
+// decoded, and a no-break space however it's written (`&nbsp;`, `&#160;`,
+// `&#xa0;`, the character itself, or its JSON escape) read as a plain
+// space, since Chromium saves the space at the edge of a paste that way;
+// with where each character starts in the raw string (`at`, or null when
+// they're the same)
+const NBSP_RE = /^&(?:nbsp|#0*160|#x0*a0);/i;
 function viewOf(raw, json) {
-  if (!json || raw.indexOf('\\') < 0) return { raw, text: raw, at: null, json: !!json };
+  const escapes = json && raw.indexOf('\\') >= 0;
+  if (!escapes && raw.indexOf('\u00a0') < 0 && !/&(?:nbsp|#0*160|#x0*a0);/i.test(raw)) {
+    return { raw, text: raw, at: null, json: !!json };
+  }
   const chars = [];
   const at = [];
   let i = 0;
   while (i < raw.length) {
     at.push(i);
-    if (raw.charCodeAt(i) === 92 && i + 1 < raw.length) {
+    const ch = raw.charCodeAt(i);
+    if (escapes && ch === 92 && i + 1 < raw.length) {
       const c = raw[i + 1];
       const hex = raw.slice(i + 2, i + 6);
-      if (c === 'u' && /^[0-9a-fA-F]{4}$/.test(hex)) { chars.push(String.fromCharCode(parseInt(hex, 16))); i += 6; continue; }
+      if (c === 'u' && /^[0-9a-fA-F]{4}$/.test(hex)) {
+        const u = parseInt(hex, 16);
+        chars.push(u === 0xa0 ? ' ' : String.fromCharCode(u));
+        i += 6;
+        continue;
+      }
       if (Object.hasOwn(ESCAPES, c)) { chars.push(ESCAPES[c]); i += 2; continue; }
     }
-    chars.push(raw[i]);
+    if (ch === 38) {
+      const m = NBSP_RE.exec(raw.slice(i, i + 10));
+      if (m) { chars.push(' '); i += m[0].length; continue; }
+    }
+    chars.push(ch === 0xa0 ? ' ' : raw[i]);
     i++;
   }
   at.push(raw.length);
-  return { raw, text: chars.join(''), at, json: true };
+  return { raw, text: chars.join(''), at, json: !!json };
 }
 const rawAt = (v, k) => (v.at ? v.at[k] : k);
-// one character, however it's written
+// one character, however it's written (a no-break space as a space)
 const sameChar = (a, b) => a === b || viewOf(a, true).text === viewOf(b, true).text;
 
 // How many units before each position are outside tags. In HTML (`html`),
@@ -491,7 +508,8 @@ function findMoved(view, pools) {
 
 // A match in characters, as pieces of raw units: [at, len, srcAt, srcLen].
 // Stretches written the same way on both sides are one piece; a character
-// written two ways (an escape on one side only) is a piece of its own.
+// written two ways (an escape or a no-break space on one side only) is a
+// piece of its own.
 function rawPieces(tv, sv, at, len, sAt) {
   if (!tv.at && !sv.at) return [[at, len, sAt, len]];
   const out = [];
@@ -951,7 +969,8 @@ function trace(entries) {
 
 // Units of a chapter's text that are the writing: outside tags, and outside
 // what the manuscript hash leaves out (scene breaks, unwritten outline
-// sections, placeholder flags, Darlings anchors). 1 for each such unit.
+// sections, placeholder flags, Darlings anchors). 1 for each such unit; a
+// character reference marks only its first unit.
 function proseMask(html) {
   const mask = new Uint8Array(html.length).fill(1);
   const stack = [];
@@ -978,6 +997,10 @@ function proseMask(html) {
     while (stack.length > i) if (stack.pop().out) skip--;
   }
   if (skip) mask.fill(0, last);
+  // a character reference is one character of writing, however long it's
+  // written (`&nbsp;` counts 1, not 6)
+  const REF = /&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]*);/gi;
+  while ((m = REF.exec(html))) if (mask[m.index]) mask.fill(0, m.index + 1, REF.lastIndex);
   return mask;
 }
 

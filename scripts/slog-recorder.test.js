@@ -525,6 +525,24 @@ describe('Moves and the graveyard', { concurrency: 1 }, () => {
     assert.deepEqual(origins(traced(env), 'ch-1', OWN), ['baseline']);
   });
 
+  test('cut with a plain space, pasted back with a no-break one: traced in full', async () => {
+    // Chromium saves the space at the edge of a paste as &nbsp;
+    const env = setup({ chapters: { 'ch-1': `<p>Start. ${OWN}</p><p>Second.</p>` } });
+    const rec = env.recorder();
+    rec.open(env.dir, 'book-a');
+    observe(rec, env, 'ch-1', '<p>Start.</p><p>Second.</p>', { src: 'typed' });
+    observe(rec, env, 'ch-1', `<p>Start.</p><p>Second.&nbsp;${OWN}</p>`, { src: 'move' });
+    save(rec, env, 'ch-1', `<p>Start.</p><p>Second.&nbsp;${OWN}</p>`);
+    await rec.close('book-a');
+    const edits = entries(env).filter((e) => e.kind === 'edit');
+    assert.deepEqual(edits[1].from, [
+      [0, 0, 6, { n: edits[0].n, op: 0, at: 0, len: 1 }],
+      [0, 6, OWN.length, { n: edits[0].n, op: 0, at: 1 }]
+    ]);
+    const dev = traced(env);
+    assert.deepEqual(dev.made, { baseline: 'Start.'.length + 'Second.'.length + 1 + OWN.length }, 'the space counts once, and nothing is left untraced');
+  });
+
   test('copied and pasted: the paste points at the text still there', async () => {
     const env = setup({ chapters: { 'ch-1': `<p>${OWN}</p>`, 'ch-2': '<p>Two.</p>' } });
     const rec = env.recorder();

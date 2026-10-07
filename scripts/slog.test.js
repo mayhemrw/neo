@@ -382,6 +382,15 @@ describe('moved text', () => {
     assert.deepEqual(v.at, [0, 1, 3, 4, 6, 12, 13]);
     assert.equal(slog.viewOf('a\\"b', false).text, 'a\\"b');
   });
+  test('a no-break space, however it\'s written, is read as a plain space', () => {
+    const v = slog.viewOf('a&nbsp;b&#160;c&#xA0;d\u00a0e', false);
+    assert.equal(v.text, 'a b c d e');
+    assert.deepEqual(v.at, [0, 1, 7, 8, 14, 15, 21, 22, 23, 24]);
+    assert.equal(slog.viewOf('x\\u00a0y', true).text, 'x y');
+    assert.equal(slog.viewOf('a&amp;b', false).at, null, 'other references are left as they are');
+    assert.deepEqual(slog.rawPieces(slog.viewOf('so&nbsp;far', false), slog.viewOf('so far', false), 0, 6, 0),
+      [[0, 2, 0, 2], [2, 6, 2, 1], [8, 3, 3, 3]]);
+  });
   test('a match is cut into pieces where one side writes a character differently', () => {
     const t = slog.viewOf('say \\"hi\\" now', true);
     const s = slog.viewOf('say "hi" now', false);
@@ -452,5 +461,10 @@ describe('moved text', () => {
     const mask = slog.proseMask(html);
     const kept = [...html].filter((_, i) => mask[i]).join('');
     assert.equal(kept, 'Ab cdef');
+  });
+  test('a character reference is one character of the writing', () => {
+    const html = '<p>A&nbsp;b &amp; c&#8212;d&#x2014;e&nonsense f</p>';
+    const mask = slog.proseMask(html);
+    assert.equal(mask.reduce((a, b) => a + b, 0), 'A b & c—d—e&nonsense f'.length);
   });
 });

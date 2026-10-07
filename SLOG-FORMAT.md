@@ -112,7 +112,7 @@ An edit that only deletes uses `src` for how the change was made: `typed` for th
 - `{ "doc": <document>, "at": <offset> }`: text in that document as it stood just before this entry, at that offset (a copy, or text whose deletion is logged after this entry).
 - `{ "log": <log id> }`: text from another NEO book. Where in it isn't recorded.
 
-The first two carry `"len": <units>` when the source's length differs from `len`. That happens only for a piece that's one character written two ways, such as `\"` in a JSON document and `"` in a chapter: the piece's units then all take the origin of the source's first unit. Otherwise the piece maps unit for unit.
+The first two carry `"len": <units>` when the source's length differs from `len`. That happens only for a piece that's one character written two ways, such as `\"` in a JSON document and `"` in a chapter, or a space written as a no-break space (`&nbsp;`, `&#160;`, `&#xa0;`, the character U+00A0 or its JSON escape) on one side and a plain space on the other, as Chromium saves the space at the edge of a paste: the piece's units then all take the origin of the source's first unit. Otherwise the piece maps unit for unit.
 
 Pieces are in order of `op`, then `at`, and don't overlap. Units no piece covers take the entry's `src`; in a `move` entry, that's text moved within NEO whose place wasn't recorded.
 
@@ -161,4 +161,4 @@ The replayed documents of a device are the book as that device last saw it. A `c
 
 ### Origins
 
-Replaying while carrying each unit's origin gives, for every unit of every document, where it first came from: the `src` of the entry that inserted it, unless a `from` piece covered it, in which case the origin of the unit it came from. A `base` gives its whole text its `src`; `unlogged` with `cause: "off"` is text changed while the log was off. Text from another book is labeled as such. Counting the units of the manuscript's chapters by origin, leaving out tags, scene breaks and the elements the manuscript hash leaves out, shows how much was typed, pasted, imported, and so on.
+Replaying while carrying each unit's origin gives, for every unit of every document, where it first came from: the `src` of the entry that inserted it, unless a `from` piece covered it, in which case the origin of the unit it came from. A `base` gives its whole text its `src`; `unlogged` with `cause: "off"` is text changed while the log was off. Text from another book is labeled as such. Counting the units of the manuscript's chapters by origin, leaving out tags, scene breaks and the elements the manuscript hash leaves out, and counting a character reference (`&nbsp;`, `&amp;`, `&#8212;`) as one character at its first unit, shows how much was typed, pasted, imported, and so on.
