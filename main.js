@@ -514,6 +514,55 @@ function rebuildBookMeta(bookId) {
 }
 
 // ---------------------------------------------------------------------------
+// Scribe's Log: a record of how each book was written, beside it in
+// scribes-log/ (slog.js; the format is SLOG-FORMAT.md). The window says how
+// text changed (slog:observe); this process sees every read and write of a
+// book's files, so whatever reaches the disk without a word from the window
+// is logged anyway. A logging failure never stops a save: every call goes
+// through slogTap, which reports and carries on.
+// ---------------------------------------------------------------------------
+const slog = require('./slog.js');
+let slogRecorder = null;
+function scribe() {
+  if (!slogRecorder) {
+    let version = '';
+    try { version = app.getVersion(); } catch { /* tests */ }
+    slogRecorder = new slog.Recorder({
+      // this computer's own: the device id and each book's cached state
+      home: path.join(app.getPath('userData'), 'slog'),
+      app: version + '+slog1',
+      onError: (where, err) => logError('scribe\'s log ' + where, err),
+      onChange: (bookId) => { if (slogMenu.bookId === bookId) slogMenuRefresh(); }
+    });
+  }
+  return slogRecorder;
+}
+function slogTap(fn) {
+  try { return fn(scribe()); } catch (err) { logError('scribe\'s log', err); return undefined; }
+}
+// a read or write of one of the book's documents: the doc's log name and its text
+const slogText = {
+  chapter: (v) => v,
+  aux: (v) => v,
+  json: (v) => slog.jsonText(v),
+  book: (v) => slog.bookText(v)
+};
+// the open book, for File → Scribe's Log
+const slogMenu = { bookId: null, on: false };
+function slogMenuRefresh(force) {
+  const was = slogMenu.on;
+  slogMenu.on = !!(slogMenu.bookId && slogTap((s) => s.status(bookDir(slogMenu.bookId), slogMenu.bookId).on));
+  if (force || was !== slogMenu.on) { try { buildMenu(); } catch (err) { logError('menu', err); } }
+}
+// a file picked or dropped for import, remembered by its facts until the
+// window makes the book (book:create with slogImport)
+function slogImportToken(fp, parsed) {
+  if (!parsed || parsed.error) return parsed;
+  const token = slogTap((s) => s.rememberImport(slog.fileFacts(fp)));
+  return token ? { ...parsed, slogImport: token } : parsed;
+}
+
+// ---------------------------------------------------------------------------
 // IPC — the renderer's whole view of the disk
 // ---------------------------------------------------------------------------
 
@@ -572,6 +621,7 @@ ipcMain.handle('book:create', (_e, meta) => {
   fs.writeFileSync(path.join(dir, 'outline.html'), '');
   writeJSON(path.join(dir, 'darlings.json'), []);
   writeJSON(path.join(dir, 'stickies.json'), []);
+  slogTap((s) => s.created(dir, id, meta.slogImport));
   return book;
 });
 
@@ -595,6 +645,7 @@ ipcMain.handle('book:readMeta', (_e, bookId) => {
   const meta = readJSON(path.join(dir, 'book.json'), null);
   if (meta) {
     if (meta.id !== bookId) meta.id = bookId; // a copied folder answers to its own name
+    slogTap((s) => s.read(dir, bookId, 'book', slog.bookText(meta)));
     return meta;
   }
   // iCloud (on older macOS) holds a file it hasn't downloaded as
@@ -605,8 +656,11 @@ ipcMain.handle('book:readMeta', (_e, bookId) => {
 });
 
 ipcMain.handle('book:writeMeta', (_e, bookId, meta) => {
+  const dir = bookDir(bookId);
+  slogTap((s) => s.beforeMeta(dir, bookId, meta));
   meta.modified = new Date().toISOString();
-  writeJSON(path.join(bookDir(bookId), 'book.json'), meta);
+  writeJSON(path.join(dir, 'book.json'), meta);
+  slogTap((s) => s.metaWritten(dir, bookId, meta));
   writeCatalog();
   return meta.modified;
 });
@@ -632,11 +686,14 @@ ipcMain.handle('chapter:stamps', (_e, bookId) => {
 
 ipcMain.handle('chapter:read', (_e, bookId, chapterId) => {
   const file = path.join(bookDir(bookId), 'chapters', libName(chapterId) + '.html');
+  let html;
   try {
-    return fs.readFileSync(file, 'utf8');
+    html = fs.readFileSync(file, 'utf8');
   } catch {
     return '';
   }
+  slogTap((s) => s.read(bookDir(bookId), bookId, slog.chapterDoc(chapterId), html));
+  return html;
 });
 
 // `expected` is the text the window last read or wrote for this chapter.
@@ -647,13 +704,19 @@ ipcMain.handle('chapter:read', (_e, bookId, chapterId) => {
 ipcMain.handle('chapter:write', (_e, bookId, chapterId, html, expected) => {
   const dir = path.join(bookDir(bookId), 'chapters');
   const file = path.join(dir, libName(chapterId) + '.html');
+  const doc = slog.chapterDoc(chapterId);
+  slogTap((s) => s.touch(bookDir(bookId), bookId));
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   if (typeof expected === 'string') {
     let cur = null;
     try { cur = fs.readFileSync(file, 'utf8'); } catch { /* not there: nothing to keep */ }
-    if (cur !== null && chapterDiverged(cur, expected, html)) return { conflict: cur };
+    if (cur !== null && chapterDiverged(cur, expected, html)) {
+      slogTap((s) => s.read(bookDir(bookId), bookId, doc, cur));
+      return { conflict: cur };
+    }
   }
   writeFileDurable(file, html);
+  slogTap((s) => s.wrote(bookDir(bookId), bookId, doc, html));
   return true;
 });
 // shared with Pocket's bridge (same rule): the disk copy differs from what
@@ -674,33 +737,75 @@ function chapterDiverged(cur, expected, html) {
 
 ipcMain.handle('chapter:delete', (_e, bookId, chapterId) => {
   const file = path.join(bookDir(bookId), 'chapters', libName(chapterId) + '.html');
+  slogTap((s) => s.touch(bookDir(bookId), bookId));
   if (fs.existsSync(file)) fs.unlinkSync(file);
+  slogTap((s) => s.removed(bookDir(bookId), bookId, slog.chapterDoc(chapterId)));
   return true;
 });
 
 ipcMain.handle('aux:read', (_e, bookId, name) => {
   // name: 'notes' | 'outline'
   const file = path.join(bookDir(bookId), libName(name) + '.html');
+  let html;
   try {
-    return fs.readFileSync(file, 'utf8');
+    html = fs.readFileSync(file, 'utf8');
   } catch {
     return '';
   }
+  slogTap((s) => s.read(bookDir(bookId), bookId, slog.docOf('aux', name), html));
+  return html;
 });
 
 ipcMain.handle('aux:write', (_e, bookId, name, html) => {
+  const doc = slog.docOf('aux', name);
+  if (doc) slogTap((s) => s.touch(bookDir(bookId), bookId));
   writeFileDurable(path.join(bookDir(bookId), libName(name) + '.html'), html);
+  if (doc) slogTap((s) => s.wrote(bookDir(bookId), bookId, doc, html));
   return true;
 });
 
 ipcMain.handle('json:read', (_e, bookId, name, fallback) => {
-  return readJSON(path.join(bookDir(bookId), libName(name) + '.json'), fallback);
+  const file = path.join(bookDir(bookId), libName(name) + '.json');
+  const data = readJSON(file, fallback);
+  const doc = slog.docOf('json', name);
+  if (doc && fs.existsSync(file)) slogTap((s) => s.read(bookDir(bookId), bookId, doc, slog.jsonText(data)));
+  return data;
 });
 
 ipcMain.handle('json:write', (_e, bookId, name, data) => {
+  const doc = slog.docOf('json', name);
+  if (doc) slogTap((s) => s.touch(bookDir(bookId), bookId));
   writeJSON(path.join(bookDir(bookId), libName(name) + '.json'), data);
+  if (doc) slogTap((s) => s.wrote(bookDir(bookId), bookId, doc, slog.jsonText(data)));
   return true;
 });
+
+// The window's side of the log. observe: a document's text now and how it
+// got that way ({ src, cause, dur, ev, from }), sent once per burst and
+// always before the save that writes it. open / event: the editor opened
+// or closed a book. status: whether the open book is being logged.
+ipcMain.handle('slog:open', (_e, bookId) => {
+  const dir = bookDir(bookId);
+  slogMenu.bookId = bookId;
+  const st = slogTap((s) => s.open(dir, bookId));
+  slogMenuRefresh(true);
+  return st || null;
+});
+ipcMain.handle('slog:observe', (_e, bookId, kind, name, value, label) => {
+  const dir = bookDir(bookId);
+  if (kind === 'chapter') libName(name);
+  const doc = slog.docOf(kind, name);
+  const conv = slogText[kind];
+  if (!doc || !conv) return false;
+  return !!slogTap((s) => s.observe(dir, bookId, doc, conv(value), label));
+});
+ipcMain.handle('slog:event', (_e, bookId, ev) => {
+  libName(bookId);
+  if (!ev || ev.type !== 'close') return null;
+  if (slogMenu.bookId === bookId) { slogMenu.bookId = null; slogMenuRefresh(true); }
+  return slogTap((s) => s.close(bookId, 'close')) || null;
+});
+ipcMain.handle('slog:status', (_e, bookId) => slogTap((s) => s.status(bookDir(bookId), bookId)) || null);
 
 ipcMain.handle('book:delete', async (_e, bookId, title) => {
   const win = BrowserWindow.getFocusedWindow();
@@ -714,6 +819,9 @@ ipcMain.handle('book:delete', async (_e, bookId, title) => {
   });
   if (response === 1) {
     const { shell } = require('electron');
+    // the log's last line goes down before the folder moves
+    await Promise.resolve(slogTap((s) => s.drop(bookId))).catch((err) => logError('scribe\'s log', err));
+    if (slogMenu.bookId === bookId) { slogMenu.bookId = null; slogMenuRefresh(true); }
     try {
       await shell.trashItem(bookDir(bookId));
       return true;
@@ -1440,7 +1548,7 @@ ipcMain.handle('import:files', async (_e, paths) => {
   for (const fp of paths || []) {
     if (!/\.(docx|txt|md|fountain|fdx)$/i.test(fp)) continue;
     try {
-      out.push(await importFile(fp));
+      out.push(slogImportToken(fp, await importFile(fp)));
     } catch (err) {
       logError('import', err);
       out.push({ name: path.basename(fp), error: String(err.message || err) });
@@ -1460,7 +1568,7 @@ ipcMain.handle('import:pick', async () => {
   const out = [];
   for (const fp of filePaths) {
     try {
-      out.push(await importFile(fp));
+      out.push(slogImportToken(fp, await importFile(fp)));
     } catch (err) {
       logError('import', err);
       out.push({ name: path.basename(fp), error: String(err.message || err) });
@@ -1948,6 +2056,14 @@ function buildMenu() {
           label: t('Email Draft to Myself'),
           accelerator: 'CmdOrCtrl+E',
           click: () => sendToWindow({ type: 'emailDraft' })
+        },
+        // the open book's log: the window flips scribesLog in book.json
+        {
+          label: t('Scribe\'s Log'),
+          type: 'checkbox',
+          checked: slogMenu.on,
+          enabled: !!slogMenu.bookId,
+          click: () => sendToWindow({ type: 'scribesLog', bookId: slogMenu.bookId, on: !slogMenu.on })
         },
         { label: t('Email Settings…'), click: () => sendToWindow({ type: 'emailSettings' }) },
         { label: t('Cover Art…'), click: () => sendToWindow({ type: 'coverArt' }) },
@@ -2604,6 +2720,7 @@ app.whenReady().then(() => {
     // that failed); an existing day's zip makes this a no-op
     setInterval(() => { dailyBackup().catch(() => {}); }, 60 * 60 * 1000).unref?.();
     try { checkForUpdates(); } catch (err) { logError('updater', err); }
+    try { slogWatch(); } catch (err) { logError('scribe\'s log', err); }
   } catch (err) {
     // catastrophic: tell the human instead of dying in silence
     logError('startup', err);
@@ -2620,3 +2737,37 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
+
+// Each open chunk gets its last line before NEO goes: once the windows have
+// closed (their last saves are in), quitting waits for the log's writes,
+// up to a few seconds, then goes ahead.
+let slogQuitting = false;
+app.on('will-quit', (e) => {
+  if (slogQuitting || !slogRecorder || !slogRecorder.busy()) return;
+  e.preventDefault();
+  slogQuitting = true;
+  const wait = new Promise((resolve) => setTimeout(resolve, 3000));
+  Promise.race([Promise.resolve(slogTap((s) => s.closeAll('quit'))), wait])
+    .catch((err) => logError('scribe\'s log', err))
+    .then(() => app.quit());
+});
+
+// Sleep, wake, and a wall clock that jumps against the steady one: noted as
+// they happen, since a gap in the writing can't be explained afterwards.
+function slogWatch() {
+  const { powerMonitor } = require('electron');
+  let wall = Date.now();
+  let steady = performance.now();
+  const reset = () => { wall = Date.now(); steady = performance.now(); };
+  powerMonitor.on('suspend', () => { slogTap((s) => s.event('sleep')); reset(); });
+  powerMonitor.on('resume', () => { reset(); slogTap((s) => s.event('wake')); });
+  const timer = setInterval(() => {
+    const w = Date.now();
+    const m = performance.now();
+    const jump = slog.clockJump(wall, steady, w, m);
+    wall = w;
+    steady = m;
+    if (jump) slogTap((s) => s.event('clock', { jump }));
+  }, 60 * 1000);
+  if (timer.unref) timer.unref();
+}

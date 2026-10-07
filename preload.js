@@ -60,6 +60,15 @@ contextBridge.exposeInMainWorld('neo', {
   paper: ipcRenderer.sendSync('paper:get'), // 'Letter' or 'A4', from the computer's region
   reloadForLanguage: () => ipcRenderer.invoke('i18n:reload'),
 
+  // the Scribe's Log (main.js does the recording; Pocket has no slog, which
+  // is what keeps the window's logging off there)
+  slog: {
+    open: (bookId) => ipcRenderer.invoke('slog:open', bookId),
+    observe: (bookId, kind, name, value, label) => ipcRenderer.invoke('slog:observe', bookId, kind, name, value, label),
+    event: (bookId, ev) => ipcRenderer.invoke('slog:event', bookId, ev),
+    status: (bookId) => ipcRenderer.invoke('slog:status', bookId)
+  },
+
   writingStyleState: (st) => ipcRenderer.send('style:state', st),
   viewState: (st) => ipcRenderer.send('view:state', st),
   onMenu: (cb) => ipcRenderer.on('menu', (_e, msg) => cb(msg))

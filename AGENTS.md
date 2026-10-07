@@ -28,6 +28,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before adding a feature. The product is 
 | `i18n.js` | `t()` / `tk()`, shared by main and the window. English source text is the key |
 | `spell-worker.js` | Hunspell WASM, forked with `utilityProcess`. Messages: `load`, `check`, `suggest`, `add` |
 | `spell-ro.js` | Romanian diacritics, used by the worker. Does not alter the manuscript |
+| `slog.js` | The Scribe's Log: hashing, the chain, chunk files, diff, check and replay, and the `Recorder` the main process keeps each book's log with. Format: `SLOG-FORMAT.md` |
 | `locales/<code>.json` | One language. Regional files (`fr-CA.json`) hold only the strings that differ |
 | `pocket/` | Capacitor shell. It does not contain its own editor |
 
@@ -61,6 +62,14 @@ A book whose `book.json` says `"format": "screenplay"` is a script. Right-click 
 - A script's style lives in its `book.json`: `underlineHeadings: true` (Format → Underline Scene Headings) and `contd: false` ((CONT'D) turned off).
 - A script exports as a PDF (letter, printed with `print: 'screenplay'`), Fountain or Final Draft (`.fdx`). The book formats don't apply.
 - A `.fountain` or `.fdx` file dropped on a shelf or picked with Import becomes a new script. `importFile` in `main.js` only reads the file; `spFromFountain` and `spFromFdx` in `app.js` sort it into elements. Both readers are plain string functions, so the tests cover them (`scripts/fixtures/` holds a Final Draft file written by screenplain, an outside tool).
+
+## Scribe's Log
+
+Each book's log lives in its `scribes-log/` folder: `log.json` (made once) and one `.slog` chunk per session per device. `main.js` holds one `slog.Recorder`; every chapter, aux, json and book.json handler tells it what it read or wrote (`slogTap`, which never lets a logging failure stop a save). The window describes how text changed through `window.neo.slog.observe` before it saves; a save it didn't describe is still logged, as `unlogged`. Text found on disk that this process didn't write is `arrived`. `book.json`'s `scribesLog: false` switches a book's log off.
+
+- The device id and each book's cached state live in `userData/slog/`, never in the library.
+- `node scripts/slog-check.js "<book folder>"` checks every chain and replays it against the files on disk.
+- Pocket's bridge has no `slog`, so nothing in the window logs there.
 
 ## Processes
 

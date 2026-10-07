@@ -15,11 +15,14 @@
 // written again, which keeps a synced library quiet. The format is set out
 // in SLOG-FORMAT.md.
 //
-// This file is plain functions plus a small append-only writer. It runs in
-// the main process (the window never touches the disk) and in node:test.
+// This file is plain functions, a small append-only writer, and the
+// Recorder that keeps each book's log. It runs in the main process (the
+// window never touches the disk) and in node:test.
 
 const crypto = require('node:crypto');
+const fs = require('node:fs');
 const fsp = require('node:fs/promises');
+const path = require('node:path');
 
 const FORMAT = 1;
 const LOG_DIR = 'scribes-log';
@@ -27,6 +30,8 @@ const LOG_INFO = 'log.json';
 const KINDS = new Set(['open', 'edit', 'base', 'doc', 'on', 'off', 'sleep', 'wake', 'clock', 'close', 'stamp']);
 // 20261007T160512Z-7f3a9c2e.slog, with -2, -3… if a name is ever taken
 const CHUNK_RE = /^(\d{8}T\d{6}Z)-([0-9a-f]{8})(?:-([1-9]\d{0,3}))?\.slog$/;
+// what Windows says while something else has a file open for a moment
+const BUSY = ['EPERM', 'EACCES', 'EBUSY'];
 
 /* ------------------------------------------------------------------ */
 /*  Hashing                                                            */
@@ -261,7 +266,9 @@ class Chain {
   entry(kind, fields = {}, ins = null) {
     if (!KINDS.has(kind)) throw new Error('Scribe\'s Log: unknown entry kind ' + kind);
     const n = this.n + 1;
-    const e = { ...fields, kind, n, prev: this.head, ts: Math.round(this.now()) }; // the chain sets these, never the caller
+    // the chain sets these four, never the caller; they lead each line so it reads easily
+    const e = { kind, n, prev: this.head, ts: Math.round(this.now()) };
+    for (const k of Object.keys(fields)) if (!(k in e) && k !== 'c' && k !== 'x') e[k] = fields[k];
     if (ins && ins.some((s) => s.length)) {
       e.c = commitment(this.key, this.dev, n, ins);
       e.x = { ins };
@@ -285,8 +292,9 @@ const isChunkName = (name) => typeof name === 'string' && CHUNK_RE.test(name);
 
 // Append-only, one write at a time, every write pushed to the disk before
 // it counts. A write that fails part-way is cut back to the last whole line,
-// so the next one never lands glued to half an entry; if even that fails the
-// writer is `broken` and the caller starts a fresh chunk.
+// so nothing is left glued to half an entry, and the writer is `broken`
+// from then on: the lines queued behind it would link to entries that never
+// reached the disk. The caller starts a fresh chunk.
 class ChunkWriter {
   constructor(file) {
     this.file = file;
@@ -316,7 +324,7 @@ class ChunkWriter {
       const buf = Buffer.from(batch.map((b) => b.line + '\n').join(''), 'utf8');
       let fh = null;
       try {
-        fh = await fsp.open(this.file, 'a');
+        fh = await openSoon(this.file);
         for (let off = 0; off < buf.length;) {
           const { bytesWritten } = await fh.write(buf, off, buf.length - off);
           if (!(bytesWritten > 0)) throw Object.assign(new Error('Short write: ' + this.file), { code: 'EIO' });
@@ -326,12 +334,22 @@ class ChunkWriter {
         this.size += buf.length;
         for (const b of batch) b.resolve();
       } catch (err) {
-        try { if (fh) await fh.truncate(this.size); } catch (cut) { this.broken = cut; }
-        if (!fh) this.broken = err;
+        try { if (fh) await fh.truncate(this.size); } catch { /* a reader sets the half line aside */ }
+        this.broken = err;
         for (const b of batch) b.reject(err);
       } finally {
         if (fh) await fh.close().catch(() => {});
       }
+    }
+  }
+}
+
+// The same patience for opening a chunk that a sync client is reading
+async function openSoon(file) {
+  for (let wait = 5; ; wait *= 2) {
+    try { return await fsp.open(file, 'a'); } catch (err) {
+      if (process.platform !== 'win32' || wait > 640 || !BUSY.includes(err.code)) throw err;
+      await new Promise((resolve) => setTimeout(resolve, wait));
     }
   }
 }
@@ -482,11 +500,791 @@ function replay(entries, { docs = {}, from = 0 } = {}) {
   return { docs: text, lengths: length, problems };
 }
 
+/* ------------------------------------------------------------------ */
+/*  Documents: what the log calls each file, and its text              */
+/* ------------------------------------------------------------------ */
+
+// A book's documents are its chapters (each by its own id), notes.html,
+// outline.html, darlings.json, stickies.json and book.json. Other files in
+// the folder (covers, art.json) aren't writing and aren't logged.
+const AUX_DOCS = ['notes', 'outline'];
+const JSON_DOCS = ['darlings', 'stickies'];
+const NAMED_DOCS = new Set(['book', ...AUX_DOCS, ...JSON_DOCS]);
+
+// A chapter's document is its id. A chapter file named like one of the
+// others (only ever a folder edited by hand) gets "ch:" in front.
+const chapterDoc = (id) => (NAMED_DOCS.has(id) ? 'ch:' + id : id);
+function docChapter(doc) {
+  if (NAMED_DOCS.has(doc)) return null;
+  return doc.startsWith('ch:') && NAMED_DOCS.has(doc.slice(3)) ? doc.slice(3) : doc;
+}
+// the document behind a main-process read or write, or null when it isn't logged
+function docOf(kind, name) {
+  if (kind === 'book') return 'book';
+  if (typeof name !== 'string' || !name) return null;
+  if (kind === 'chapter') return chapterDoc(name);
+  if (kind === 'aux') return AUX_DOCS.includes(name) ? name : null;
+  if (kind === 'json') return JSON_DOCS.includes(name) ? name : null;
+  return null;
+}
+
+// book.json fields that change on their own (where the caret was, word
+// counts, when it was saved) or that aren't the writing (covers, the
+// export id, the folder's own name, this log's switch). The rest is the
+// book's metadata: title, author, chapter order and titles, notes on
+// sections and scenes.
+const BOOK_SKIP = new Set(['id', 'lastPosition', 'modified', 'wordCount', 'dailyCounts', 'scribesLog',
+  'uuid', 'coverArt', 'coverImage', 'coverMode', 'coverSeed']);
+
+function sortKeys(v) {
+  if (Array.isArray(v)) return v.map(sortKeys);
+  if (v && typeof v === 'object') {
+    const o = {};
+    for (const k of Object.keys(v).sort()) o[k] = sortKeys(v[k]);
+    return o;
+  }
+  return v;
+}
+
+// The book document: book.json without the fields above, without empty
+// values (NEO fills in `chapterTitles: {}` and the like after opening; the
+// same book either way), keys sorted, two-space indents.
+function bookText(meta) {
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return null;
+  const c = {};
+  for (const k of Object.keys(meta).sort()) {
+    if (BOOK_SKIP.has(k)) continue;
+    const v = meta[k];
+    if (v === undefined || v === null || v === '') continue;
+    if (typeof v === 'object' && Object.keys(v).length === 0) continue;
+    c[k] = sortKeys(v);
+  }
+  return JSON.stringify(c, null, 2);
+}
+// Darlings and comments: the list as NEO writes the file
+const jsonText = (data) => (data === undefined ? null : JSON.stringify(data, null, 2));
+
+// Which fields of the book document an edit changed, so a log without its
+// words still shows that the author's name changed (not what to)
+function bookKeys(before, after) {
+  const parse = (t) => { try { const v = JSON.parse(t); return v && typeof v === 'object' ? v : {}; } catch { return {}; } };
+  const a = parse(before);
+  const b = parse(after);
+  return [...new Set([...Object.keys(a), ...Object.keys(b)])].sort()
+    .filter((k) => JSON.stringify(a[k]) !== JSON.stringify(b[k]));
+}
+
+// The manuscript as text, read from the documents themselves so anyone
+// replaying a log gets the same result: each chapter in the book's order
+// (a Contents page left out), each <p> one line, a scene break "***". What
+// NEO keeps out of every export stays out here too: an unwritten outline
+// section (a ghost paragraph and the break planted for it), placeholder
+// flags and Darlings anchors.
+const VOID_TAGS = new Set(['br', 'img', 'hr', 'wbr', 'input', 'col', 'area', 'embed', 'source', 'track', 'meta', 'link', 'base', 'param']);
+const LEFT_OUT = ['ghost', 'ph-mark', 'darling-anchor'];
+const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: '\'', nbsp: '\u00a0' };
+function decodeEntities(s) {
+  return s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
+    if (e[0] === '#') {
+      const code = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : m;
+    }
+    const v = ENTITIES[e.toLowerCase()];
+    return v === undefined ? m : v;
+  });
+}
+function attrOf(attrs, name) {
+  const m = new RegExp('(?:^|\\s)' + name + '\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\'|([^\\s>]+))', 'i').exec(attrs);
+  return m ? decodeEntities(m[1] ?? m[2] ?? m[3]) : null;
+}
+const classesOf = (attrs) => new Set((attrOf(attrs, 'class') || '').split(/\s+/).filter(Boolean));
+
+function chapterLines(html) {
+  const src = String(html || '');
+  const TAG = /<!--[\s\S]*?-->|<(\/?)([a-zA-Z][\w-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>|[^<]+|</g;
+  // the breaks planted for unwritten sections
+  const ghosts = new Set();
+  for (const m of src.matchAll(TAG)) {
+    if (m[2] && !m[1] && m[2].toLowerCase() === 'p' && classesOf(m[3]).has('ghost')) {
+      const id = attrOf(m[3], 'data-sec-id');
+      if (id !== null) ghosts.add(id);
+    }
+  }
+  const lines = [];
+  const stack = []; // open elements: { name, out }
+  let out = 0;      // how many of them are left out
+  let para = null;
+  const endPara = () => {
+    if (!para) return;
+    if (!para.out) {
+      if (para.brk) lines.push('***');
+      else if (para.text.trim()) lines.push(para.text.trim());
+    }
+    para = null;
+  };
+  for (const m of src.matchAll(TAG)) {
+    const tok = m[0];
+    if (tok.startsWith('<!--')) continue;
+    if (!m[2]) { if (para && !out) para.text += decodeEntities(tok); continue; }
+    const name = m[2].toLowerCase();
+    if (!m[1]) {
+      const cls = classesOf(m[3]);
+      if (name === 'p') {
+        endPara(); // a <p> left open ends where the next begins
+        while (stack.length) if (stack.pop().out) out--;
+        const brk = cls.has('scene-break');
+        para = { text: '', brk, out: (brk && ghosts.has(attrOf(m[3], 'data-sec-brk'))) || cls.has('ghost') };
+        stack.push({ name, out: false });
+        continue;
+      }
+      if (VOID_TAGS.has(name) || /\/\s*$/.test(m[3])) {
+        if (name === 'br' && para && !out) para.text += '\n';
+        continue;
+      }
+      const left = LEFT_OUT.some((c) => cls.has(c));
+      stack.push({ name, out: left });
+      if (left) out++;
+      continue;
+    }
+    // a closing tag closes back to its own opening tag, if it has one
+    let i = stack.length - 1;
+    while (i >= 0 && stack[i].name !== name) i--;
+    if (i < 0) continue;
+    while (stack.length > i) if (stack.pop().out) out--;
+    if (name === 'p') endPara();
+  }
+  endPara();
+  return lines;
+}
+
+function manuscriptText(docs) {
+  let meta = null;
+  try { meta = JSON.parse(docs.book); } catch { /* no book document */ }
+  const order = meta && Array.isArray(meta.chapterOrder)
+    ? meta.chapterOrder
+    : Object.keys(docs).filter((d) => docChapter(d) !== null).map(docChapter).sort();
+  const kinds = (meta && meta.chapterKinds) || {};
+  const lines = [];
+  for (const id of order) {
+    if (kinds[id] === 'contents') continue;
+    const html = docs[chapterDoc(id)];
+    if (typeof html === 'string') lines.push(...chapterLines(html));
+  }
+  return lines.join('\n');
+}
+
+/* ------------------------------------------------------------------ */
+/*  Small file helpers                                                 */
+/* ------------------------------------------------------------------ */
+
+function readQuiet(file) {
+  try { return fs.readFileSync(file, 'utf8'); } catch { return null; }
+}
+function parseQuiet(text) {
+  if (typeof text !== 'string') return undefined;
+  try { return JSON.parse(text); } catch { return undefined; }
+}
+function sizeOf(file) {
+  try { return fs.statSync(file).size; } catch { return -1; }
+}
+// Beside, pushed to the disk, then swapped in. With keep, a file that's
+// already there wins (log.json is made once, and a synced copy may arrive
+// first): false says so.
+function writeWhole(file, text, { keep = false } = {}) {
+  const tmp = file + '.tmp';
+  const fd = fs.openSync(tmp, 'w');
+  try {
+    fs.writeFileSync(fd, text);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  if (keep && fs.existsSync(file)) {
+    try { fs.unlinkSync(tmp); } catch { /* left beside it, harmless */ }
+    return false;
+  }
+  renameSoon(tmp, file);
+  return true;
+}
+// Windows refuses a rename while anything has the file open for a moment
+// (antivirus, the indexer, a sync client): wait a beat and try again
+function renameSoon(from, to) {
+  for (let wait = 5; ; wait *= 2) {
+    try { return fs.renameSync(from, to); } catch (err) {
+      if (process.platform !== 'win32' || wait > 320 || !BUSY.includes(err.code)) throw err;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);
+    }
+  }
+}
+
+// The documents of a book folder as they stand on disk. `held` names the
+// ones a sync service is still holding back (iCloud's .name.icloud) or that
+// can't be read whole right now: not there isn't the same as deleted.
+function readBookDocs(dir) {
+  const docs = {};
+  const held = new Set();
+  const rawMeta = readQuiet(path.join(dir, 'book.json'));
+  const meta = parseQuiet(rawMeta);
+  const book = bookText(meta);
+  if (book !== null) docs.book = book;
+  else held.add('book');
+  let files = [];
+  try { files = fs.readdirSync(path.join(dir, 'chapters')); } catch { /* none yet */ }
+  const ids = files.filter((f) => f.endsWith('.html')).map((f) => f.slice(0, -5));
+  for (const f of files) {
+    const m = /^\.(.+)\.html\.icloud$/.exec(f);
+    if (m) held.add(chapterDoc(m[1]));
+  }
+  const order = meta && Array.isArray(meta.chapterOrder) ? meta.chapterOrder.filter((id) => ids.includes(id)) : [];
+  for (const id of [...new Set(order), ...ids.filter((id) => !order.includes(id)).sort()]) {
+    const t = readQuiet(path.join(dir, 'chapters', id + '.html'));
+    if (t === null) held.add(chapterDoc(id));
+    else docs[chapterDoc(id)] = t;
+  }
+  for (const name of AUX_DOCS) {
+    const t = readQuiet(path.join(dir, name + '.html'));
+    if (t !== null) docs[name] = t;
+  }
+  for (const name of JSON_DOCS) {
+    const raw = readQuiet(path.join(dir, name + '.json'));
+    if (raw === null) continue;
+    const v = parseQuiet(raw);
+    if (v === undefined) held.add(name);
+    else docs[name] = jsonText(v);
+  }
+  return { docs, held };
+}
+
+// What an import entry says about the file it came from: when it was last
+// changed and its fingerprint. Never its name.
+function fileFacts(file) {
+  const st = fs.statSync(file);
+  return { mtime: Math.round(st.mtimeMs), sha256: sha256hex(fs.readFileSync(file)) };
+}
+
+// How far the wall clock moved against the steady one between two looks,
+// when it's more than a minute either way (otherwise 0)
+function clockJump(wall0, mono0, wall1, mono1, limit = 60000) {
+  const jump = Math.round((wall1 - wall0) - (mono1 - mono0));
+  return Math.abs(jump) > limit ? jump : 0;
+}
+
+/* ------------------------------------------------------------------ */
+/*  The Recorder: each book's log, kept by the main process            */
+/* ------------------------------------------------------------------ */
+
+// The window says how text changed; the main process sees every file a book
+// reads and writes. The Recorder keeps the log's own copy of each document
+// (`docs`), turns each change into an entry, and squares the log with the
+// disk whenever it finds text it didn't record, so the log always ends in
+// exactly what's on disk. It never blocks a save: entries go to the disk on
+// their own queue, and a failure is reported and caught up later.
+//
+// A session is one book as this device has it open. Its chunk (one file of
+// entries) starts with the first entry and closes when the book closes, NEO
+// quits, the writing stops for half an hour, the log is switched off, or the
+// chunk reaches 8 MB. `disk` is each document as this process last read or
+// wrote it; it's how a change that arrived from another device is told apart
+// from words the window has observed but not yet saved.
+
+const IDLE_MS = 30 * 60 * 1000;
+const MAX_CHUNK = 8 * 1024 * 1024;
+const IMPORT_MS = 2 * 60 * 1000;   // how long a new imported book's first writes count as the import
+const RETRY_MS = 30 * 1000;        // after a write fails, how long before the log tries the disk again
+const WINDOW_SRC = new Set(['typed', 'paste', 'drop', 'move', 'import', 'arrived']);
+const CAUSES = new Set(['undo', 'redo', 'replace', 'outline', 'split', 'join', 'spell', 'darling', 'placeholder']);
+
+const wholeAtLeast = (v, min) => Number.isSafeInteger(v) && v >= min;
+function cleanFrom(f) {
+  if (!f || typeof f !== 'object') return undefined;
+  if (wholeAtLeast(f.n, 1) && wholeAtLeast(f.op, 0) && wholeAtLeast(f.off, 0)) return { n: f.n, op: f.op, off: f.off };
+  if (typeof f.doc === 'string' && f.doc && f.doc.length <= 200 && wholeAtLeast(f.at, 0)) return { doc: f.doc, at: f.at };
+  if (typeof f.log === 'string' && /^[0-9a-f]{16}$/.test(f.log)) return { log: f.log };
+  return undefined;
+}
+// A label from the window, cut down to what the format allows
+function cleanLabel(label) {
+  const l = label && typeof label === 'object' ? label : {};
+  const how = { src: WINDOW_SRC.has(l.src) ? l.src : 'unlogged' };
+  if (CAUSES.has(l.cause)) how.cause = l.cause;
+  if (wholeAtLeast(l.dur, 0)) how.dur = l.dur;
+  if (wholeAtLeast(l.ev, 0)) how.ev = l.ev;
+  if (how.src === 'move') {
+    const from = cleanFrom(l.from);
+    if (from) how.from = from;
+  }
+  return how;
+}
+
+function validInfo(v) {
+  return !!v && v.v === FORMAT && typeof v.logId === 'string' && /^[0-9a-f]{16}$/.test(v.logId) &&
+    typeof v.key === 'string' && Buffer.from(v.key, 'base64').length === 32;
+}
+
+class Recorder {
+  // home: this computer's own folder for the log (Electron's userData/slog):
+  // the device id and each book's cached state. Never inside the library.
+  constructor({ home, app = '', now = Date.now, onError = () => {}, onChange = () => {}, idleMs = IDLE_MS, maxChunk = MAX_CHUNK }) {
+    this.home = home;
+    this.idleMs = idleMs;
+    this.maxChunk = maxChunk;
+    this.app = String(app);
+    this.now = now;
+    this.onError = onError;
+    this.onChange = onChange;
+    this.sessions = new Map();
+    this.imports = new Map();
+    this.dev = null;
+  }
+
+  // 128 random bits, made once per installation
+  device() {
+    if (this.dev) return this.dev;
+    const file = path.join(this.home, 'device.json');
+    const have = parseQuiet(readQuiet(file));
+    if (have && typeof have.dev === 'string' && /^[0-9a-f]{32}$/.test(have.dev)) return (this.dev = have.dev);
+    fs.mkdirSync(this.home, { recursive: true });
+    const dev = newDeviceId();
+    writeWhole(file, JSON.stringify({ dev }, null, 2) + '\n');
+    return (this.dev = dev);
+  }
+
+  /* ---- what main.js calls ---- */
+
+  // The writer opened the book in NEO
+  open(dir, bookId) {
+    this.session(dir, bookId, { start: true });
+    return this.status(dir, bookId);
+  }
+
+  // About to write one of the book's documents: the log squares itself
+  // with the disk first, so the write that follows is the only change.
+  touch(dir, bookId) {
+    return this.session(dir, bookId, { start: true });
+  }
+
+  // About to write book.json. Saving the caret's place (or a cover) in a
+  // book that has no log yet doesn't start one; changing the book does.
+  beforeMeta(dir, bookId, meta) {
+    if (this.sessions.has(bookId)) return;
+    if (fs.existsSync(path.join(dir, LOG_DIR, LOG_INFO))) { this.session(dir, bookId, { start: true }); return; }
+    if (meta && meta.scribesLog === false) return;
+    const old = parseQuiet(readQuiet(path.join(dir, 'book.json')));
+    if (old && old.scribesLog !== false && bookText(old) === bookText(meta)) return;
+    this.session(dir, bookId, { start: true });
+  }
+
+  // A document reached the disk from this device. Text the window already
+  // described matches and adds nothing; anything else is logged as it is.
+  wrote(dir, bookId, doc, text) {
+    const s = this.sessions.get(bookId);
+    if (!s || s.dir !== dir || !s.on || !s.info || doc == null || typeof text !== 'string') return;
+    const importing = s.imported && this.now() < s.importUntil;
+    if (!importing) s.imported = null;
+    this._put(s, doc, text, importing ? { base: 'import', src: 'import', file: s.imported } : { src: 'unlogged' });
+    s.disk[doc] = text;
+  }
+
+  // A document was read. Text on disk that this process didn't put there
+  // came from another device. When the window has words of its own not yet
+  // saved, the two meet in the window (adopted, or kept as a chapter of its
+  // own) and are logged when it writes; nothing is decided here.
+  read(dir, bookId, doc, text) {
+    const s = this.sessions.get(bookId);
+    if (!s || s.dir !== dir || !s.on || !s.info || doc == null || typeof text !== 'string' || text === '') return;
+    if (s.disk[doc] === text) return;
+    const inStep = s.docs[doc] === s.disk[doc];
+    s.disk[doc] = text;
+    if (inStep) this._put(s, doc, text, s.docs[doc] === undefined ? { base: 'arrived', src: 'arrived' } : { src: 'arrived' });
+  }
+
+  // A chapter file was deleted by this device
+  removed(dir, bookId, doc) {
+    const s = this.sessions.get(bookId);
+    if (!s || s.dir !== dir || !s.on || !s.info || doc == null) return;
+    this._remove(s, doc, { src: 'unlogged' });
+  }
+
+  // The window says how a document changed: its text now, and how it got
+  // that way (typed, pasted, moved…). Returns whether it was taken.
+  observe(dir, bookId, doc, text, label) {
+    const s = this.session(dir, bookId, { start: true });
+    if (!s.on || !s.info || doc == null || typeof text !== 'string') return false;
+    const how = cleanLabel(label);
+    if (how.src !== 'import') s.imported = null;
+    if (s.docs[doc] === undefined && (how.src === 'import' || how.src === 'arrived')) {
+      how.base = how.src;
+      if (how.src === 'import' && s.imported) how.file = s.imported;
+    }
+    this._put(s, doc, text, how);
+    return true;
+  }
+
+  // A file was read in for import. The token travels with the parsed book
+  // to book:create, which ties the new book's first text to this file.
+  rememberImport(facts) {
+    const at = this.now();
+    for (const [k, v] of this.imports) if (at - v.at > 10 * 60 * 1000) this.imports.delete(k);
+    const token = crypto.randomBytes(8).toString('hex');
+    this.imports.set(token, { facts, at });
+    return token;
+  }
+
+  // book:create made a new book folder
+  created(dir, bookId, token) {
+    const imp = typeof token === 'string' ? this.imports.get(token) : null;
+    if (imp) this.imports.delete(token);
+    const s = this.session(dir, bookId, { start: true, mode: imp ? 'import' : 'new', file: imp ? imp.facts : null });
+    if (imp && s.info) {
+      s.imported = imp.facts;
+      s.importUntil = this.now() + IMPORT_MS;
+    }
+  }
+
+  // book.json was written: the book document, and the log's switch
+  metaWritten(dir, bookId, meta) {
+    const s = this.sessions.get(bookId);
+    if (!s || s.dir !== dir || !meta || typeof meta !== 'object') return;
+    const on = meta.scribesLog !== false;
+    if (s.on && !on) {
+      if (s.info) {
+        this.wrote(dir, bookId, 'book', bookText(meta));
+        this._append(s, 'off', {});
+        this._close(s, 'off');
+      }
+      s.on = false;
+      this.onChange(bookId);
+      return;
+    }
+    if (!s.on && on) {
+      s.on = true;
+      if (!s.info) {
+        if (!s.unreadable) this._attach(s, this._makeInfo(s.dir), 'baseline');
+      } else {
+        this._append(s, 'on', {});
+        this._reconcile(s, 'off');
+      }
+      this.onChange(bookId);
+      return;
+    }
+    if (s.on) this.wrote(dir, bookId, 'book', bookText(meta));
+  }
+
+  // sleep, wake, clock: noted in every chunk being written
+  event(kind, fields = {}) {
+    for (const s of this.sessions.values()) if (s.on && s.info && s.chunk) this._append(s, kind, fields);
+  }
+
+  status(dir, bookId) {
+    const s = this.sessions.get(bookId);
+    if (s && s.dir === dir) return { on: s.on, logging: !!s.info, n: s.chain ? s.chain.n : 0, chunk: s.chunk ? s.chunk.name : null };
+    const meta = parseQuiet(readQuiet(path.join(dir, 'book.json')));
+    return { on: !(meta && meta.scribesLog === false), logging: fs.existsSync(path.join(dir, LOG_DIR, LOG_INFO)), n: null, chunk: null };
+  }
+
+  // The book closed: its chunk ends. Resolves once the last line is down.
+  close(bookId, why = 'close') {
+    const s = this.sessions.get(bookId);
+    return s ? this._close(s, why) : Promise.resolve();
+  }
+  // …and the session is let go (the book's folder is going away)
+  drop(bookId, why = 'close') {
+    const s = this.sessions.get(bookId);
+    if (!s) return Promise.resolve();
+    this.sessions.delete(bookId);
+    return this._close(s, why);
+  }
+  closeAll(why = 'quit') {
+    return Promise.all([...this.sessions.values()].map((s) => this._close(s, why))).then(() => {});
+  }
+  busy() {
+    return [...this.sessions.values()].some((s) => s.chunk || s.closing);
+  }
+
+  /* ---- sessions ---- */
+
+  session(dir, bookId, { start = false, mode = null, file = null } = {}) {
+    let s = this.sessions.get(bookId);
+    if (s && s.dir !== dir) { this.drop(bookId); s = null; }
+    if (!s) {
+      const meta = parseQuiet(readQuiet(path.join(dir, 'book.json')));
+      s = {
+        bookId, dir, on: !(meta && meta.scribesLog === false),
+        info: null, key: null, unreadable: false, chain: null, docs: {}, disk: {},
+        chunk: null, last: null, count: 0, failed: 0, idle: null, closing: null, saved: 0,
+        imported: null, importUntil: 0
+      };
+      this.sessions.set(bookId, s);
+      const raw = readQuiet(path.join(dir, LOG_DIR, LOG_INFO));
+      if (raw !== null) {
+        const info = parseQuiet(raw);
+        if (validInfo(info)) this._attach(s, info, 'arrived');
+        else {
+          // a log.json this version can't read: leave the log alone
+          s.unreadable = true;
+          this.onError('log.json', new Error(bookId + ': unreadable or from a newer NEO; this book isn\'t logged'));
+        }
+      }
+    }
+    if (start && s.on && !s.info && !s.unreadable) this._attach(s, this._makeInfo(dir), mode || 'baseline', file);
+    return s;
+  }
+
+  _makeInfo(dir) {
+    const logDir = path.join(dir, LOG_DIR);
+    fs.mkdirSync(logDir, { recursive: true });
+    const file = path.join(logDir, LOG_INFO);
+    const info = newLogInfo();
+    if (writeWhole(file, JSON.stringify(info, null, 2) + '\n', { keep: true })) return info;
+    const there = parseQuiet(readQuiet(file));
+    if (validInfo(there)) return there;
+    throw new Error('Scribe\'s Log: can\'t read ' + file);
+  }
+
+  // A log for the book is now in hand: pick up this device's chain where it
+  // left off, and (when logging) square it with the disk.
+  _attach(s, info, mode, file = null) {
+    s.info = info;
+    s.key = Buffer.from(info.key, 'base64');
+    const st = this._chainState(s, true);
+    s.chain = new Chain({ dev: this.device(), key: s.key, n: st.n, head: st.head, now: this.now });
+    s.last = st.last;
+    s.count = st.count;
+    s.saved = st.n;
+    s.docs = { ...st.docs };
+    s.disk = { ...st.docs };
+    if (s.on) this._reconcile(s, mode, file);
+  }
+
+  _cacheFile(s) {
+    return path.join(this.home, `${s.info.logId}-${sha256hex(s.bookId).slice(0, 8)}.json`);
+  }
+
+  // Where this device's chain stands: from the cache when it matches the
+  // chunks on disk exactly, otherwise by reading and replaying them.
+  _chainState(s, useCache) {
+    const dev = this.device();
+    const logDir = path.join(s.dir, LOG_DIR);
+    let names = [];
+    try {
+      names = fs.readdirSync(logDir).filter((f) => {
+        const m = CHUNK_RE.exec(f);
+        return m && m[2] === dev.slice(0, 8);
+      });
+    } catch { /* no chunks yet */ }
+    if (useCache) {
+      const c = parseQuiet(readQuiet(this._cacheFile(s)));
+      if (c && c.v === 1 && c.dev === dev && c.logId === s.info.logId && c.bookId === s.bookId &&
+          c.count === names.length && Number.isSafeInteger(c.n) && c.docs && typeof c.docs === 'object' &&
+          (c.count === 0 ? c.n === 0 : names.includes(c.last) && sizeOf(path.join(logDir, c.last)) === c.size)) {
+        return { n: c.n, head: c.head, last: c.last, count: c.count, docs: c.docs };
+      }
+    }
+    const chunks = [];
+    for (const name of names) {
+      const parsed = parseChunk(readQuiet(path.join(logDir, name)) || '');
+      const open = parsed.entries[0];
+      if (open && open.dev !== dev) continue; // another device whose id starts the same way
+      chunks.push({ name, ...parsed });
+    }
+    const v = verifyChain(chunks, { key: s.key });
+    if (!v.ok) this.onError('check', new Error(`${s.bookId}: this device's chain has ${v.problems.length} problem(s); first: ${JSON.stringify(v.problems[0])}`));
+    const byName = new Map(chunks.map((c) => [c.name, c]));
+    const r = replay(v.chunks.flatMap((name) => byName.get(name).entries));
+    if (r.problems.length) this.onError('replay', new Error(`${s.bookId}: ${r.problems.length} entr(ies) didn't replay; first: ${JSON.stringify(r.problems[0])}`));
+    const docs = {};
+    for (const [id, t] of Object.entries(r.docs)) if (typeof t === 'string') docs[id] = t;
+    return { n: v.n, head: v.head, last: v.chunks[v.chunks.length - 1] || null, count: names.length, docs };
+  }
+
+  // Log whatever on disk differs from the log's copy
+  _reconcile(s, mode, file = null) {
+    const { docs, held } = readBookDocs(s.dir);
+    this._sync(s, docs, mode, held, file);
+    for (const [doc, t] of Object.entries(docs)) s.disk[doc] = t;
+  }
+
+  // Bring the log's copy to `target`, entry by entry
+  _sync(s, target, mode, held = new Set(), file = null) {
+    for (const [doc, text] of Object.entries(target)) {
+      if (s.docs[doc] !== text) this._put(s, doc, text, this._how(mode, doc, s.docs[doc] === undefined, file));
+    }
+    for (const doc of Object.keys(s.docs)) {
+      if (doc in target || held.has(doc) || docChapter(doc) === null) continue;
+      this._remove(s, doc, this._how(mode, doc, false, file));
+    }
+  }
+
+  _how(mode, doc, isNew, file) {
+    switch (mode) {
+      case 'baseline': return isNew ? { base: 'baseline', src: 'arrived' } : { src: 'arrived' };
+      case 'arrived': return isNew ? { base: 'arrived', src: 'arrived' } : { src: 'arrived' };
+      case 'off': return { src: 'unlogged', cause: 'off' };
+      case 'new': return { src: 'typed' };
+      case 'import': return doc === 'book' && isNew ? { base: 'import', src: 'import', file } : { src: 'typed' };
+      default: return { src: 'unlogged' };
+    }
+  }
+
+  // One document to new text: a base, or a new document and an edit
+  _put(s, doc, text, how) {
+    const old = s.docs[doc];
+    if (old === text) return;
+    if (old === undefined) {
+      if (how.base && text) {
+        const fields = { doc, src: how.base, ops: recordOps([[0, 0, text.length]], [text]) };
+        if (how.base === 'import' && how.file) fields.file = { mtime: how.file.mtime, sha256: how.file.sha256 };
+        this._append(s, 'base', fields, [text]);
+        s.docs[doc] = text;
+        return;
+      }
+      this._append(s, 'doc', { doc, act: 'new' });
+      s.docs[doc] = '';
+      if (!text) return;
+    }
+    const before = s.docs[doc];
+    const { ops, ins } = diff(before, text);
+    const fields = { doc, src: how.src || 'unlogged', ops: recordOps(ops, ins) };
+    for (const k of ['cause', 'from', 'dur', 'ev']) if (how[k] !== undefined) fields[k] = how[k];
+    if (doc === 'book') {
+      const keys = bookKeys(before, text);
+      if (keys.length) fields.keys = keys;
+    }
+    this._append(s, 'edit', fields, ins);
+    s.docs[doc] = text;
+  }
+
+  // A document gone: its text deleted (so a later move can point at it),
+  // then the document itself
+  _remove(s, doc, how) {
+    const old = s.docs[doc];
+    if (old === undefined) return;
+    if (old) {
+      const fields = { doc, src: how.src || 'unlogged', ops: [[0, old.length, 0]] };
+      if (how.cause) fields.cause = how.cause;
+      this._append(s, 'edit', fields);
+    }
+    this._append(s, 'doc', { doc, act: 'del' });
+    delete s.docs[doc];
+    delete s.disk[doc];
+  }
+
+  /* ---- chunks ---- */
+
+  _append(s, kind, fields, ins = null) {
+    if (!s.info) return null;
+    if (s.failed) {
+      // the disk refused a write: the chain on disk is behind the one in
+      // memory. A little later, pick it up from the disk and log what
+      // happened meanwhile as unlogged.
+      if (this.now() - s.failed < RETRY_MS || !this._recover(s)) return null;
+    }
+    try {
+      if (!s.chunk) this._open(s);
+      return this._write(s, kind, fields, ins);
+    } catch (err) {
+      this._failed(s, s.chunk, err);
+      return null;
+    }
+  }
+
+  _open(s) {
+    const dev = this.device();
+    const logDir = path.join(s.dir, LOG_DIR);
+    fs.mkdirSync(logDir, { recursive: true });
+    let name;
+    for (let k = 1; ; k++) {
+      name = chunkName(this.now(), dev, k);
+      if (name !== s.last && !fs.existsSync(path.join(logDir, name))) break;
+    }
+    const prevChunk = s.last;
+    s.chunk = { name, writer: new ChunkWriter(path.join(logDir, name)), bytes: 0, failed: false };
+    s.last = name;
+    s.count += 1;
+    this._write(s, 'open', { v: FORMAT, log: s.info.logId, dev, prevChunk, app: this.app });
+  }
+
+  _write(s, kind, fields, ins = null) {
+    const chunk = s.chunk;
+    const { entry, line } = s.chain.entry(kind, fields, ins);
+    chunk.bytes += Buffer.byteLength(line, 'utf8') + 1;
+    chunk.writer.append(line).catch((err) => this._failed(s, chunk, err));
+    if (kind !== 'close') {
+      this._idle(s);
+      if (chunk.bytes >= this.maxChunk) this._close(s, 'size');
+    }
+    return entry;
+  }
+
+  _failed(s, chunk, err) {
+    if (chunk) {
+      if (chunk.failed) return;
+      chunk.failed = true;
+      if (s.chunk === chunk) s.chunk = null;
+    }
+    clearTimeout(s.idle);
+    this.onError('write', err);
+    s.failed = this.now();
+  }
+
+  _recover(s) {
+    s.failed = 0;
+    s.chunk = null;
+    let st;
+    try { st = this._chainState(s, false); } catch (err) {
+      this.onError('recover', err);
+      s.failed = this.now();
+      return false;
+    }
+    s.chain = new Chain({ dev: this.device(), key: s.key, n: st.n, head: st.head, now: this.now });
+    s.last = st.last;
+    s.count = st.count;
+    const want = s.docs;
+    s.docs = { ...st.docs };
+    this._sync(s, want, 'unlogged');
+    return !s.failed;
+  }
+
+  _idle(s) {
+    clearTimeout(s.idle);
+    s.idle = setTimeout(() => { this._close(s, 'idle'); }, this.idleMs);
+    if (s.idle.unref) s.idle.unref();
+  }
+
+  // The chunk's last line: why it ended, and the manuscript's fingerprint.
+  // Once it's on disk, the session's state is cached for next time.
+  _close(s, why) {
+    clearTimeout(s.idle);
+    s.idle = null;
+    const chunk = s.chunk;
+    if (!chunk) return s.closing || Promise.resolve();
+    this._write(s, 'close', { why, ms: manuscriptHash(manuscriptText(s.docs)) });
+    s.chunk = null;
+    const snap = {
+      v: 1, bookId: s.bookId, logId: s.info.logId, dev: this.device(),
+      n: s.chain.n, head: s.chain.head, last: chunk.name, count: s.count, size: chunk.bytes, docs: { ...s.docs }
+    };
+    const done = chunk.writer.flush().then(() => {
+      if (chunk.writer.broken || chunk.failed || chunk.writer.size !== snap.size || snap.n < s.saved) return;
+      s.saved = snap.n;
+      try {
+        fs.mkdirSync(this.home, { recursive: true });
+        writeWhole(this._cacheFile(s), JSON.stringify(snap));
+      } catch (err) { this.onError('cache', err); }
+    }).finally(() => { if (s.closing === done) s.closing = null; });
+    s.closing = done;
+    return done;
+  }
+}
+
 module.exports = {
   FORMAT, LOG_DIR, LOG_INFO, KINDS, CHUNK_RE,
   canonical, sha256hex, clearPart, entryHash, saltFor, commitment, keyId,
   normalizeManuscript, manuscriptHash, newDeviceId, newLogInfo,
   diff, markupRanges, recordOps, applyOps, applyLengths,
   Chain, chunkName, isChunkName, ChunkWriter, parseChunk,
-  orderChunks, verifyChain, replay
+  orderChunks, verifyChain, replay,
+  AUX_DOCS, JSON_DOCS, chapterDoc, docChapter, docOf, bookText, jsonText, bookKeys,
+  chapterLines, manuscriptText, readBookDocs, fileFacts, clockJump, cleanLabel,
+  Recorder, IDLE_MS, MAX_CHUNK
 };

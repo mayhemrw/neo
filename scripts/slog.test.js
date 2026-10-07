@@ -309,3 +309,62 @@ describe('chunks on disk', () => {
     assert.equal(slog.verifyChain(read, { key: KEY }).ok, true);
   });
 });
+
+describe('documents', () => {
+  test('the book document leaves out bookkeeping and empty values, keys sorted', () => {
+    const meta = { title: 'T', id: 'book-x', author: 'A', lastPosition: { scroll: 1.5 }, modified: 'now', wordCount: 9,
+      dailyCounts: { d: 1 }, scribesLog: false, uuid: 'u', coverArt: {}, chapterTitles: {}, subtitle: '', chapterOrder: ['b', 'a'],
+      sectionNotes: { z: 1, y: 2 } };
+    assert.equal(slog.bookText(meta), JSON.stringify({ author: 'A', chapterOrder: ['b', 'a'], sectionNotes: { y: 2, z: 1 }, title: 'T' }, null, 2));
+    assert.equal(slog.bookText({ ...meta, lastPosition: { scroll: 99 } }), slog.bookText(meta));
+    assert.equal(slog.bookText(null), null);
+  });
+  test('an edit to the book says which fields changed', () => {
+    const a = slog.bookText({ title: 'T', author: 'A', chapterOrder: ['x'] });
+    const b = slog.bookText({ title: 'T', author: 'B', chapterOrder: ['x', 'y'] });
+    assert.deepEqual(slog.bookKeys(a, b), ['author', 'chapterOrder']);
+  });
+  test('named documents and chapters never share a name', () => {
+    assert.equal(slog.chapterDoc('ch-1'), 'ch-1');
+    assert.equal(slog.chapterDoc('notes'), 'ch:notes');
+    assert.equal(slog.docChapter('ch:notes'), 'notes');
+    assert.equal(slog.docChapter('notes'), null);
+    assert.equal(slog.docOf('aux', 'notes'), 'notes');
+    assert.equal(slog.docOf('aux', 'cover'), null);
+    assert.equal(slog.docOf('json', 'art'), null);
+    assert.equal(slog.docOf('book'), 'book');
+  });
+});
+
+describe('manuscript text', () => {
+  test('paragraphs as lines, with what every export leaves out left out', () => {
+    const html = '<p>It was <i>dark</i>&nbsp;&amp; cold.<br>Line two</p><p class="scene-break">***</p>' +
+      '<p class="ghost" data-sec-id="s1">An unwritten section</p><p class="scene-break" data-sec-brk="s1"></p>' +
+      '<p>Hi <span class="ph-mark" data-sid="1">⚑</span>there<span class="darling-anchor" data-id="x"></span></p>' +
+      '<p><br></p><p>&#8220;Quote&#x201D; &lt;tag&gt;</p>';
+    assert.deepEqual(slog.chapterLines(html), ['It was dark & cold.\nLine two', '***', 'Hi there', '“Quote” <tag>']);
+  });
+  test('chapters in the book\'s order, a Contents page left out', () => {
+    const docs = {
+      book: slog.bookText({ chapterOrder: ['c2', 'toc', 'c1'], chapterKinds: { toc: 'contents' } }),
+      c1: '<p>One.</p>', c2: '<p>Two.</p>', toc: '<p>Contents</p>', notes: '<p>not the book</p>'
+    };
+    assert.equal(slog.manuscriptText(docs), 'Two.\nOne.');
+    assert.equal(slog.manuscriptHash(slog.manuscriptText(docs)), slog.manuscriptHash('Two. One.'));
+  });
+});
+
+describe('labels and clocks', () => {
+  test('a label from the window is cut down to what the format allows', () => {
+    assert.deepEqual(slog.cleanLabel({ src: 'typed', dur: 900, ev: 4, cause: 'undo', extra: 'x' }), { src: 'typed', cause: 'undo', dur: 900, ev: 4 });
+    assert.deepEqual(slog.cleanLabel({ src: 'baseline' }), { src: 'unlogged' });
+    assert.deepEqual(slog.cleanLabel({ src: 'move', from: { n: 3, op: 0, off: 2 } }), { src: 'move', from: { n: 3, op: 0, off: 2 } });
+    assert.deepEqual(slog.cleanLabel({ src: 'typed', from: { n: 3, op: 0, off: 2 }, dur: 1.5 }), { src: 'typed' });
+    assert.deepEqual(slog.cleanLabel(null), { src: 'unlogged' });
+  });
+  test('a clock jump is the wall clock against the steady one', () => {
+    assert.equal(slog.clockJump(0, 0, 60000, 60000), 0);
+    assert.equal(slog.clockJump(0, 0, 3660000, 60000), 3600000);
+    assert.equal(slog.clockJump(0, 0, -100000, 60000), -160000);
+  });
+});
