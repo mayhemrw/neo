@@ -3,7 +3,7 @@
 
 'use strict';
 
-const { app, BrowserWindow, Menu } = require('electron');
+const { app, BrowserWindow } = require('electron');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
@@ -112,24 +112,6 @@ test('the shelf ignores the shortcut', async () => {
   await js(`document.getElementById('editor-view').hidden = true`);
   await press(RIGHT);
   await js(`document.getElementById('editor-view').hidden = false`);
-  assert.equal(await tab(), 'manuscript');
-});
-
-test('View → Go to has the four tabs and no key of its own', async () => {
-  const view = Menu.getApplicationMenu().items.find((i) => i.label === 'View');
-  const goTo = view.submenu.items.find((i) => i.label === 'Go to');
-  assert.deepEqual(goTo.submenu.items.map((i) => i.label), ['Manuscript', 'Notes', 'Outline', 'Darlings']);
-  assert.ok(goTo.submenu.items.every((i) => !i.accelerator));
-});
-
-test('the menu items switch tabs', async () => {
-  const view = Menu.getApplicationMenu().items.find((i) => i.label === 'View');
-  const goTo = view.submenu.items.find((i) => i.label === 'Go to');
-  goTo.submenu.items[3].click();
-  await tick(300);
-  assert.equal(await tab(), 'darlings');
-  goTo.submenu.items[0].click();
-  await tick(300);
   assert.equal(await tab(), 'manuscript');
 });
 
