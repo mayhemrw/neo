@@ -192,7 +192,8 @@ describe('Scribe\'s Log in main.js', { concurrency: 1 }, () => {
     await main.get('slogRecorder').close(book.id);
     const bases = entries(dir).filter((x) => x.kind === 'base');
     const sha = slog.sha256hex(fs.readFileSync(src));
-    assert.deepEqual(bases.map((x) => [x.doc, x.src, x.file.sha256]), [['book', 'import', sha], ['ch-1', 'import', sha], ['ch-2', 'import', sha]]);
+    assert.deepEqual(bases.map((x) => [x.doc, x.src, x.file.sha256]).sort(),
+      [['book', 'import', sha], ['ch-1', 'import', sha], ['ch-2', 'import', sha], ['darlings', 'import', sha], ['stickies', 'import', sha]]);
     const clear = JSON.stringify(entries(dir).map(slog.clearPart));
     assert.ok(!clear.includes('Secret') && !clear.includes('Title'), 'nothing of the file name in the clear');
     assertChecks(dir);
@@ -225,14 +226,23 @@ describe('Scribe\'s Log in main.js', { concurrency: 1 }, () => {
     const copy = await main.call('book:duplicate', book.id, 'Twin (copy)');
     const copyDir = path.join(lib, copy.id);
     assert.equal(fs.readFileSync(path.join(copyDir, 'chapters', 'ch-1.html'), 'utf8'), '<p>Only once.</p>');
-    assert.equal(fs.existsSync(path.join(copyDir, slog.LOG_DIR)), false, 'no log copied');
     assert.deepEqual(fs.readdirSync(path.join(dir, slog.LOG_DIR)).sort(), before);
-    // opened, the copy's words are a baseline in a log with its own id
+    // the copy's log starts at once: its words a baseline naming the
+    // original's log, in a log with its own id; none of the original's chunks
+    await main.get('slogRecorder').close(copy.id);
+    const origLog = entries(dir)[0].log;
+    let e = entries(copyDir);
+    assert.notEqual(e[0].log, origLog);
+    assert.ok(e.every((x) => x.kind !== 'open' || x.log === e[0].log));
+    const base = e.find((x) => x.kind === 'base' && x.doc === 'ch-1');
+    assert.equal(base.src, 'baseline');
+    assert.deepEqual(base.from, [[0, 0, '<p>Only once.</p>'.length, { log: origLog }]]);
+    // opened later, nothing more is logged
+    const n = e.length;
     main.call('slog:open', copy.id);
     await main.call('slog:event', copy.id, { type: 'close' });
-    const e = entries(copyDir);
-    assert.ok(e.some((x) => x.kind === 'base' && x.doc === 'ch-1' && x.src === 'baseline'));
-    assert.notEqual(e[0].log, entries(dir)[0].log);
+    e = entries(copyDir);
+    assert.equal(e.filter((x) => x.kind === 'base' || x.kind === 'edit').length, e.slice(0, n).filter((x) => x.kind === 'base' || x.kind === 'edit').length);
     assertChecks(dir);
     assertChecks(copyDir);
   });

@@ -653,6 +653,24 @@ describe('Moves and the graveyard', { concurrency: 1 }, () => {
     assert.deepEqual(origins(traced(env), 'ch-1', PASTED), ['other book']);
   });
 
+  test('a copy\'s base names the book it came from; a checker holds it to that', () => {
+    const key = Buffer.alloc(32, 7);
+    const chain = new slog.Chain({ dev: 'b'.repeat(32), key, now: () => 1 });
+    const e = [];
+    const add = (kind, fields, ins) => e.push(chain.entry(kind, fields, ins).entry);
+    const html = `<p>${OWN}</p>`;
+    add('base', { doc: 'ch-1', src: 'baseline', ops: [[0, 0, html.length]], from: [[0, 0, html.length, { log: 'orig-log' }]] }, [html]);
+    add('base', { doc: 'ch-2', src: 'baseline', ops: [[0, 0, html.length]], from: [[0, 0, html.length, { doc: 'ch-1', at: 0 }]] }, [html]);
+    add('base', { doc: 'ch-3', src: 'baseline', ops: [[0, 0, 5]], from: [[0, 2, 9, { log: 'orig-log' }]] }, ['Short']);
+    const t = slog.trace(e);
+    assert.deepEqual(t.docs['ch-1'].runs, [[html.length, 'other book']]);
+    assert.deepEqual(t.docs['ch-2'].runs, [[html.length, 'baseline']]);
+    assert.deepEqual(t.problems.map((p) => [p.n, p.problem]), [
+      [2, 'a base\'s from can only name another book'],
+      [3, 'from piece out of range']
+    ]);
+  });
+
   test('a checker catches a from that lies', () => {
     const key = Buffer.alloc(32, 7);
     const chain = new slog.Chain({ dev: 'a'.repeat(32), key, now: () => 1 });

@@ -649,7 +649,7 @@ ipcMain.handle('book:duplicate', (_e, bookId, title) => {
       // (a write caught halfway, a spare copy, a placeholder: not the book)
       if (/\.(tmp|bak|icloud)$/.test(ent.name) || ent.name === 'book.json') continue;
       // (the original's Scribe's Log stays its own: the copy starts a log of
-      // its own, from a baseline of what was copied, the first time it's opened)
+      // its own, from a baseline of what was copied that names the original's)
       if (from === src && ent.name === slog.LOG_DIR) continue;
       const a = path.join(from, ent.name);
       const b = path.join(to, ent.name);
@@ -664,6 +664,8 @@ ipcMain.handle('book:duplicate', (_e, bookId, title) => {
     delete copy.uuid; // an ebook store sees a new book
     writeJSON(path.join(dest, 'book.json'), copy);
     writeCatalog();
+    const logged = slogTap((s) => s.copied(dest, id, src));
+    if (logged && typeof logged.catch === 'function') logged.catch((err) => logError('scribe\'s log', err));
     return copy;
   } catch (err) {
     logError('duplicate', err);

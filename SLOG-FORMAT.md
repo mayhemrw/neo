@@ -51,7 +51,7 @@ Every entry has a **clear part** and, while it's on the writer's computer, an op
 |---|---|---|
 | `open` | Starts a chunk | `v` (format, `1`), `log` (log id), `dev` (device id, 32 hex), `prevChunk` (name of this device's previous chunk, or `null`), `app` (NEO version, then `+slog1`) |
 | `edit` | One burst of changes to one document | `doc`, `src`, `ops`, `c` if text was inserted, and optionally `dur`, `ev`, `cause`, `from`, `keys` |
-| `base` | A document's whole text, with no process record behind it | `doc`, `src` (`baseline`, `import` or `arrived`), `ops` (a single `[0, 0, length]`), `c`, optionally `file` |
+| `base` | A document's whole text, with no process record behind it | `doc`, `src` (`baseline`, `import` or `arrived`), `ops` (a single `[0, 0, length]`), `c`, optionally `file` or `from` |
 | `doc` | A document created or deleted | `doc`, `act` (`new` or `del`). A deleted document's text is first deleted by an `edit`, so a later move can point at it |
 | `on`, `off` | The log switched on or off for this book. `off` is followed by the chunk's `close`; after `on`, whatever changed while the log was off is recorded with `cause: "off"` | |
 | `sleep`, `wake` | The computer went to sleep or woke | |
@@ -113,6 +113,8 @@ An edit that only deletes uses `src` for how the change was made: `typed` for th
 - `{ "log": <log id> }`: text from another NEO book. Where in it isn't recorded.
 
 The first two carry `"len": <units>` when the source's length differs from `len`. That happens only for a piece that's one character written two ways, such as `\"` in a JSON document and `"` in a chapter, or a space written as a no-break space (`&nbsp;`, `&#160;`, `&#xa0;`, the character U+00A0 or its JSON escape) on one side and a plain space on the other, as Chromium saves the space at the edge of a paste: the piece's units then all take the origin of the source's first unit. Otherwise the piece maps unit for unit.
+
+A `base` can carry `from` too, with `{log}` sources only: a book made as a copy of another (NEO's Duplicate) starts its log with its words as a `baseline` whose pieces name the original's log, so its text counts as another book's.
 
 Pieces are in order of `op`, then `at`, and don't overlap. Units no piece covers take the entry's `src`; in a `move` entry, that's text moved within NEO whose place wasn't recorded.
 

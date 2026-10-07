@@ -50,7 +50,11 @@ function checkBook(dir) {
     const traced = slog.trace(entries);
     const made = slog.composition(traced.docs);
     let movedEntries = 0;
-    for (const e of entries) if (Array.isArray(e.from) && e.from.length) movedEntries++;
+    const copiedFrom = new Set();
+    for (const e of entries) {
+      if (!Array.isArray(e.from) || !e.from.length) continue;
+      if (e.kind === 'base') { for (const p of e.from) if (p && p[3] && typeof p[3].log === 'string') copiedFrom.add(p[3].log); } else movedEntries++;
+    }
     const sources = {};
     const kinds = {};
     for (const e of entries) {
@@ -67,7 +71,7 @@ function checkBook(dir) {
     out.devices.push({
       dev, ok: v.ok, problems: [...v.problems, ...r.problems, ...traced.problems], notes: v.notes,
       chunks: v.chunks.length, entries: entries.length, lastTs: last ? last.ts : 0,
-      kinds, sources, differ, docs, traced: traced.docs, made, moves: movedEntries
+      kinds, sources, differ, docs, traced: traced.docs, made, moves: movedEntries, copiedFrom: [...copiedFrom]
     });
   }
   out.devices.sort((a, b) => a.lastTs - b.lastTs);
@@ -85,6 +89,7 @@ function report(dir, res) {
     lines.push(`device ${d.dev.slice(0, 8)}${newest ? ' (wrote last)' : ''}: ${d.chunks} chunk(s), ${d.entries} entries, ${d.ok && !d.problems.length ? 'intact' : 'DAMAGED'}`);
     lines.push('  kinds:   ' + Object.entries(d.kinds).map(([k, n]) => `${k} ${n}`).join(', '));
     lines.push('  sources: ' + (Object.entries(d.sources).map(([k, n]) => `${k} ${n}`).join(', ') || '(none)'));
+    if (d.copiedFrom.length) lines.push('  copied from the book with log ' + d.copiedFrom.join(', '));
     lines.push(`  moves traced: ${d.moves} entr${d.moves === 1 ? 'y' : 'ies'}`);
     if (d.made) {
       const all = Object.values(d.made).reduce((a, n) => a + n, 0);

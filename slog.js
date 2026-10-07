@@ -899,7 +899,24 @@ function trace(entries) {
         if (docs[e.doc] && docs[e.doc].len) throw new Error('base over a document that already has text');
         const len = e.ops.reduce((a, op) => a + op[2], 0);
         const text = e.x && Array.isArray(e.x.ins) ? e.x.ins.join('') : null;
-        docs[e.doc] = { text, len, runs: len ? [[len, originOf(e)]] : [] };
+        const runs = len ? [[len, originOf(e)]] : [];
+        // a copy's base names the book it was copied from: those units are
+        // another book's
+        if (e.from !== undefined) {
+          if (!Array.isArray(e.from)) throw new Error('from isn\'t a list');
+          let end = 0;
+          for (const p of e.from) {
+            const ok = Array.isArray(p) && p[0] === 0 && Number.isSafeInteger(p[1]) && p[1] >= end &&
+              Number.isSafeInteger(p[2]) && p[2] > 0 && p[1] + p[2] <= len;
+            if (!ok) { problems.push({ ...where, piece: p, problem: 'from piece out of range' }); continue; }
+            if (!p[3] || typeof p[3].log !== 'string') { problems.push({ ...where, piece: p, problem: 'a base\'s from can only name another book' }); continue; }
+            end = p[1] + p[2];
+            runsCut(runs, p[1], p[2]);
+            runsInsert(runs, p[1], [[p[2], 'other book']]);
+          }
+          runsTidy(runs);
+        }
+        docs[e.doc] = { text, len, runs };
       } else if (e.kind === 'doc') {
         if (e.act === 'new') docs[e.doc] = { text: '', len: 0, runs: [] };
         else if (e.act === 'del') delete docs[e.doc];
@@ -1499,6 +1516,18 @@ class Recorder {
     }
   }
 
+  // book:duplicate made a copy of the book in `fromDir`. When the original
+  // has a log, the copy's starts now, its words a baseline that names the
+  // original's log; the chunk closes straight away. (Without one, the copy
+  // starts a log of its own the first time it's opened, as any book does.)
+  copied(dir, bookId, fromDir) {
+    const orig = parseQuiet(readQuiet(path.join(fromDir, LOG_DIR, LOG_INFO)));
+    if (!validInfo(orig) || fs.existsSync(path.join(dir, LOG_DIR, LOG_INFO))) return Promise.resolve();
+    const s = this.session(dir, bookId, { start: true, mode: 'copy', file: orig.logId });
+    if (!s.on || !s.info) return Promise.resolve();
+    return this.close(bookId);
+  }
+
   // book.json was written: the book document, and the log's switch
   metaWritten(dir, bookId, meta) {
     const s = this.sessions.get(bookId);
@@ -1686,6 +1715,9 @@ class Recorder {
       case 'arrived': return isNew ? { base: 'arrived', src: 'arrived' } : { src: 'arrived' };
       case 'off': return { src: 'unlogged', cause: 'off' };
       case 'new': return { src: 'typed' };
+      // a copy of a book (Duplicate): its text came from the original, whose
+      // log is named (`file` is that log's id)
+      case 'copy': return isNew ? { base: 'baseline', src: 'arrived', copyOf: file } : { src: 'arrived' };
       // everything book:create laid down for an import is the import's (book.json,
       // and the empty Darlings and stickies lists)
       case 'import': return isNew ? { base: 'import', src: 'import', file } : { src: 'typed' };
@@ -1701,6 +1733,7 @@ class Recorder {
       if (how.base && text) {
         const fields = { doc, src: how.base, ops: recordOps([[0, 0, text.length]], [text]) };
         if (how.base === 'import' && how.file) fields.file = { mtime: how.file.mtime, sha256: how.file.sha256 };
+        if (how.copyOf) fields.from = [[0, 0, text.length, { log: how.copyOf }]];
         this._append(s, 'base', fields, [text]);
         s.docs[doc] = text;
         return;
