@@ -100,11 +100,11 @@ Ops apply in order, and each `at` refers to the text as it stands after the ops 
 | `baseline` | In the book before the log began |
 | `unlogged` | Reached disk without a labeled entry; origin unknown |
 
-An edit that only deletes uses `src` for how the change was made: `typed` for the writer's own editing, `arrived` for a change found on disk, `unlogged` when NEO can't say.
+An edit that only deletes uses `src` for how the change was made: `typed` for the writer's own editing (the leaving half of a move included; `cause` says which tool), `arrived` for a change found on disk, `unlogged` when NEO can't say.
 
 `cause` optionally names what in NEO made the change (`undo`, `redo`, `replace`, `outline`, `split`, `join`, `spell`, `darling`, `placeholder`, `off`).
 
-`from`, for `move`, is one of:
+`from`, for `move`, says where the text was when the log knows (a `move` without it is text from elsewhere in the same NEO, place not recorded). It's one of:
 
 - `{ "n": <entry>, "op": <index>, "off": <offset> }`: text deleted by op `op` of entry `n` in this chain, starting `off` units into what it deleted. The moved text keeps the origin it had there.
 - `{ "doc": <document>, "at": <offset> }`: copied from text still in that document, at that offset when this entry was made.

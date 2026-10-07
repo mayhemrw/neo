@@ -794,6 +794,7 @@ ipcMain.handle('slog:open', (_e, bookId) => {
 ipcMain.handle('slog:observe', (_e, bookId, kind, name, value, label) => {
   const dir = bookDir(bookId);
   if (kind === 'chapter') libName(name);
+  if (kind === 'book') return !!slogTap((s) => s.observeMeta(dir, bookId, value, label));
   const doc = slog.docOf(kind, name);
   const conv = slogText[kind];
   if (!doc || !conv) return false;

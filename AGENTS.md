@@ -69,6 +69,8 @@ Each book's log lives in its `scribes-log/` folder: `log.json` (made once) and o
 
 - The device id and each book's cached state live in `userData/slog/`, never in the library.
 - `node scripts/slog-check.js "<book folder>"` checks every chain and replays it against the files on disk.
+- The window's side is the SCRIBE'S LOG section of `app.js`. A key, click or menu command opens a typed burst; it's described after a second's pause or two seconds' run, and every save describes its document first (`slogNote` in `persistChapter`, `flushAux`, `runSidecar` and `writeBookMeta`). Paste, drop, cut and copy are labeled by capture listeners, and every `snapshotStructure` label maps to a cause (`slogCauseOf`). A new tool that changes text over an `await`, or without a key, click or snapshot, needs `slogWith(label, fn)` or its words log as `unlogged`.
+- `npm run test:slog` (Electron; `xvfb-run` without a display) writes a book the way a writer does and checks its log has no `unlogged` entries.
 - Pocket's bridge has no `slog`, so nothing in the window logs there.
 
 ## Processes

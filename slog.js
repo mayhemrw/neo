@@ -791,6 +791,7 @@ const IDLE_MS = 30 * 60 * 1000;
 const MAX_CHUNK = 8 * 1024 * 1024;
 const IMPORT_MS = 2 * 60 * 1000;   // how long a new imported book's first writes count as the import
 const RETRY_MS = 30 * 1000;        // after a write fails, how long before the log tries the disk again
+const OBSERVED_KEEP = 16;          // described-but-unsaved versions kept per document, for saves landing late
 const WINDOW_SRC = new Set(['typed', 'paste', 'drop', 'move', 'import', 'arrived']);
 const CAUSES = new Set(['undo', 'redo', 'replace', 'outline', 'split', 'join', 'spell', 'darling', 'placeholder']);
 
@@ -879,6 +880,16 @@ class Recorder {
   wrote(dir, bookId, doc, text) {
     const s = this.sessions.get(bookId);
     if (!s || s.dir !== dir || !s.on || !s.info || doc == null || typeof text !== 'string') return;
+    // The window observes as it goes and saves a moment later, one write at
+    // a time per document, so a save can land after newer words were
+    // described. That text is already in the log: only the disk is behind.
+    const back = s.observed[doc];
+    if (back) {
+      const at = back.lastIndexOf(text);
+      if (text === s.docs[doc]) delete s.observed[doc];
+      else if (at >= 0) back.splice(0, at + 1);
+      if (text === s.docs[doc] || at >= 0) { s.disk[doc] = text; return; }
+    }
     const importing = s.imported && this.now() < s.importUntil;
     if (!importing) s.imported = null;
     this._put(s, doc, text, importing ? { base: 'import', src: 'import', file: s.imported } : { src: 'unlogged' });
@@ -916,8 +927,26 @@ class Recorder {
       how.base = how.src;
       if (how.src === 'import' && s.imported) how.file = s.imported;
     }
+    const before = s.docs[doc];
     this._put(s, doc, text, how);
+    // described, not yet saved: kept until a save of it (or a newer one) lands
+    if (before !== text && typeof before === 'string' && before !== s.disk[doc]) {
+      const back = s.observed[doc] || (s.observed[doc] = []);
+      back.push(before);
+      if (back.length > OBSERVED_KEEP) back.shift();
+    }
     return true;
+  }
+
+  // The window says how a book.json it's about to save got that way. Like
+  // the save itself (beforeMeta), a change to the caret's place or a cover
+  // in a book with no log doesn't start one.
+  observeMeta(dir, bookId, meta, label) {
+    if (!meta || typeof meta !== 'object') return false;
+    this.beforeMeta(dir, bookId, meta);
+    const s = this.sessions.get(bookId);
+    if (!s || s.dir !== dir) return false;
+    return this.observe(dir, bookId, 'book', bookText(meta), label);
   }
 
   // A file was read in for import. The token travels with the parsed book
@@ -1012,7 +1041,7 @@ class Recorder {
         bookId, dir, on: !(meta && meta.scribesLog === false),
         info: null, key: null, unreadable: false, chain: null, docs: {}, disk: {},
         chunk: null, last: null, count: 0, failed: 0, idle: null, closing: null, saved: 0,
-        imported: null, importUntil: 0
+        imported: null, importUntil: 0, observed: {}
       };
       this.sessions.set(bookId, s);
       const raw = readQuiet(path.join(dir, LOG_DIR, LOG_INFO));
@@ -1146,6 +1175,11 @@ class Recorder {
     const { ops, ins } = diff(before, text);
     const fields = { doc, src: how.src || 'unlogged', ops: recordOps(ops, ins) };
     for (const k of ['cause', 'from', 'dur', 'ev']) if (how[k] !== undefined) fields[k] = how[k];
+    // a move's other half, the text leaving: nothing came from anywhere
+    if (fields.src === 'move' && !ins.some((t) => t)) {
+      fields.src = 'typed';
+      delete fields.from;
+    }
     if (doc === 'book') {
       const keys = bookKeys(before, text);
       if (keys.length) fields.keys = keys;
@@ -1167,6 +1201,7 @@ class Recorder {
     this._append(s, 'doc', { doc, act: 'del' });
     delete s.docs[doc];
     delete s.disk[doc];
+    delete s.observed[doc];
   }
 
   /* ---- chunks ---- */

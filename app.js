@@ -669,8 +669,9 @@ async function shelfMeta(bookId) {
 // Saves a book's meta and drops the cached copy. This used to be done by
 // replacing window.neo.writeBookMeta, but on desktop that object is
 // read-only, so the assignment threw and app.js stopped loading.
-function writeBookMeta(bookId, meta) {
+function writeBookMeta(bookId, meta, how) {
   bookMetaCache.delete(bookId);
+  slogNote(bookId, 'book', null, meta, how);
   return window.neo.writeBookMeta(bookId, meta);
 }
 
@@ -1071,7 +1072,9 @@ async function createPageBook(shelf, kind) {
     meta.chapterOrder = [];
   } else {
     const chId = 'ch-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
-    await window.neo.writeChapter(meta.id, chId, PAGE_STARTERS[kind] ? PAGE_STARTERS[kind](shelf) : '<p><br></p>');
+    const first = PAGE_STARTERS[kind] ? PAGE_STARTERS[kind](shelf) : '<p><br></p>';
+    slogNote(meta.id, 'chapter', chId, first, { src: 'typed' });
+    await window.neo.writeChapter(meta.id, chId, first);
     meta.chapterOrder = [chId];
   }
   await writeBookMeta(meta.id, meta);
@@ -1435,6 +1438,7 @@ async function openPageSheet(shelf, meta, label) {
   settle();
   let timer = null;
   let saved = body.innerHTML;
+  let pasted = false; // since the last save, for the Scribe's Log
   const save = async () => {
     clearTimeout(timer);
     timer = null;
@@ -1443,6 +1447,8 @@ async function openPageSheet(shelf, meta, label) {
     out.querySelectorAll('[data-attr]').forEach((p) => p.removeAttribute('data-attr'));
     if (out.innerHTML === saved) return;
     saved = out.innerHTML;
+    slogNote(live.id, 'chapter', chId, saved, { src: pasted ? 'paste' : 'typed' });
+    pasted = false;
     await window.neo.writeChapter(live.id, chId, saved);
   };
   body.addEventListener('input', () => {
@@ -1452,9 +1458,10 @@ async function openPageSheet(shelf, meta, label) {
   });
   body.addEventListener('paste', (e) => {
     e.preventDefault();
-    const pasted = e.clipboardData.getData('text/html');
+    pasted = true;
+    const html = e.clipboardData.getData('text/html');
     const text = e.clipboardData.getData('text/plain');
-    if (pasted) document.execCommand('insertHTML', false, cleanPasteHtml(pasted));
+    if (html) document.execCommand('insertHTML', false, cleanPasteHtml(html));
     else if (text) {
       text.replace(/\r/g, '').split(/\n+/).filter((p) => p.trim()).forEach((p, i) => {
         if (i > 0) document.execCommand('insertParagraph');
@@ -2265,6 +2272,7 @@ async function openBook(bookId) {
   darlings = sideDarlings;
   sidecarBase[bookId + '/stickies'] = JSON.stringify(stickies);
   sidecarBase[bookId + '/darlings'] = JSON.stringify(darlings);
+  slogOpen(bookId);
 
   $('#bookshelf-view').hidden = true;
   $('#editor-view').hidden = false;
@@ -2453,7 +2461,9 @@ function renderChapters() {
   renderNav();
 }
 
-async function deleteChapterToDarlings(chId) {
+// one label in the Scribe's Log for all of it, waits on the disk included
+function deleteChapterToDarlings(...args) { return slogWith({ src: 'move', cause: 'darling' }, () => deleteChapterToDarlingsNow(...args)); }
+async function deleteChapterToDarlingsNow(chId) {
   snapshotStructure('chapter delete');
   const kind = chapterKind(chId);
   const name = chapterName(chId);
@@ -6198,7 +6208,7 @@ async function importScript(r, shelf) {
   if (!parsed.lines.length) return false;
   const tp = parsed.title || {};
   const title = tp.title || r.name;
-  const meta = await window.neo.createBook({ author: tp.author || displayAuthor(), title });
+  const meta = await window.neo.createBook({ author: tp.author || displayAuthor(), title, slogImport: r.slogImport });
   const chId = 'ch-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
   const html = parsed.lines.map((l) => `<p${l.type === 'action' ? '' : ` class="sp-${l.type}"`}${l.newPage ? ' data-newpage=""' : ''}>${l.runs.map((x) => runHtml(x)).join('') || '<br>'}</p>`).join('');
   await window.neo.writeChapter(meta.id, chId, html);
@@ -6212,7 +6222,7 @@ async function importScript(r, shelf) {
   // the contact block is the writer's, for every script: one carried in
   // fills it only when it's still empty
   if (tp.contact && !library.scriptContact) library.scriptContact = tp.contact;
-  await writeBookMeta(meta.id, meta);
+  await writeBookMeta(meta.id, meta, { src: 'import' });
   await placeTitle(shelf, meta.id);
   return true;
 }
@@ -6406,6 +6416,7 @@ async function spExport(format) {
 async function createScriptOnShelf(shelf) {
   const meta = await window.neo.createBook({ author: displayAuthor() });
   const chId = 'ch-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+  slogNote(meta.id, 'chapter', chId, '<p><br></p>', { src: 'typed' });
   await window.neo.writeChapter(meta.id, chId, '<p><br></p>');
   meta.format = 'screenplay';
   meta.chapterOrder = [chId];
@@ -6433,7 +6444,9 @@ function scriptTile(el, meta) {
 /*  PLACEHOLDERS + STICKIES                                            */
 /* ================================================================== */
 
-function insertPlaceholder() {
+// one label in the Scribe's Log for all of it, waits on the disk included
+function insertPlaceholder(...args) { return slogWith({ src: 'typed', cause: 'placeholder' }, () => insertPlaceholderNow(...args)); }
+function insertPlaceholderNow() {
   const sel = window.getSelection();
   if (!sel.rangeCount) return;
   // derive the chapter from where the caret actually is:
@@ -7136,7 +7149,9 @@ function findDarlingPosition(body, d) {
 
 // The one move shared by drag-to-tab and ⌘⇧D: the cut point is remembered by its surroundings —
 // no markers in the WIP itself.
-async function moveSelectionToDarlings(html, text) {
+// one label in the Scribe's Log for all of it, waits on the disk included
+function moveSelectionToDarlings(...args) { return slogWith({ src: 'move', cause: 'darling' }, () => moveSelectionToDarlingsNow(...args)); }
+async function moveSelectionToDarlingsNow(html, text) {
   if (!text || !text.trim() || !book) return;
   const sel = window.getSelection();
   // the live selection if it survived the drag, else the one saved at dragstart
@@ -7227,7 +7242,9 @@ async function moveSelectionToDarlings(html, text) {
 // Older versions of NEO planted invisible marker spans at darling cut points,
 // which interfered with Chromium's delete handling. On open, convert each one
 // into a remembered-context position and remove it:
-async function migrateDarlingAnchors() {
+// one label in the Scribe's Log for all of it, waits on the disk included
+function migrateDarlingAnchors(...args) { return slogWith({ src: 'typed', cause: 'darling' }, () => migrateDarlingAnchorsNow(...args)); }
+async function migrateDarlingAnchorsNow() {
   const spans = [...document.querySelectorAll('.darling-anchor')];
   if (!spans.length) return;
   let changed = false;
@@ -7356,6 +7373,7 @@ function switchTab(name) {
       auxEditor.innerHTML = html || '';
       auxEditor.dataset.kind = name;
       auxEditor.dataset.book = bookId;
+      slogAuxLoaded(bookId, name, html);
       auxEditor.contentEditable = 'true';
       auxEditor.focus({ preventScroll: true });
       returnTo();
@@ -8743,7 +8761,9 @@ function looseToSection(looseId, to) {
 // one, after a ***, its note (or its title) becomes that section's note,
 // and its own sections come along. Nothing is lost; ⌘Z puts it back.
 // Resolves to the new section's id, or null when it can't be done.
-async function joinChapter(chId, intoCh) {
+// one label in the Scribe's Log for all of it, waits on the disk included
+function joinChapter(...args) { return slogWith({ src: 'move', cause: 'join' }, () => joinChapterNow(...args)); }
+async function joinChapterNow(chId, intoCh) {
   if (!book || !intoCh || chId === intoCh) return null;
   if (!isStory(chId) || !isStory(intoCh)) { toast(t('Only chapters can become sections')); return null; }
   const from = chapterBodyEl(chId);
@@ -9474,6 +9494,7 @@ function flushAux() {
     const job = auxPending[key];
     if (job.inFlight) continue;
     job.inFlight = true;
+    slogNote(job.bookId, 'aux', job.kind, job.html);
     Promise.resolve().then(() => window.neo.writeAux(job.bookId, job.kind, job.html)).then(() => {
       if (auxPending[key] === job) delete auxPending[key];
     }, (err) => {
@@ -9511,6 +9532,7 @@ function writeSidecar(bookId, name, data) {
 function runSidecar(key, job) {
   job.inFlight = true;
   const json = JSON.stringify(job.data);
+  slogNote(job.bookId, 'json', job.name, job.data);
   return Promise.resolve().then(() => window.neo.writeJSON(job.bookId, job.name, job.data)).then((r) => {
     if (sidecarPending[key] === job) delete sidecarPending[key];
     sidecarBase[key] = json;
@@ -9578,7 +9600,9 @@ async function savedBeforeLettingGo(chId) {
   }
 }
 
-async function restoreDarling(id) {
+// one label in the Scribe's Log for all of it, waits on the disk included
+function restoreDarling(...args) { return slogWith({ src: 'move', cause: 'darling' }, () => restoreDarlingNow(...args)); }
+async function restoreDarlingNow(id) {
   const d = darlings.find((x) => x.id === id);
   if (!d) return;
   snapshotStructure('darling restore');
@@ -9813,6 +9837,275 @@ $('#paper-scroll').addEventListener('scroll', () => {
 });
 
 /* ================================================================== */
+/*  SCRIBE'S LOG                                                       */
+/*  The main process keeps the log (slog.js, SLOG-FORMAT.md); this     */
+/*  window says how the words changed: typed, pasted, dropped in from  */
+/*  outside, moved within NEO, or changed by one of NEO's own tools.   */
+/*  A burst of typing is described once it pauses for a second or has  */
+/*  run for two, and every document is described just before it's     */
+/*  saved, so each entry carries one label. Nothing here waits on the  */
+/*  disk or shows anything. Pocket has no log (no window.neo.slog), so */
+/*  all of it is skipped there.                                        */
+/* ================================================================== */
+
+const SLOG_IDLE = 1000; // a pause this long ends a burst
+const SLOG_RUN = 2000;  // …and so does typing on this long without one
+const slogState = {
+  bookId: null, // the open book the log is told about
+  seen: {},     // each document as the log was last told it (chapters by text, the rest by a signature)
+  stack: [],    // labels in force: a paste, a drop, one of NEO's tools at work
+  burst: null,  // { label, start, last, ev }: typing not yet described
+  timer: null,
+  clip: null    // what was last copied or cut in NEO, so pasting it back is a move
+};
+const slogBridge = () => (window.neo && window.neo.slog) || null;
+const slogLive = () => !!(slogBridge() && book && slogState.bookId === book.id);
+const slogKey = (kind, name) => kind + ':' + (name || '');
+const slogSame = (a, b) => a.src === b.src && a.cause === b.cause;
+const slogClipText = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+// a change nobody labeled: in the prose that's a gap the log owns up to
+// (unlogged); in the book's settings and comments it's the writer's own
+// doing; Darlings only ever hold words moved there from the manuscript
+const SLOG_DEFAULT = {
+  chapter: { src: 'unlogged' }, aux: { src: 'unlogged' }, book: { src: 'typed' },
+  stickies: { src: 'typed' }, darlings: { src: 'move', cause: 'darling' }
+};
+function slogLabel(kind, name) {
+  const top = slogState.stack[slogState.stack.length - 1];
+  if (top) return top.label;
+  const b = slogState.burst;
+  if (b) return { ...b.label, dur: Math.max(0, b.last - b.start), ev: b.ev };
+  return SLOG_DEFAULT[kind === 'json' ? name : kind] || { src: 'unlogged' };
+}
+function slogSig(kind, value) {
+  if (kind === 'chapter' || kind === 'aux') return value;
+  return kind === 'book' ? metaSig(value) : JSON.stringify(value);
+}
+function slogSend(bookId, kind, name, value, how) {
+  const b = slogBridge();
+  if (!b || !bookId) return;
+  try {
+    Promise.resolve(b.observe(bookId, kind, name, value, how)).catch(() => {});
+  } catch { /* the log never stands in the way of the writing */ }
+}
+
+// The open book's documents as they'd be saved now
+function slogDocs() {
+  const out = [];
+  for (const chId of book.chapterOrder) if (typeof chapterHTML[chId] === 'string') out.push(['chapter', chId, chapterHTML[chId]]);
+  const ed = document.getElementById('aux-editor');
+  // (notes untouched since they were read are what's on disk, whatever the
+  // editor makes of their markup)
+  if (ed && auxDirty && ed.dataset.book === book.id && ed.dataset.kind) out.push(['aux', ed.dataset.kind, ed.innerHTML]);
+  out.push(['json', 'darlings', darlings], ['json', 'stickies', stickies], ['book', null, book]);
+  return out;
+}
+
+// Tell the log about every document that changed since it last heard, under
+// the label in force. A chapter that has left the book has lost its words
+// here (its file goes after book.json lets go of it).
+function slogFlush() {
+  const live = slogLive();
+  clearTimeout(slogState.timer);
+  slogState.timer = null;
+  if (live) {
+    const seen = slogState.seen;
+    for (const [kind, name, value] of slogDocs()) {
+      const key = slogKey(kind, name);
+      const sig = slogSig(kind, value);
+      if (seen[key] === sig) continue;
+      seen[key] = sig;
+      slogSend(book.id, kind, name, value, slogLabel(kind, name));
+    }
+    const order = new Set(book.chapterOrder);
+    for (const key of Object.keys(seen)) {
+      if (!key.startsWith('chapter:') || order.has(key.slice(8))) continue;
+      delete seen[key];
+      slogSend(book.id, 'chapter', key.slice(8), '', slogLabel('chapter'));
+    }
+  }
+  slogState.burst = null;
+}
+
+// Just before a save: whatever changed is described first, so the save
+// itself only confirms it. A book that isn't open (a shelf page, a new
+// book, a closed book's twin chapter) is described as the save goes.
+function slogNote(bookId, kind, name, value, how) {
+  if (!slogBridge() || !bookId) return;
+  if (slogLive() && bookId === book.id) {
+    // (the label is read first: the flush ends the burst this save belongs to)
+    const label = how || slogLabel(kind, name);
+    slogFlush();
+    const key = slogKey(kind, name);
+    const sig = slogSig(kind, value);
+    if (slogState.seen[key] === sig) return;
+    slogState.seen[key] = sig;
+    slogSend(bookId, kind, name, value, label);
+    return;
+  }
+  slogSend(bookId, kind, name, value, how || { src: 'typed' });
+}
+
+// Typing. A key, a click or a menu command opens a burst of the writer's
+// own; each input event counts in it; a change of kind (an undo after
+// typing) closes the one before.
+function slogBurst(label, count) {
+  if (!slogLive() || slogState.stack.length) return;
+  const at = Date.now();
+  let b = slogState.burst;
+  if (b && !slogSame(b.label, label)) { slogFlush(); b = null; }
+  if (!b) b = slogState.burst = { label, start: at, last: at, ev: 0 };
+  if (count) {
+    if (!b.ev) b.start = at; // a burst is timed from its first change
+    b.ev++;
+    b.last = at;
+  }
+  clearTimeout(slogState.timer);
+  if (count && at - b.start >= SLOG_RUN) slogFlush();
+  else slogState.timer = setTimeout(slogFlush, SLOG_IDLE);
+}
+function slogGesture() {
+  if (!slogLive() || slogState.stack.length) return;
+  if (!slogState.burst) slogBurst({ src: 'typed' }, false);
+  else {
+    clearTimeout(slogState.timer);
+    slogState.timer = setTimeout(slogFlush, SLOG_IDLE);
+  }
+}
+function slogInputLabel(type) {
+  if (type === 'historyUndo') return { src: 'move', cause: 'undo' };
+  if (type === 'historyRedo') return { src: 'move', cause: 'redo' };
+  if (type === 'insertFromPaste' || type === 'insertFromPasteAsQuotation') return { src: 'paste' };
+  if (type === 'insertFromDrop' || type === 'deleteByDrag') return { src: dragFromInside ? 'move' : 'drop' };
+  return { src: 'typed' };
+}
+document.addEventListener('keydown', slogGesture, true);
+document.addEventListener('pointerdown', slogGesture, true);
+// before the change lands, so what came before keeps its own label…
+document.addEventListener('beforeinput', (e) => slogBurst(slogInputLabel(e.inputType), false), true);
+// …and counted once it has (the page's own handlers have caught it up by then)
+document.addEventListener('input', (e) => slogBurst(slogInputLabel(e.inputType), true));
+
+// A label in force until the returned function is called: what changed
+// before it is described first, what changes under it carries it.
+function slogPush(label) {
+  if (!slogLive()) return () => {};
+  slogFlush();
+  const entry = { label };
+  slogState.stack.push(entry);
+  return () => {
+    const at = slogState.stack.indexOf(entry);
+    if (at < 0) return;
+    slogFlush();
+    slogState.stack.splice(at, 1);
+  };
+}
+function slogWith(label, fn) {
+  const pop = slogPush(label);
+  let r;
+  try { r = fn(); } catch (err) { pop(); throw err; }
+  if (r && typeof r.then === 'function') return r.finally(pop);
+  pop();
+  return r;
+}
+// for the rest of this moment: the page's own handlers run in it
+function slogTask(label) {
+  setTimeout(slogPush(label), 0);
+}
+
+// NEO's structural moves all start with snapshotStructure (for ⌘Z); its
+// label says what kind of move it is
+function slogCauseOf(label) {
+  const l = String(label || '');
+  if (l === 'paste') return null; // the paste itself carries the label
+  if (l === 'chapter split') return { src: 'move', cause: 'split' };
+  if (l === 'chapters merged' || l === 'chapter joined') return { src: 'move', cause: 'join' };
+  if (l === 'replace' || l === 'replace all') return { src: 'typed', cause: 'replace' };
+  if (l === 'darling' || l === 'darling restore' || l === 'chapter delete') return { src: 'move', cause: 'darling' };
+  if (l === 'darling delete') return { src: 'typed', cause: 'darling' };
+  if (/^(card moved|card to chapter|card to loose|loose card placed|scene moved|chapter reorder|outline section to chapter)$/.test(l)) return { src: 'move', cause: 'outline' };
+  if (/^(outline|card|scene|loose card) /.test(l)) return { src: 'typed', cause: 'outline' };
+  return { src: 'typed' };
+}
+function slogStructural(label) {
+  if (!slogLive() || slogState.stack.length) return; // a wrapper (or a paste) already says
+  const how = slogCauseOf(label);
+  if (how) slogTask(how);
+}
+
+// The clipboard. Text copied or cut in NEO and pasted back is a move (the
+// main process ties it to where it came from); anything else pasted is
+// from outside. A cut is an entry of its own, so the paste can point at it.
+const slogInBook = (el) => !!(el && el.closest && el.closest('#editor-view'));
+for (const type of ['copy', 'cut']) {
+  document.addEventListener(type, (e) => {
+    if (!slogLive() || !slogInBook(e.target)) return;
+    const text = slogClipText(window.getSelection());
+    slogState.clip = text ? { text, cut: type === 'cut' } : null;
+    if (type === 'cut') slogTask({ src: 'typed' });
+  }, true);
+}
+document.addEventListener('paste', (e) => {
+  if (!slogLive() || !slogInBook(e.target)) return;
+  const text = slogClipText(e.clipboardData && e.clipboardData.getData('text/plain'));
+  slogTask({ src: slogState.clip && text && text === slogState.clip.text ? 'move' : 'paste' });
+}, true);
+document.addEventListener('drop', (e) => {
+  if (!slogLive() || !slogInBook(e.target) || !e.target.closest('[contenteditable="true"]')) return;
+  const dt = e.dataTransfer;
+  if (!dt || (dt.files && dt.files.length)) return;
+  const types = [...(dt.types || [])];
+  if (!types.includes('text/plain') && !types.includes('text/html')) return;
+  slogTask({ src: dragFromInside ? 'move' : 'drop' });
+}, true);
+
+// The editor opened a book: what it read is what the log holds
+function slogOpen(bookId) {
+  const b = slogBridge();
+  if (!b) return;
+  if (slogState.bookId && slogState.bookId !== bookId) slogClose(slogState.bookId);
+  clearTimeout(slogState.timer);
+  Object.assign(slogState, { bookId, seen: {}, stack: [], burst: null, timer: null });
+  for (const chId of book.chapterOrder) if (typeof chapterHTML[chId] === 'string') slogState.seen[slogKey('chapter', chId)] = chapterHTML[chId];
+  slogState.seen[slogKey('json', 'darlings')] = slogSig('json', darlings);
+  slogState.seen[slogKey('json', 'stickies')] = slogSig('json', stickies);
+  slogState.seen[slogKey('book')] = slogSig('book', book);
+  try { Promise.resolve(b.open(bookId)).catch(() => {}); } catch { /* not logged, still written */ }
+}
+// …and closed it: once the last saves are on their way, the chunk ends
+function slogClose(bookId = slogState.bookId) {
+  const b = slogBridge();
+  if (!b || !bookId) return;
+  if (slogState.bookId === bookId) {
+    if (slogLive()) slogFlush();
+    clearTimeout(slogState.timer);
+    Object.assign(slogState, { bookId: null, seen: {}, stack: [], burst: null, timer: null });
+  }
+  const saving = Object.keys(chapterChain).filter((k) => k.startsWith(bookId + '/')).map((k) => chapterChain[k]);
+  Promise.allSettled(saving).then(() => b.event(bookId, { type: 'close' })).catch(() => {});
+}
+// Notes and Outline as they were read into the editor
+function slogAuxLoaded(bookId, kind, html) {
+  if (slogLive() && bookId === book.id) slogState.seen[slogKey('aux', kind)] = html || '';
+}
+
+// File → Scribe's Log, for the open book. book.json holds the switch.
+async function slogToggle(msg) {
+  if (!book || msg.bookId !== book.id) return;
+  slogFlush();
+  if (msg.on) delete book.scribesLog; else book.scribesLog = false;
+  await saveMeta();
+  if (msg.on) {
+    // the log picks up from the disk; what's on the page and not saved yet
+    // is told again (the log ignores what it already has)
+    const pop = slogPush({ src: 'unlogged' });
+    slogState.seen = {};
+    pop();
+  }
+  toast(msg.on ? t('Scribe\'s Log is on for this book') : t('Scribe\'s Log is off for this book. What it recorded stays in the book\'s folder.'));
+}
+
+/* ================================================================== */
 /*  SAVING                                                             */
 /* ================================================================== */
 
@@ -9834,6 +10127,7 @@ function persistChapter(chId, html) {
   if (html === undefined) html = chapterHTML[chId] || '';
   const bookId = book.id;
   const key = bookId + '/' + chId;
+  slogNote(bookId, 'chapter', chId, html);
   savedHTML[chId] = html;
   writing[chId] = (writing[chId] || 0) + 1;
   // the disk is told what this device last knew of the chapter: if another
@@ -9874,6 +10168,10 @@ function twinChapterTitle(title) {
 }
 async function keepOtherDeviceVersion(bookId, chId, disk) {
   const twinId = 'ch-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+  // the other device's words, kept: in the log they arrived from there
+  return slogWith({ src: 'arrived' }, () => keepTwin(bookId, chId, disk, twinId));
+}
+async function keepTwin(bookId, chId, disk, twinId) {
   if (book && book.id === bookId) {
     const idx = book.chapterOrder.indexOf(chId);
     book.chapterOrder.splice(idx < 0 ? book.chapterOrder.length : idx + 1, 0, twinId);
@@ -9892,6 +10190,7 @@ async function keepOtherDeviceVersion(bookId, chId, disk) {
     toast(t('This chapter also changed on another device. That version is saved as the chapter after it.'), 8000);
     return;
   }
+  slogNote(bookId, 'chapter', twinId, disk, { src: 'arrived' });
   await window.neo.writeChapter(bookId, twinId, disk);
   const meta = await window.neo.readBookMeta(bookId);
   if (!meta || !Array.isArray(meta.chapterOrder)) return;
@@ -9899,7 +10198,7 @@ async function keepOtherDeviceVersion(bookId, chId, disk) {
   meta.chapterOrder.splice(idx < 0 ? meta.chapterOrder.length : idx + 1, 0, twinId);
   meta.chapterTitles = meta.chapterTitles || {};
   meta.chapterTitles[twinId] = twinChapterTitle(meta.chapterTitles[chId]);
-  await writeBookMeta(bookId, meta);
+  await writeBookMeta(bookId, meta, { src: 'arrived' });
 }
 
 function scheduleChapterSave(chId) {
@@ -10029,6 +10328,7 @@ async function refreshFromDisk() {
   if (refreshing || shelfExport) return;
   refreshing = true;
   bookMetaCache.clear(); // whatever another device wrote, the next redraw reads
+  let slogDone = null;
   try {
     if (!book) {
       if (library && !$('#bookshelf-view').hidden) {
@@ -10049,6 +10349,9 @@ async function refreshFromDisk() {
       return;
     }
     const bookId = book.id;
+    // what's on the page is described before the disk is read, so the log
+    // can tell another device's words from these
+    if (slogLive()) slogFlush();
     if (window.neo.refreshBook) await window.neo.refreshBook(bookId);
     const meta = await window.neo.readBookMeta(bookId);
     if (!book || book.id !== bookId || !meta) return;
@@ -10097,6 +10400,9 @@ async function refreshFromDisk() {
     }
 
     // Then decide it all in one go: nothing waits from here to the page.
+    // Whatever changes here came from the other device.
+    if (slogLive()) slogFlush();
+    slogDone = slogPush({ src: 'arrived' });
     let restructured = false;
     if (theirs && metaSig(book) === sigHere) {
       // The other device added, renamed or moved chapters. Whichever
@@ -10219,8 +10525,11 @@ async function refreshFromDisk() {
       updateCounters();
       scheduleNavRefresh();
       if (replaced.length) {
-        darlings.unshift(...replaced);
-        writeSidecar(bookId, 'darlings', darlings);
+        // (the page's words an older copy took away: moved, not arrived)
+        slogWith({ src: 'move', cause: 'darling' }, () => {
+          darlings.unshift(...replaced);
+          writeSidecar(bookId, 'darlings', darlings);
+        });
       }
       if (currentTab === 'darlings' && (restructured || replaced.length)) renderDarlings();
       if (conflicts) toast(t('This chapter also changed on another device. That version is saved as the chapter after it.'), 8000);
@@ -10245,6 +10554,7 @@ async function refreshFromDisk() {
   } catch (err) {
     console.error(err);
   } finally {
+    if (slogDone) slogDone();
     refreshing = false;
   }
 }
@@ -10265,6 +10575,7 @@ setInterval(() => { if (book) flushAllSaves('tick'); }, 20000);
 async function backToShelf() {
   if (reading) stopReadAloud(false);
   flushAllSaves();
+  slogClose();
   tabPlaces = {};
   book = null;
   currentChapterId = null;
@@ -10415,6 +10726,7 @@ function sealUndoOnEdit() {
 }
 function snapshotStructure(label, opts) {
   if (!book) return;
+  slogStructural(label);
   sealUndo(undoStack[undoStack.length - 1]);
   const snap = {
     armed: false, // the action's own edits, in this same moment, don't seal it
@@ -10438,7 +10750,9 @@ function snapshotStructure(label, opts) {
   if (undoStack.length > 10) undoStack.shift();
 }
 
-async function structuralUndo() {
+// one label in the Scribe's Log for all of it, waits on the disk included
+function structuralUndo(...args) { return slogWith({ src: 'move', cause: 'undo' }, () => structuralUndoNow(...args)); }
+async function structuralUndoNow() {
   const snap = undoStack.pop();
   if (!snap || !book) return;
   sealUndo(snap); // nothing typed since: the state now is the action's own
@@ -10988,7 +11302,8 @@ async function addImportedBooks(results, shelf) {
     // passing the title in gives the book folder a readable name too
     const meta = await window.neo.createBook({
       author: r.author || displayAuthor(),
-      title: r.title || r.name
+      title: r.title || r.name,
+      slogImport: r.slogImport
     });
     meta.title = r.title || r.name;
     meta.tabNames = {
@@ -11011,7 +11326,7 @@ async function addImportedBooks(results, shelf) {
       for (const p of ch.paras) words += countWords(p.text || '');
     }
     meta.wordCount = words;
-    await writeBookMeta(meta.id, meta);
+    await writeBookMeta(meta.id, meta, { src: 'import' });
     await placeTitle(shelf, meta.id);
     ok++;
   }
@@ -11343,7 +11658,7 @@ function showSpellMenu(x, y, word, suggestions, actions) {
     for (const s of suggestions) {
       const btn = document.createElement('button');
       btn.textContent = s;
-      btn.onclick = () => { menu.remove(); actions.replace(s); };
+      btn.onclick = () => { menu.remove(); slogWith({ src: 'typed', cause: 'spell' }, () => actions.replace(s)); };
       menu.appendChild(btn);
     }
   } else {
@@ -13680,6 +13995,8 @@ window.neo.onMenu(async (msg) => {
     if (msg.type === 'checkUpdate' && updateDialog) updateDialog.focus();
     return;
   }
+  slogGesture(); // a menu command is the writer's own doing, like a key
+  if (msg.type === 'scribesLog') await slogToggle(msg);
   if (msg.type === 'help') showHelp();
   if (msg.type === 'about') showAbout();
   if (msg.type === 'checkUpdate') checkForUpdate();

@@ -88,6 +88,54 @@ describe('Recorder', { concurrency: 1 }, () => {
     assertChecks(env);
   });
 
+  test('a save landing after newer words were described adds nothing', async () => {
+    const env = setup();
+    const rec = env.recorder();
+    rec.open(env.dir, 'book-a');
+    // the window describes two bursts; the first save is still on its way
+    rec.observe(env.dir, 'book-a', 'ch-1', '<p>Hello there.</p>', { src: 'typed', ev: 6 });
+    rec.observe(env.dir, 'book-a', 'ch-1', '<p>Hello there, you.</p>', { src: 'typed', ev: 5 });
+    save(rec, env, 'ch-1', '<p>Hello there.</p>');
+    save(rec, env, 'ch-1', '<p>Hello there, you.</p>');
+    // …and one the window never described is still news
+    save(rec, env, 'ch-1', '<p>Hello there, you!</p>');
+    await rec.close('book-a');
+    const edits = entries(env).filter((e) => e.kind === 'edit');
+    assert.deepEqual(edits.map((e) => e.src), ['typed', 'typed', 'unlogged']);
+    assertChecks(env);
+  });
+
+  test('a move\'s leaving half is the writer\'s own edit; the arriving half keeps the label', async () => {
+    const env = setup({ chapters: { 'ch-1': '<p>One.</p><p>Two.</p>' } });
+    const rec = env.recorder();
+    rec.open(env.dir, 'book-a');
+    const how = { src: 'move', cause: 'split' };
+    rec.observe(env.dir, 'book-a', 'ch-1', '<p>One.</p>', how);
+    rec.observe(env.dir, 'book-a', 'ch-2', '<p>Two.</p>', how);
+    save(rec, env, 'ch-1', '<p>One.</p>');
+    save(rec, env, 'ch-2', '<p>Two.</p>');
+    await rec.close('book-a');
+    const edits = entries(env).filter((e) => e.kind === 'edit');
+    assert.deepEqual(edits.map((e) => [e.doc, e.src, e.cause]), [['ch-1', 'typed', 'split'], ['ch-2', 'move', 'split']]);
+    assertChecks(env);
+  });
+
+  test('a book.json described from the shelf starts no log for the caret\'s place, and is labeled when it changes', async () => {
+    const env = setup();
+    const rec = env.recorder();
+    assert.equal(rec.observeMeta(env.dir, 'book-a', { ...env.meta, lastPosition: { chapterId: 'ch-1' } }, { src: 'typed' }), false);
+    assert.equal(fs.existsSync(path.join(env.dir, slog.LOG_DIR)), false);
+    const renamed = { ...env.meta, title: 'A Better Book' };
+    assert.equal(rec.observeMeta(env.dir, 'book-a', renamed, { src: 'typed' }), true);
+    rec.beforeMeta(env.dir, 'book-a', renamed);
+    env.writeMeta(renamed);
+    rec.metaWritten(env.dir, 'book-a', renamed);
+    await rec.close('book-a');
+    const edits = entries(env).filter((e) => e.kind === 'edit' && e.doc === 'book');
+    assert.deepEqual(edits.map((e) => [e.src, e.keys]), [['typed', ['title']]]);
+    assertChecks(env);
+  });
+
   test('a save nobody described is logged as unlogged', async () => {
     const env = setup();
     const rec = env.recorder();
