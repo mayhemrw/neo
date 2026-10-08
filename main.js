@@ -979,6 +979,13 @@ function slogChapters(meta) {
   const kinds = (meta && meta.chapterKinds) || {};
   return Array.isArray(meta && meta.chapterOrder) ? meta.chapterOrder.filter((id) => typeof id === 'string' && kinds[id] !== 'contents') : [];
 }
+// Today on this computer, as 2026-10-07: in an export's or report's file
+// name, so several of them sort by date and don't overwrite each other.
+// (The day a file was made, never when the writing happened.)
+function slogDay(ms = Date.now()) {
+  const d = new Date(ms);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
 const slogFileName = (title) => [...String(title || t('Untitled'))].filter((c) => c >= ' ' && !'\\/:*?"<>|'.includes(c)).join('').replace(/\s+/g, ' ').trim().slice(0, 80) || t('Untitled');
 ipcMain.handle('slog:export', async (_e, bookId, opts = {}) => {
   const dir = bookDir(bookId);
@@ -988,7 +995,7 @@ ipcMain.handle('slog:export', async (_e, bookId, opts = {}) => {
   // the session's chunk closes and its end is stamped, while the writer picks a place
   const { head, settled } = await slogWrapUp(dir, bookId);
   const meta = readJSON(path.join(dir, 'book.json'), {}) || {};
-  const name = slogFileName(meta.title) + ' - ' + (kind === 'full' ? t('Scribe\'s Log (with text)') : t('Scribe\'s Log (no text)'));
+  const name = slogFileName(meta.title) + ' - ' + (kind === 'full' ? t('Scribe\'s Log (with text)') : t('Scribe\'s Log (no text)')) + ' ' + slogDay();
   const { canceled, filePath } = await dialog.showSaveDialog(win, {
     defaultPath: path.join(exportFolder(), name + '.zip'),
     filters: [{ name: 'ZIP', extensions: ['zip'] }]
@@ -1048,7 +1055,10 @@ ipcMain.handle('slog:report', async (_e, bookId, opts = {}) => {
   const win = BrowserWindow.getFocusedWindow();
   const { settled } = await slogWrapUp(dir, bookId);
   const meta = readJSON(path.join(dir, 'book.json'), {}) || {};
-  const name = slogFileName(meta.title) + ' - ' + t('Scribe\'s Log report');
+  // dated, and the privacy level named unless it's the usual dates only,
+  // so a folder of reports says which is which (and sorts by date)
+  const level = { exact: t('exact times'), weeks: t('weeks only') }[privacy];
+  const name = slogFileName(meta.title) + ' - ' + t('Scribe\'s Log report') + ' ' + slogDay() + (level ? ' (' + level + ')' : '');
   const { canceled, filePath } = await dialog.showSaveDialog(win, {
     defaultPath: path.join(exportFolder(), name + '.html'),
     filters: [{ name: t('Web page'), extensions: ['html'] }]

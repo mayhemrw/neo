@@ -21,6 +21,7 @@ const source = fs.readFileSync(path.join(root, 'main.js'), 'utf8');
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'neo-slog-user-'));
 
 let saveAs = null; // where a save dialog "chooses", or null to cancel
+let offered = null; // the name the last save dialog offered
 function loadMain() {
   const handlers = new Map();
   const sent = [];
@@ -37,7 +38,7 @@ function loadMain() {
     ipcMain: { on() {}, handle: (name, fn) => handlers.set(name, fn) },
     BrowserWindow: { getFocusedWindow: () => null, getAllWindows: () => [] },
     Menu: { buildFromTemplate: (items) => items, setApplicationMenu() {} },
-    dialog: { showSaveDialog: async (_w, o) => (saveAs ? { canceled: false, filePath: saveAs } : { canceled: true, defaultPath: o.defaultPath }) },
+    dialog: { showSaveDialog: async (_w, o) => { offered = path.basename(o.defaultPath); return saveAs ? { canceled: false, filePath: saveAs } : { canceled: true }; } },
     utilityProcess: { fork: () => ({ on() {}, postMessage() {} }) },
     screen: {}
   };
@@ -264,6 +265,10 @@ describe('Scribe\'s Log in main.js', { concurrency: 1 }, () => {
     saveAs = null;
     assert.equal(await main.call('slog:export', book.id, { kind: 'clear', added: [] }), null);
     assert.equal(main.get('slogRecorder').activeChunk(book.id), null);
+    // offered under the book's title and today's date, so exports don't overwrite each other
+    const today = main.get('slogDay()');
+    assert.match(today, /^\d{4}-\d{2}-\d{2}$/);
+    assert.equal(offered, `Tide AB Book - Scribe's Log (no text) ${today}.zip`);
     // saved, without the text
     const out = path.join(lib, 'export.zip');
     saveAs = out;
@@ -286,6 +291,18 @@ describe('Scribe\'s Log in main.js', { concurrency: 1 }, () => {
     // with the text
     saveAs = path.join(lib, 'full.zip');
     const full = await main.call('slog:export', book.id, { kind: 'full', added: [] });
+    assert.equal(offered, `Tide AB Book - Scribe's Log (with text) ${today}.zip`);
+    // the report: dated too, and its privacy level named unless it's dates only
+    saveAs = path.join(lib, 'report.html');
+    const rep = await main.call('slog:report', book.id, { privacy: 'weeks' });
+    assert.equal(rep.path, saveAs);
+    assert.equal(offered, `Tide AB Book - Scribe's Log report ${today} (weeks only).html`);
+    assert.match(fs.readFileSync(rep.path, 'utf8'), /<title>Scribe&#39;s Log report: Tide: A\/B &quot;Book&quot;, \w+ \d+, \d{4}<\/title>/);
+    saveAs = null;
+    await main.call('slog:report', book.id, { privacy: 'dates' });
+    assert.equal(offered, `Tide AB Book - Scribe's Log report ${today}.html`);
+    await main.call('slog:report', book.id, { privacy: 'exact' });
+    assert.equal(offered, `Tide AB Book - Scribe's Log report ${today} (exact times).html`);
     const fz = await checkZip(full.path);
     assert.equal(fz.ok, true);
     assert.equal(fz.words, true);

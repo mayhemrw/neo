@@ -704,7 +704,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${esc(t('Scribe\'s Log report: {title}', { title: s.title || t('Untitled') }))}</title>
+<title>${esc(t('Scribe\'s Log report: {title}, {date}', { title: s.title || t('Untitled'), date: cal.date(cal.dayKey(generated)) }))}</title>
 <style>
 :root { color-scheme: light; --surface: #fcfcfb; --surface-2: #f3f2ef; --line: #e2e1dc; --text: #0b0b0b; --text-2: #52514e; --muted: #75736d; --good: #0a7a3a; --bad: #b42318; }
 * { box-sizing: border-box; }
