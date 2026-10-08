@@ -691,3 +691,88 @@ describe('Moves and the graveyard', { concurrency: 1 }, () => {
     assert.deepEqual(slog.trace(bare).docs['ch-1'].runs, [[5, 'typed'], [OWN.length, 'paste']]);
   });
 });
+
+// Two computers on one synced folder: text one wrote that turns up on the
+// other is traced back to the chain that wrote it.
+describe('Text from another device', { concurrency: 1 }, () => {
+  const TYPED = 'The desktop typed this, carefully, word by word.';
+  const PASTED = 'And this the desktop pasted from somewhere outside.';
+  const ON_LAPTOP = 'Then the laptop added a line of its own.';
+  const laptopOf = (env) => new slog.Recorder({ home: path.join(env.root, 'laptop'), app: 'test', now: () => (env.clock += 1000), onError: (w, err) => env.errors.push(w + ': ' + err.message) });
+  const deviceOf = (rec) => rec.device();
+  function origins(d, doc, needle) {
+    const t = d.traced[doc];
+    const at = t.text.indexOf(needle);
+    assert.ok(at >= 0, `"${needle}" is in ${doc}`);
+    return slog.originsAt(t, at, needle.length).map(([, o]) => o);
+  }
+  // the desktop types a chapter and pastes into it
+  async function desktopWrites(env) {
+    const desk = env.recorder();
+    desk.open(env.dir, 'book-a');
+    const one = `<p>${TYPED}</p>`;
+    desk.observe(env.dir, 'book-a', 'ch-1', one, { src: 'typed' });
+    save(desk, env, 'ch-1', one);
+    const two = one + `<p>${PASTED}</p>`;
+    desk.observe(env.dir, 'book-a', 'ch-1', two, { src: 'paste' });
+    save(desk, env, 'ch-1', two);
+    await desk.close('book-a');
+    return { desk, two };
+  }
+
+  test('the second computer\'s first look names the chain its text came from', async () => {
+    const env = setup({ chapters: { 'ch-1': '' } });
+    const { desk, two } = await desktopWrites(env);
+    const laptop = laptopOf(env);
+    laptop.open(env.dir, 'book-a');
+    const three = two + `<p>${ON_LAPTOP}</p>`;
+    laptop.observe(env.dir, 'book-a', 'ch-1', three, { src: 'typed' });
+    save(laptop, env, 'ch-1', three);
+    await laptop.close('book-a');
+    const mine = entries(env).filter((e) => e.kind === 'base' && e.src === 'arrived' && e.doc === 'ch-1');
+    assert.equal(mine.length, 1);
+    assert.deepEqual(mine[0].from.map((p) => [p[3].dev, p[3].doc, p[3].at]), [[deviceOf(desk), 'ch-1', 0]]);
+    let res = assertChecks(env);
+    const lap = res.devices.find((d) => d.dev === deviceOf(laptop));
+    assert.deepEqual(origins(lap, 'ch-1', TYPED), ['typed']);
+    assert.deepEqual(origins(lap, 'ch-1', PASTED), ['paste']);
+    assert.deepEqual(origins(lap, 'ch-1', ON_LAPTOP), ['typed']);
+    assert.equal(lap.arrivals.unlinked, 0);
+    // back on the desktop, the laptop's line arrives, named the same way
+    const desk2 = env.recorder();
+    desk2.open(env.dir, 'book-a');
+    await desk2.close('book-a');
+    const back = entries(env).filter((e) => e.kind === 'edit' && e.src === 'arrived' && e.doc === 'ch-1');
+    assert.equal(back.length, 1);
+    assert.deepEqual(back[0].from.map((p) => p[3].dev), [deviceOf(laptop)]);
+    res = assertChecks(env);
+    const d = res.devices.find((x) => x.dev === deviceOf(desk));
+    assert.deepEqual(origins(d, 'ch-1', ON_LAPTOP), ['typed']);
+    assert.deepEqual(origins(d, 'ch-1', PASTED), ['paste']);
+    assert.deepEqual(env.errors, []);
+  });
+
+  test('when the other chain hadn\'t synced yet, the checker matches the text by its words', async () => {
+    const env = setup({ chapters: { 'ch-1': '' } });
+    const { desk } = await desktopWrites(env);
+    // the laptop sees the chapters before the desktop's chunks reach it
+    const logDir = path.join(env.dir, slog.LOG_DIR);
+    const away = path.join(env.root, 'not-synced-yet');
+    fs.mkdirSync(away);
+    const theirs = fs.readdirSync(logDir).filter(slog.isChunkName);
+    for (const n of theirs) fs.renameSync(path.join(logDir, n), path.join(away, n));
+    const laptop = laptopOf(env);
+    laptop.open(env.dir, 'book-a');
+    await laptop.close('book-a');
+    for (const n of theirs) fs.renameSync(path.join(away, n), path.join(logDir, n));
+    const base = entries(env).find((e) => e.kind === 'base' && e.src === 'arrived' && e.doc === 'ch-1');
+    assert.equal(base.from, undefined);
+    const res = assertChecks(env);
+    const lap = res.devices.find((d) => d.dev === deviceOf(laptop));
+    assert.deepEqual(origins(lap, 'ch-1', PASTED), ['paste']);
+    // (the chapter and the book document; the notes are empty)
+    assert.deepEqual([lap.arrivals.recorded, lap.arrivals.matched, lap.arrivals.unlinked], [0, 2, 0]);
+    assert.deepEqual(lap.arrivals.from, { [res.devices.find((d) => d.dev === deviceOf(desk)).name]: 2 });
+  });
+});
+

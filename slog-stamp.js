@@ -31,7 +31,7 @@ const tsa = require('./stamp-tsa.js');
 
 const STAMP_DIR = 'stamps';
 const CERT_DIR = 'certs';
-const RECEIPT_RE = /^(\d{8}T\d{6}Z)-([0-9a-f]{8})(?:-([1-9]\d{0,3}))?\.stamps$/;
+const { RECEIPT_RE } = require('./slog-verify.js');
 const EVERY = 15 * 60 * 1000;         // a moving chain is stamped this often
 const TICK = 60 * 1000;
 const BACKOFF = [60e3, 5 * 60e3, 15 * 60e3]; // then every 15 minutes

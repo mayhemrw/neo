@@ -1,6 +1,6 @@
 # Scribe's Log format, version 1 (draft)
 
-The Scribe's Log is a tamper-evident record of how a book was written in NEO. This document defines the files well enough for anyone to write their own checker. NEO's own implementation is `slog.js`.
+The Scribe's Log is a tamper-evident record of how a book was written in NEO. This document defines the files well enough for anyone to write their own checker. NEO's own implementation is `slog.js` (writing) and `slog-verify.js` (checking, shared by NEO, `scripts/slog-check.js` and the standalone verifier).
 
 Draft status: the parts below are implemented and tested. Exports and signatures are reserved and will be specified when they're built.
 
@@ -52,7 +52,7 @@ Every entry has a **clear part** and, while it's on the writer's computer, an op
 |---|---|---|
 | `open` | Starts a chunk | `v` (format: `2`, or `1` for a chunk with no `stamp` entries written before them), `log` (log id), `dev` (device id, 32 hex), `prevChunk` (name of this device's previous chunk, or `null`), `app` (NEO version, then `+slog1`) |
 | `edit` | One burst of changes to one document | `doc`, `src`, `ops`, `c` if text was inserted, and optionally `dur`, `ev`, `cause`, `from`, `keys` |
-| `base` | A document's whole text, with no process record behind it | `doc`, `src` (`baseline`, `import` or `arrived`), `ops` (a single `[0, 0, length]`), `c`, optionally `file` or `from` |
+| `base` | A document's whole text, with no process record behind it | `doc`, `src` (`baseline`, `import` or `arrived`), `ops` (a single `[0, 0, length]`), `c`, optionally `file` or `from` (another book, or another device) |
 | `doc` | A document created or deleted | `doc`, `act` (`new` or `del`). A deleted document's text is first deleted by an `edit`, so a later move can point at it |
 | `on`, `off` | The log switched on or off for this book. `off` is followed by the chunk's `close`; after `on`, whatever changed while the log was off is recorded with `cause: "off"` | |
 | `sleep`, `wake` | The computer went to sleep or woke | |
@@ -112,10 +112,13 @@ An edit that only deletes uses `src` for how the change was made: `typed` for th
 - `{ "n": <entry>, "op": <index>, "at": <offset> }`: text deleted by op `op` of entry `n` in this chain, starting `at` units into what that op deleted. The entry can be this one, for an op at or before the piece's own (an op's deletion happens before its insertion).
 - `{ "doc": <document>, "at": <offset> }`: text in that document as it stood just before this entry, at that offset (a copy, or text whose deletion is logged after this entry).
 - `{ "log": <log id> }`: text from another NEO book. Where in it isn't recorded.
+- `{ "dev": <device id>, "n": <entry>, "doc": <document>, "at": <offset> }`: text that arrived from another device: document `doc` as it stood just after entry `n` of that device's chain, at that offset. (Also written as a chunk `v: 2` addition; a v1 chunk never has one.)
 
-The first two carry `"len": <units>` when the source's length differs from `len`. That happens only for a piece that's one character written two ways, such as `\"` in a JSON document and `"` in a chapter, or a space written as a no-break space (`&nbsp;`, `&#160;`, `&#xa0;`, the character U+00A0 or its JSON escape) on one side and a plain space on the other, as Chromium saves the space at the edge of a paste: the piece's units then all take the origin of the source's first unit. Otherwise the piece maps unit for unit.
+The `{n, op}` and `{doc}` sources carry `"len": <units>` when the source's length differs from `len`. That happens only for a piece that's one character written two ways, such as `\"` in a JSON document and `"` in a chapter, or a space written as a no-break space (`&nbsp;`, `&#160;`, `&#xa0;`, the character U+00A0 or its JSON escape) on one side and a plain space on the other, as Chromium saves the space at the edge of a paste: the piece's units then all take the origin of the source's first unit. Otherwise the piece maps unit for unit.
 
-A `base` can carry `from` too, with `{log}` sources only: a book made as a copy of another (NEO's Duplicate) starts its log with its words as a `baseline` whose pieces name the original's log, so its text counts as another book's.
+A `base` can carry `from` too, with `{log}` or `{dev}` sources only: a book made as a copy of another (NEO's Duplicate) starts its log with its words as a `baseline` whose pieces name the original's log, so its text counts as another book's; a document that arrived whole from another device names that device's chain.
+
+**Text from another device.** When NEO logs `arrived` text (a `base` or an `edit` with `src: "arrived"`), it looks at the other devices' chunks already in the folder. If one of those chains ends with that document in exactly the state that arrived, the entry's `from` names it: one `{dev}` piece for each op's whole insertion (or the whole base), pointing at where that string stands in the other device's document after its last entry that changed the document. If the other device's chunks hadn't synced yet, the entry has no `from`; a checker holding the words can still match it (below).
 
 Pieces are in order of `op`, then `at`, and don't overlap. Units no piece covers take the entry's `src`; in a `move` entry, that's text moved within NEO whose place wasn't recorded.
 
@@ -181,10 +184,35 @@ For each device:
 3. Walk the entries in order. `n` must rise by exactly 1, and each `prev` must equal the hash of the entry before it.
 4. With the key and words present, each `c` must match, each inserted string must have its recorded length, and each `markup` list must match the tags in its string.
 5. Replay the ops from empty documents. Every op must fit the text it applies to. With words, this rebuilds every document exactly; without them, it still checks every length.
-6. Follow every `from`: each piece must point at text that exists (a deletion earlier in the chain, or at or before its own op; a document as it stood before the entry) and fit inside it. With words, the two stretches must be the same text, or one character written two ways (which takes the origin of the source's first unit, as above).
+6. Follow every `from`: each piece must point at text that exists (a deletion earlier in the chain, or at or before its own op; a document as it stood before the entry; another device's document as it stood after the entry named, on that device's chain) and fit inside it. With words, the two stretches must be the same text, or one character written two ways (which takes the origin of the source's first unit, as above). A `{dev}` piece naming a device whose chunks aren't there, or an entry or document that chain doesn't have, is damage.
 
 The replayed documents of a device are the book as that device last saw it. A `close` entry's `ms` can be compared with a manuscript's hash.
 
 ### Origins
 
 Replaying while carrying each unit's origin gives, for every unit of every document, where it first came from: the `src` of the entry that inserted it, unless a `from` piece covered it, in which case the origin of the unit it came from. A `base` gives its whole text its `src`; `unlogged` with `cause: "off"` is text changed while the log was off. Text from another book is labeled as such. Counting the units of the manuscript's chapters by origin, leaving out tags, scene breaks and the elements the manuscript hash leaves out, and counting a character reference (`&nbsp;`, `&amp;`, `&#8212;`) as one character at its first unit, shows how much was typed, pasted, imported, and so on.
+
+Chains are traced together, since a `{dev}` piece takes the origins its text had on the other device: a checker advances that device's chain to the entry named (which, in real time, came first) and reads its origins there. An `arrived` entry with no `from` and inserted text keeps the origin `arrived`, unless the checker has the words: then it may match the entry to the first entry on another device's chain after which that document was exactly the same (same length, then same SHA-256), and treat the entry as if it had `{dev}` pieces naming it. NEO's checker does; a match that would loop between devices is dropped. Without the words, unmatched arrivals stay `arrived`.
+
+Reports name devices Device 1, Device 2… in order of each chain's first entry, never by the device id.
+
+### Receipts
+
+Every line of every receipt file is checked on its own:
+
+1. Its `dev` and `n` must name an entry of a chain that's there, and `h` must be that entry's hash.
+2. An RFC 3161 receipt checks as above (Outside timestamps), against the checker's own trusted roots; the certificates in `stamps/certs/` are used to build the chain but are never trusted for themselves. A token whose only problem is that its authority isn't one the checker trusts is *unchecked*, not damage. Its time is the token's `genTime`.
+3. An OpenTimestamps receipt must be a proof of `h`. A proof with only pending attestations is *pending*. One with a Bitcoin attestation names a block and the merkle root that block must have; checking it needs that block's header (NEO's verifier fetches it only when asked), and its time is then the block's own timestamp.
+
+Each `stamp` entry must match a receipt whose SHA-256 is its `r` (for OpenTimestamps, the proof as first kept, which stays in its file when the finished proof is written beside it), naming the same device and entry (`of`), and for RFC 3161 the same time (`t`). A `stamp` entry with no receipt is damage: a receipt was deleted. A receipt with no `stamp` entry is normal (the entry may be waiting for the device's next chunk; finished proofs never get one).
+
+**Coverage.** A receipt that checks for entry `n` dates every entry up to `n` on that chain: each entry's outside time is the earliest such receipt's. The entries after a chain's last good receipt are dated only by the computer's clock, and a report says so. The stretch of writing between two stamps is measured in session time (each chunk's span within it), not wall time.
+
+**Clock check.** Flagged, never fatal:
+
+- a `clock` entry whose `jump` is more than 2 minutes back, or an entry dated more than 2 minutes before the entry before it;
+- a `clock` entry more than 2 minutes forward that doesn't come within 5 minutes after a `wake`;
+- an RFC 3161 receipt whose time differs from its request's `ts` by more than 5 minutes;
+- an RFC 3161 receipt dated more than 2 minutes before the entry it covers (the computer's clock was ahead).
+
+Every time is UTC, so time zones and daylight saving never flag anything.

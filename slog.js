@@ -23,15 +23,12 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
+const V = require('./slog-verify.js');
 
 const FORMAT = 1;          // log.json's version
 const CHUNK_FORMAT = 2;    // a chunk's (its open line's v); 2 adds stamp entries, and 1 still reads
-const CHUNK_FORMATS = new Set([1, 2]);
 const LOG_DIR = 'scribes-log';
 const LOG_INFO = 'log.json';
-const KINDS = new Set(['open', 'edit', 'base', 'doc', 'on', 'off', 'sleep', 'wake', 'clock', 'close', 'stamp']);
-// 20261007T160512Z-7f3a9c2e.slog, with -2, -3… if a name is ever taken
-const CHUNK_RE = /^(\d{8}T\d{6}Z)-([0-9a-f]{8})(?:-([1-9]\d{0,3}))?\.slog$/;
 // what Windows says while something else has a file open for a moment
 const BUSY = ['EPERM', 'EACCES', 'EBUSY'];
 
@@ -39,54 +36,12 @@ const BUSY = ['EPERM', 'EACCES', 'EBUSY'];
 /*  Hashing                                                            */
 /* ------------------------------------------------------------------ */
 
-// Canonical JSON: keys sorted at every level, no spaces, whole numbers only.
-// Anything that hashes an entry, in any language, gets the same bytes.
-function canonical(v) {
-  if (v === null) return 'null';
-  switch (typeof v) {
-    case 'string': return JSON.stringify(v);
-    case 'boolean': return v ? 'true' : 'false';
-    case 'number':
-      if (!Number.isSafeInteger(v)) throw new Error('Scribe\'s Log: not a whole number: ' + v);
-      return String(v === 0 ? 0 : v); // -0 is 0
-    case 'object':
-      if (Array.isArray(v)) return '[' + v.map(canonical).join(',') + ']';
-      return '{' + Object.keys(v).filter((k) => v[k] !== undefined).sort()
-        .map((k) => JSON.stringify(k) + ':' + canonical(v[k])).join(',') + '}';
-    default:
-      throw new Error('Scribe\'s Log: can\'t record a ' + typeof v);
-  }
-}
-
+// Hashing is the checker's (slog-verify.js), with Node's crypto put in:
+// the same bytes as its plain JavaScript, faster.
 const sha256hex = (data) => crypto.createHash('sha256').update(data).digest('hex');
-
-// The clear part: the entry without its words (x). What the chain hashes,
-// and all a log shared without the text contains.
-function clearPart(entry) {
-  const c = {};
-  for (const k of Object.keys(entry)) if (k !== 'x') c[k] = entry[k];
-  return c;
-}
-const entryHash = (entry) => sha256hex(canonical(clearPart(entry)));
-
-// Each entry's salt comes from the book's key and the entry's place in its
-// chain. Nothing extra is stored, and one entry's words can be shown later
-// (with its salt) without handing over the key to all the others.
-function saltFor(key, dev, n) {
-  return crypto.createHmac('sha256', key).update(dev + ':' + n).digest();
-}
-function commitment(key, dev, n, ins) {
-  return sha256hex(Buffer.concat([saltFor(key, dev, n), Buffer.from(canonical(ins), 'utf8')]));
-}
+V.useHash({ sha256hex, hmac: (key, s) => crypto.createHmac('sha256', key).update(s).digest() });
+const { canonical, clearPart, entryHash, saltFor, commitment, normalizeManuscript, manuscriptHash } = V;
 const keyId = (key) => sha256hex(key).slice(0, 16);
-
-// The manuscript's fingerprint: its prose as plain text, in Unicode's
-// composed form, every run of whitespace one space. Unsalted on purpose, so
-// a publisher holding the book can hash it and match the log's last word.
-function normalizeManuscript(text) {
-  return String(text).normalize('NFC').replace(/\s+/gu, ' ').trim();
-}
-const manuscriptHash = (text) => sha256hex(normalizeManuscript(text));
 
 const newDeviceId = () => crypto.randomBytes(16).toString('hex');
 function newLogInfo() {
@@ -207,13 +162,7 @@ function tokenHunks(am, bm) {
   return hunks;
 }
 
-// Markup inside an insertion, as [offset, length] pairs, so a log with no
-// text can still count the letters that were written (not the <p> around them).
-function markupRanges(s) {
-  const out = [];
-  for (const m of s.matchAll(/<[^>]*>/g)) out.push([m.index, m[0].length]);
-  return out;
-}
+const { markupRanges, applyOps, applyLengths } = V;
 
 // Ops as they're recorded: [at, del, ins] plus the markup list when there is any
 function recordOps(ops, ins) {
@@ -221,29 +170,6 @@ function recordOps(ops, ins) {
     const marks = markupRanges(ins[i]);
     return marks.length ? [op[0], op[1], op[2], marks] : [op[0], op[1], op[2]];
   });
-}
-
-// Apply recorded ops to a document's text. Throws on ops that don't fit,
-// which is how a replay finds a log that doesn't match its text.
-function applyOps(text, ops, ins) {
-  let s = text;
-  ops.forEach((op, i) => {
-    const [at, del, len] = op;
-    const put = ins ? ins[i] : '';
-    if (!(at >= 0 && del >= 0 && at + del <= s.length)) throw new Error('op out of range');
-    if (put.length !== len) throw new Error('inserted text is not the recorded length');
-    s = s.slice(0, at) + put + s.slice(at + del);
-  });
-  return s;
-}
-// The same, counting lengths only (a log shared without its text)
-function applyLengths(length, ops) {
-  let n = length;
-  for (const [at, del, len] of ops) {
-    if (!(at >= 0 && del >= 0 && at + del <= n)) throw new Error('op out of range');
-    n += len - del;
-  }
-  return n;
 }
 
 /* ------------------------------------------------------------------ */
@@ -280,50 +206,8 @@ const GRAVE_COUNT = 20000;         // …in at most this many deletions
 const RECENT = 8;                  // deletions looked for whole in a move, however short…
 const RECENT_MIN = 4;              // …down to this many units of text
 const isJsonDoc = (doc) => doc === 'book' || doc === 'darlings' || doc === 'stickies';
-const ESCAPES = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' };
-
-// A string as the characters it stands for: a JSON document's escapes
-// decoded, and a no-break space however it's written (`&nbsp;`, `&#160;`,
-// `&#xa0;`, the character itself, or its JSON escape) read as a plain
-// space, since Chromium saves the space at the edge of a paste that way;
-// with where each character starts in the raw string (`at`, or null when
-// they're the same)
-const NBSP_RE = /^&(?:nbsp|#0*160|#x0*a0);/i;
-function viewOf(raw, json) {
-  const escapes = json && raw.indexOf('\\') >= 0;
-  if (!escapes && raw.indexOf('\u00a0') < 0 && !/&(?:nbsp|#0*160|#x0*a0);/i.test(raw)) {
-    return { raw, text: raw, at: null, json: !!json };
-  }
-  const chars = [];
-  const at = [];
-  let i = 0;
-  while (i < raw.length) {
-    at.push(i);
-    const ch = raw.charCodeAt(i);
-    if (escapes && ch === 92 && i + 1 < raw.length) {
-      const c = raw[i + 1];
-      const hex = raw.slice(i + 2, i + 6);
-      if (c === 'u' && /^[0-9a-fA-F]{4}$/.test(hex)) {
-        const u = parseInt(hex, 16);
-        chars.push(u === 0xa0 ? ' ' : String.fromCharCode(u));
-        i += 6;
-        continue;
-      }
-      if (Object.hasOwn(ESCAPES, c)) { chars.push(ESCAPES[c]); i += 2; continue; }
-    }
-    if (ch === 38) {
-      const m = NBSP_RE.exec(raw.slice(i, i + 10));
-      if (m) { chars.push(' '); i += m[0].length; continue; }
-    }
-    chars.push(ch === 0xa0 ? ' ' : raw[i]);
-    i++;
-  }
-  at.push(raw.length);
-  return { raw, text: chars.join(''), at, json: !!json };
-}
+const { viewOf } = V;
 const rawAt = (v, k) => (v.at ? v.at[k] : k);
-// one character, however it's written (a no-break space as a space)
-const sameChar = (a, b) => a === b || viewOf(a, true).text === viewOf(b, true).text;
 
 // How many units before each position are outside tags. In HTML (`html`),
 // a stretch that starts inside a tag, as an edit's inserted string can
@@ -621,7 +505,6 @@ function chunkName(date, dev, k = 1) {
   const stamp = new Date(date).toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
   return `${stamp}-${dev.slice(0, 8)}${k > 1 ? '-' + k : ''}.slog`;
 }
-const isChunkName = (name) => typeof name === 'string' && CHUNK_RE.test(name);
 
 // Append-only, one write at a time, every write pushed to the disk before
 // it counts. A write that fails part-way is cut back to the last whole line,
@@ -687,391 +570,24 @@ async function openSoon(file) {
   }
 }
 
-// A chunk's text, read back. A last line without its newline is a write a
-// crash cut short: it's set aside, not counted, and not an error.
-function parseChunk(text) {
-  const lines = String(text).split('\n');
-  const tail = lines.pop();
-  const entries = [];
-  const problems = [];
-  lines.forEach((raw, i) => {
-    const line = raw.replace(/\r$/, '');
-    if (!line.trim()) return;
-    let e;
-    try { e = JSON.parse(line); } catch { e = null; }
-    if (!e || typeof e !== 'object' || Array.isArray(e)) problems.push({ line: i + 1, problem: 'unreadable line' });
-    else entries.push(e);
-  });
-  return { entries, partialTail: tail !== '', problems };
-}
-
 /* ------------------------------------------------------------------ */
-/*  Checking a chain                                                   */
+/*  Checking: chunks read back, chains checked, replayed and traced    */
 /* ------------------------------------------------------------------ */
 
-// Chunks of one device in chain order: from the one that starts the chain,
-// each next one is the chunk whose open names it. Names sort by time, but
-// a clock set wrong mustn't reorder a chain, so the links decide.
-function orderChunks(chunks) {
-  const problems = [];
-  const byPrev = new Map();
-  for (const c of chunks) {
-    if (!c.entries.length && !(c.problems || []).length) continue; // a first write a crash cut short: nothing to link
-    const open = c.entries[0];
-    const prev = open && open.kind === 'open' ? (open.prevChunk || null) : undefined;
-    if (prev === undefined) { problems.push({ chunk: c.name, problem: 'doesn\'t start with an open entry' }); continue; }
-    if (byPrev.has(prev)) problems.push({ chunk: c.name, problem: 'chain forks: two chunks follow ' + (prev || 'the start') });
-    else byPrev.set(prev, c);
-  }
-  const ordered = [];
-  const seen = new Set();
-  let cur = byPrev.get(null);
-  if (!cur && chunks.length) problems.push({ problem: 'no chunk starts the chain' });
-  while (cur && !seen.has(cur.name)) {
-    seen.add(cur.name);
-    ordered.push(cur);
-    cur = byPrev.get(cur.name);
-  }
-  for (const c of chunks) {
-    if (!c.entries.length && !(c.problems || []).length) continue;
-    if (!seen.has(c.name) && !problems.some((p) => p.chunk === c.name)) problems.push({ chunk: c.name, problem: 'not linked into the chain' });
-  }
-  return { ordered, problems };
-}
-
-// Check one device's chain: numbering, links, chunk headers and, when the
-// key and the words are there, every commitment. Returns the problems found
-// (none means intact) and notes that aren't damage (a session that ended
-// without closing, a write cut short by a crash).
-function verifyChain(chunks, { key = null } = {}) {
-  const { ordered, problems } = orderChunks(chunks);
-  const notes = [];
-  let n = 0;
-  let head = null;
-  let dev = null;
-  for (const c of chunks) {
-    if (!c.entries.length && !(c.problems || []).length) notes.push({ chunk: c.name, note: 'empty: the session\'s first write was cut short' });
-  }
-  for (const c of ordered) {
-    if (c.partialTail) notes.push({ chunk: c.name, note: 'last write cut short (crash or power loss)' });
-    for (const p of c.problems || []) problems.push({ chunk: c.name, ...p });
-    const open = c.entries[0];
-    if (!CHUNK_FORMATS.has(open.v)) problems.push({ chunk: c.name, problem: 'unknown format version ' + open.v });
-    if (dev === null) dev = open.dev;
-    else if (open.dev !== dev) problems.push({ chunk: c.name, problem: 'device changes mid-chain' });
-    const m = CHUNK_RE.exec(c.name);
-    if (m && open.dev && m[2] !== String(open.dev).slice(0, 8)) problems.push({ chunk: c.name, problem: 'file name doesn\'t match its device' });
-    c.entries.forEach((e, i) => {
-      const where = { chunk: c.name, n: e.n };
-      if (!KINDS.has(e.kind)) problems.push({ ...where, problem: 'unknown entry kind ' + e.kind });
-      if (i > 0 && e.kind === 'open') problems.push({ ...where, problem: 'open entry in mid-chunk' });
-      if (e.n !== n + 1) problems.push({ ...where, problem: `numbering jumps from ${n} to ${e.n}` });
-      if (e.prev !== head) problems.push({ ...where, problem: 'link to the entry before is broken' });
-      let ok = true;
-      try { head = entryHash(e); } catch (err) { ok = false; problems.push({ ...where, problem: 'can\'t be hashed: ' + err.message }); }
-      if (!ok) head = null;
-      n = typeof e.n === 'number' ? e.n : n + 1;
-      if (key && e.x && Array.isArray(e.x.ins)) {
-        if (e.c !== commitment(key, dev, e.n, e.x.ins)) problems.push({ ...where, problem: 'words don\'t match their commitment' });
-        if (Array.isArray(e.ops)) {
-          e.ops.forEach((op, j) => {
-            const s = e.x.ins[j];
-            if (typeof s !== 'string' || s.length !== op[2]) problems.push({ ...where, problem: 'words don\'t match the recorded length' });
-            else if (canonical(markupRanges(s)) !== canonical(op[3] || [])) problems.push({ ...where, problem: 'markup list doesn\'t match the words' });
-          });
-        }
-      } else if (e.x) problems.push({ ...where, problem: 'malformed words' });
-    });
-    const last = c.entries[c.entries.length - 1];
-    if (!last || last.kind !== 'close') notes.push({ chunk: c.name, note: 'session ended without closing' });
-  }
-  return { ok: problems.length === 0, problems, notes, dev, n, head, chunks: ordered.map((c) => c.name) };
-}
-
-// Replay one device's chain into the documents as that device last saw
-// them. With the words (x) it rebuilds the text; without them (a log shared
-// with no text) a document's text is null and only its length is known.
-// `docs` can carry a starting state (a cache); entries at or below `from`
-// are skipped.
-function replay(entries, { docs = {}, from = 0 } = {}) {
-  const text = { ...docs };
-  const length = {};
-  for (const id of Object.keys(text)) length[id] = text[id] == null ? 0 : text[id].length;
-  const problems = [];
-  const apply = (id, start, e) => {
-    const hasWords = e.x && Array.isArray(e.x.ins);
-    length[id] = applyLengths(start === null ? length[id] || 0 : start.length, e.ops);
-    if (hasWords && start !== null) text[id] = applyOps(start, e.ops, e.x.ins);
-    else if (e.ops.every((op) => op[2] === 0) && start !== null) text[id] = applyOps(start, e.ops, e.ops.map(() => ''));
-    else text[id] = null;
-  };
-  for (const e of entries) {
-    if (e.n <= from) continue;
-    const where = { n: e.n, doc: e.doc };
-    try {
-      if (e.kind === 'base') {
-        if (length[e.doc]) throw new Error('base over a document that already has text');
-        apply(e.doc, '', e);
-      } else if (e.kind === 'edit') {
-        if (!(e.doc in length)) throw new Error('edit to a document the log never saw');
-        apply(e.doc, text[e.doc], e);
-      } else if (e.kind === 'doc') {
-        if (e.act === 'new') {
-          if (length[e.doc]) throw new Error('new document over one that has text');
-          text[e.doc] = '';
-          length[e.doc] = 0;
-        } else if (e.act === 'del') {
-          if (!(e.doc in length)) throw new Error('deleting a document the log never saw');
-          delete text[e.doc];
-          delete length[e.doc];
-        }
-      }
-    } catch (err) {
-      problems.push({ ...where, problem: err.message });
-    }
-  }
-  return { docs: text, lengths: length, problems };
-}
-
-// Runs of units that share an origin: [[length, origin], …]. A run is
-// never changed in place, so a list can be copied by its array alone.
-function runsSplit(runs, pos) {
-  let acc = 0;
-  for (let i = 0; i < runs.length; i++) {
-    if (acc === pos) return i;
-    const [len, o] = runs[i];
-    if (pos < acc + len) {
-      runs.splice(i, 1, [pos - acc, o], [acc + len - pos, o]);
-      return i + 1;
-    }
-    acc += len;
-  }
-  if (acc === pos) return runs.length;
-  throw new Error('op out of range');
-}
-function runsCut(runs, at, len) {
-  const i = runsSplit(runs, at);
-  const j = runsSplit(runs, at + len);
-  return runs.splice(i, j - i);
-}
-function runsSlice(runs, at, len) {
-  const copy = runs.slice();
-  return runsCut(copy, at, len);
-}
-function runsInsert(runs, at, add) {
-  runs.splice(runsSplit(runs, at), 0, ...add);
-}
-function runsTidy(runs) {
-  let w = 0;
-  for (const r of runs) {
-    if (!r[0]) continue;
-    if (w && runs[w - 1][1] === r[1]) runs[w - 1] = [runs[w - 1][0] + r[0], r[1]];
-    else runs[w++] = r;
-  }
-  runs.length = w;
-  return runs;
-}
-
-// Where an entry's own words come from, when no `from` piece says otherwise
-function originOf(e) {
-  if (e.kind === 'edit' && e.src === 'unlogged' && e.cause === 'off') return 'while off';
-  return typeof e.src === 'string' ? e.src : 'unlogged';
-}
-
-// Replay one device's chain keeping, for every unit of every document,
-// where it first came from: typed, paste, drop, import, arrived, baseline,
-// unlogged, "while off", "other book", or "move" for text moved within NEO
-// whose place wasn't recorded. Each `from` is checked as it's used: that
-// it points at text that exists, and (with the words) that the text is
-// the same. Returns { docs: { id: { text, runs } }, problems }.
-function trace(entries) {
-  const wanted = new Set();
-  for (const e of entries) {
-    if (e.kind !== 'edit' || !Array.isArray(e.from)) continue;
-    for (const p of e.from) if (Array.isArray(p) && p[3] && Number.isSafeInteger(p[3].n)) wanted.add(p[3].n + ':' + p[3].op);
-  }
-  const docs = {};
-  const graves = new Map();
-  const problems = [];
-  const whole = (v) => Number.isSafeInteger(v) && v >= 0;
-  for (const e of entries) {
-    const where = { n: e.n, doc: e.doc };
-    try {
-      if (e.kind === 'base') {
-        if (docs[e.doc] && docs[e.doc].len) throw new Error('base over a document that already has text');
-        const len = e.ops.reduce((a, op) => a + op[2], 0);
-        const text = e.x && Array.isArray(e.x.ins) ? e.x.ins.join('') : null;
-        const runs = len ? [[len, originOf(e)]] : [];
-        // a copy's base names the book it was copied from: those units are
-        // another book's
-        if (e.from !== undefined) {
-          if (!Array.isArray(e.from)) throw new Error('from isn\'t a list');
-          let end = 0;
-          for (const p of e.from) {
-            const ok = Array.isArray(p) && p[0] === 0 && Number.isSafeInteger(p[1]) && p[1] >= end &&
-              Number.isSafeInteger(p[2]) && p[2] > 0 && p[1] + p[2] <= len;
-            if (!ok) { problems.push({ ...where, piece: p, problem: 'from piece out of range' }); continue; }
-            if (!p[3] || typeof p[3].log !== 'string') { problems.push({ ...where, piece: p, problem: 'a base\'s from can only name another book' }); continue; }
-            end = p[1] + p[2];
-            runsCut(runs, p[1], p[2]);
-            runsInsert(runs, p[1], [[p[2], 'other book']]);
-          }
-          runsTidy(runs);
-        }
-        docs[e.doc] = { text, len, runs };
-      } else if (e.kind === 'doc') {
-        if (e.act === 'new') docs[e.doc] = { text: '', len: 0, runs: [] };
-        else if (e.act === 'del') delete docs[e.doc];
-      } else if (e.kind === 'edit') {
-        const d = docs[e.doc];
-        if (!d) throw new Error('edit to a document the log never saw');
-        const words = e.x && Array.isArray(e.x.ins) ? e.x.ins : null;
-        const pieces = e.from === undefined ? [] : e.from;
-        if (!Array.isArray(pieces)) throw new Error('from isn\'t a list');
-        const before = pieces.some((p) => p && p[3] && p[3].doc === e.doc) ? { text: d.text, len: d.len, runs: d.runs.slice() } : null;
-        const own = originOf(e);
-        let last = [-1, 0];
-        e.ops.forEach((op, i) => {
-          const [at, del, len] = op;
-          if (!(whole(at) && whole(del) && whole(len) && at + del <= d.len)) throw new Error('op out of range');
-          const gone = runsCut(d.runs, at, del);
-          const key = e.n + ':' + i;
-          if (wanted.has(key)) graves.set(key, { text: d.text === null ? null : d.text.slice(at, at + del), len: del, runs: gone });
-          const put = words ? words[i] : null;
-          const add = len ? [[len, own]] : [];
-          for (const p of pieces) {
-            if (!Array.isArray(p) || p[0] !== i) continue;
-            const [, pa, pl, source] = p;
-            const bad = (problem) => problems.push({ ...where, piece: p, problem });
-            if (!(whole(pa) && Number.isSafeInteger(pl) && pl > 0 && pa + pl <= len)) { bad('from piece out of range'); continue; }
-            if (i < last[0] || (i === last[0] && pa < last[1])) { bad('from pieces overlap or are out of order'); continue; }
-            last = [i, pa + pl];
-            if (!source || typeof source !== 'object') { bad('from piece has no source'); continue; }
-            const sl = source.len === undefined ? pl : source.len;
-            let src = null;
-            if (typeof source.log === 'string') src = { text: null, runs: [[pl, 'other book']], at: 0, len: pl, sl: pl };
-            else if (Number.isSafeInteger(source.n)) {
-              if (source.n > e.n || (source.n === e.n && !(source.op <= i))) { bad('from points ahead of itself'); continue; }
-              const g = graves.get(source.n + ':' + source.op);
-              if (!g) { bad('from points at nothing deleted'); continue; }
-              src = g;
-            } else if (typeof source.doc === 'string') {
-              src = source.doc === e.doc ? before : docs[source.doc];
-              if (!src) { bad('from points at a document that isn\'t there'); continue; }
-            } else { bad('from piece has no source'); continue; }
-            const sa = source.log === undefined ? source.at : 0;
-            if (!(whole(sa) && Number.isSafeInteger(sl) && sl > 0 && sa + sl <= src.len)) { bad('from points past the text it names'); continue; }
-            if (put !== null && src.text !== null && src.text !== undefined) {
-              const mine = put.slice(pa, pa + pl);
-              const theirs = src.text.slice(sa, sa + sl);
-              if (mine !== theirs && !sameChar(mine, theirs)) { bad('moved text doesn\'t match where it came from'); continue; }
-            }
-            const runs = runsSlice(src.runs, sa, sl);
-            const take = sl === pl && (put === null || src.text == null || put.slice(pa, pa + pl) === src.text.slice(sa, sa + sl))
-              ? runs
-              : [[pl, runs.length ? runs[0][1] : own]];
-            runsCut(add, pa, pl);
-            runsInsert(add, pa, take);
-          }
-          runsInsert(d.runs, at, add);
-          if (d.text !== null) d.text = put !== null ? d.text.slice(0, at) + put + d.text.slice(at + del) : (len ? null : d.text.slice(0, at) + d.text.slice(at + del));
-          d.len += len - del;
-        });
-        runsTidy(d.runs);
-      }
-    } catch (err) {
-      problems.push({ ...where, problem: err.message });
-    }
-  }
-  return { docs, problems };
-}
-
-// Units of a chapter's text that are the writing: outside tags, and outside
-// what the manuscript hash leaves out (scene breaks, unwritten outline
-// sections, placeholder flags, Darlings anchors). 1 for each such unit; a
-// character reference marks only its first unit.
-function proseMask(html) {
-  const mask = new Uint8Array(html.length).fill(1);
-  const stack = [];
-  let skip = 0;
-  let last = 0;
-  const TAG = /<(\/?)([a-zA-Z][\w-]*)([^>]*)>/g;
-  let m;
-  while ((m = TAG.exec(html))) {
-    if (skip) mask.fill(0, last, m.index);
-    mask.fill(0, m.index, TAG.lastIndex);
-    last = TAG.lastIndex;
-    const name = m[2].toLowerCase();
-    if (!m[1]) {
-      if (VOID_TAGS.has(name) || /\/\s*$/.test(m[3])) continue;
-      const cls = classesOf(m[3]);
-      const out = cls.has('scene-break') || LEFT_OUT.some((c) => cls.has(c));
-      stack.push({ name, out });
-      if (out) skip++;
-      continue;
-    }
-    let i = stack.length - 1;
-    while (i >= 0 && stack[i].name !== name) i--;
-    if (i < 0) continue;
-    while (stack.length > i) if (stack.pop().out) skip--;
-  }
-  if (skip) mask.fill(0, last);
-  // a character reference is one character of writing, however long it's
-  // written (`&nbsp;` counts 1, not 6)
-  const REF = /&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]*);/gi;
-  while ((m = REF.exec(html))) if (mask[m.index]) mask.fill(0, m.index + 1, REF.lastIndex);
-  return mask;
-}
-
-// What the manuscript is made of: units of its writing (proseMask) in each
-// chapter, in the book's order, counted by where they came from. Needs the
-// words; returns null without them.
-function composition(docs) {
-  const book = docs.book && docs.book.text;
-  let meta = null;
-  try { meta = JSON.parse(book); } catch { /* no book document */ }
-  const order = meta && Array.isArray(meta.chapterOrder) ? meta.chapterOrder : Object.keys(docs).filter((d) => docChapter(d) !== null).map(docChapter).sort();
-  const kinds = (meta && meta.chapterKinds) || {};
-  const out = {};
-  for (const id of order) {
-    const d = docs[chapterDoc(id)];
-    if (!d || kinds[id] === 'contents') continue;
-    if (d.text === null) return null;
-    const mask = proseMask(d.text);
-    let pos = 0;
-    for (const [len, origin] of d.runs) {
-      let n = 0;
-      for (let k = pos; k < pos + len; k++) n += mask[k];
-      if (n) out[origin] = (out[origin] || 0) + n;
-      pos += len;
-    }
-  }
-  return out;
-}
-
-// The origins of units at..at+len of a traced document, as [[len, origin], …]
-function originsAt(doc, at, len) {
-  return runsTidy(runsSlice(doc.runs, at, len));
-}
+// All in slog-verify.js, shared with slog-check and the verifier page
+const {
+  CHUNK_RE, KINDS, isChunkName, parseChunk, orderChunks, verifyChain, replay, trace, proseMask, composition, originsAt,
+  AUX_DOCS, JSON_DOCS, chapterDoc, docChapter, chapterLines, manuscriptText
+} = V;
 
 /* ------------------------------------------------------------------ */
 /*  Documents: what the log calls each file, and its text              */
 /* ------------------------------------------------------------------ */
 
 // A book's documents are its chapters (each by its own id), notes.html,
-// outline.html, darlings.json, stickies.json and book.json. Other files in
-// the folder (covers, art.json) aren't writing and aren't logged.
-const AUX_DOCS = ['notes', 'outline'];
-const JSON_DOCS = ['darlings', 'stickies'];
-const NAMED_DOCS = new Set(['book', ...AUX_DOCS, ...JSON_DOCS]);
-
-// A chapter's document is its id. A chapter file named like one of the
-// others (only ever a folder edited by hand) gets "ch:" in front.
-const chapterDoc = (id) => (NAMED_DOCS.has(id) ? 'ch:' + id : id);
-function docChapter(doc) {
-  if (NAMED_DOCS.has(doc)) return null;
-  return doc.startsWith('ch:') && NAMED_DOCS.has(doc.slice(3)) ? doc.slice(3) : doc;
-}
+// outline.html, darlings.json, stickies.json and book.json (slog-verify.js
+// names them). Other files in the folder (covers, art.json) aren't writing
+// and aren't logged.
 // the document behind a main-process read or write, or null when it isn't logged
 function docOf(kind, name) {
   if (kind === 'book') return 'book';
@@ -1126,105 +642,6 @@ function bookKeys(before, after) {
   const b = parse(after);
   return [...new Set([...Object.keys(a), ...Object.keys(b)])].sort()
     .filter((k) => JSON.stringify(a[k]) !== JSON.stringify(b[k]));
-}
-
-// The manuscript as text, read from the documents themselves so anyone
-// replaying a log gets the same result: each chapter in the book's order
-// (a Contents page left out), each <p> one line, a scene break "***". What
-// NEO keeps out of every export stays out here too: an unwritten outline
-// section (a ghost paragraph and the break planted for it), placeholder
-// flags and Darlings anchors.
-const VOID_TAGS = new Set(['br', 'img', 'hr', 'wbr', 'input', 'col', 'area', 'embed', 'source', 'track', 'meta', 'link', 'base', 'param']);
-const LEFT_OUT = ['ghost', 'ph-mark', 'darling-anchor'];
-const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: '\'', nbsp: '\u00a0' };
-function decodeEntities(s) {
-  return s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
-    if (e[0] === '#') {
-      const code = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
-      return code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : m;
-    }
-    const v = ENTITIES[e.toLowerCase()];
-    return v === undefined ? m : v;
-  });
-}
-function attrOf(attrs, name) {
-  const m = new RegExp('(?:^|\\s)' + name + '\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\'|([^\\s>]+))', 'i').exec(attrs);
-  return m ? decodeEntities(m[1] ?? m[2] ?? m[3]) : null;
-}
-const classesOf = (attrs) => new Set((attrOf(attrs, 'class') || '').split(/\s+/).filter(Boolean));
-
-function chapterLines(html) {
-  const src = String(html || '');
-  const TAG = /<!--[\s\S]*?-->|<(\/?)([a-zA-Z][\w-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>|[^<]+|</g;
-  // the breaks planted for unwritten sections
-  const ghosts = new Set();
-  for (const m of src.matchAll(TAG)) {
-    if (m[2] && !m[1] && m[2].toLowerCase() === 'p' && classesOf(m[3]).has('ghost')) {
-      const id = attrOf(m[3], 'data-sec-id');
-      if (id !== null) ghosts.add(id);
-    }
-  }
-  const lines = [];
-  const stack = []; // open elements: { name, out }
-  let out = 0;      // how many of them are left out
-  let para = null;
-  const endPara = () => {
-    if (!para) return;
-    if (!para.out) {
-      if (para.brk) lines.push('***');
-      else if (para.text.trim()) lines.push(para.text.trim());
-    }
-    para = null;
-  };
-  for (const m of src.matchAll(TAG)) {
-    const tok = m[0];
-    if (tok.startsWith('<!--')) continue;
-    if (!m[2]) { if (para && !out) para.text += decodeEntities(tok); continue; }
-    const name = m[2].toLowerCase();
-    if (!m[1]) {
-      const cls = classesOf(m[3]);
-      if (name === 'p') {
-        endPara(); // a <p> left open ends where the next begins
-        while (stack.length) if (stack.pop().out) out--;
-        const brk = cls.has('scene-break');
-        para = { text: '', brk, out: (brk && ghosts.has(attrOf(m[3], 'data-sec-brk'))) || cls.has('ghost') };
-        stack.push({ name, out: false });
-        continue;
-      }
-      if (VOID_TAGS.has(name) || /\/\s*$/.test(m[3])) {
-        if (name === 'br' && para && !out) para.text += '\n';
-        continue;
-      }
-      const left = LEFT_OUT.some((c) => cls.has(c));
-      stack.push({ name, out: left });
-      if (left) out++;
-      continue;
-    }
-    // a closing tag closes back to its own opening tag, if it has one
-    let i = stack.length - 1;
-    while (i >= 0 && stack[i].name !== name) i--;
-    if (i < 0) continue;
-    while (stack.length > i) if (stack.pop().out) out--;
-    if (name === 'p') endPara();
-  }
-  endPara();
-  return lines;
-}
-
-function manuscriptText(docs) {
-  let meta = null;
-  try { meta = JSON.parse(docs.book); } catch { /* no book document */ }
-  const order = meta && Array.isArray(meta.chapterOrder)
-    ? meta.chapterOrder
-    : Object.keys(docs).filter((d) => docChapter(d) !== null).map(docChapter).sort();
-  const kinds = (meta && meta.chapterKinds) || {};
-  const lines = [];
-  for (const id of order) {
-    if (kinds[id] === 'contents') continue;
-    const html = docs[chapterDoc(id)];
-    if (typeof html === 'string') lines.push(...chapterLines(html));
-  }
-  return lines.join('\n');
 }
 
 /* ------------------------------------------------------------------ */
@@ -1632,7 +1049,7 @@ class Recorder {
         bookId, dir, on: !(meta && meta.scribesLog === false),
         info: null, key: null, unreadable: false, chain: null, docs: {}, disk: {},
         chunk: null, last: null, count: 0, failed: 0, idle: null, closing: null, saved: 0,
-        imported: null, importUntil: 0, observed: {},
+        imported: null, importUntil: 0, observed: {}, others: null,
         graves: new Graveyard(), live: new LiveDocs()
       };
       this.sessions.set(bookId, s);
@@ -1767,6 +1184,10 @@ class Recorder {
         const fields = { doc, src: how.base, ops: recordOps([[0, 0, text.length]], [text]) };
         if (how.base === 'import' && how.file) fields.file = { mtime: how.file.mtime, sha256: how.file.sha256 };
         if (how.copyOf) fields.from = [[0, 0, text.length, { log: how.copyOf }]];
+        else if (how.base === 'arrived') {
+          const there = this._arrivedFrom(s, doc, text);
+          if (there) fields.from = [[0, 0, text.length, { dev: there.dev, n: there.n, doc, at: 0 }]];
+        }
         this._append(s, 'base', fields, [text]);
         s.docs[doc] = text;
         return;
@@ -1782,7 +1203,18 @@ class Recorder {
     // a move's other half, the text leaving: nothing came from anywhere
     if (fields.src === 'move' && !ins.some((t) => t)) fields.src = 'typed';
     if (this._ready(s)) {
-      const from = this._moved(s, doc, before, ops, ins, how, s.chain.n + 1);
+      let from = this._moved(s, doc, before, ops, ins, how, s.chain.n + 1);
+      // text from another device: where it stands in that device's chain,
+      // when its chunks are here already
+      if (fields.src === 'arrived' && ins.some((t) => t)) {
+        const there = this._arrivedFrom(s, doc, text);
+        if (there) {
+          const offs = V.insertOffsets(ops);
+          const pieces = [];
+          ops.forEach((op, i) => { if (op[2] && offs[i] !== null) pieces.push([i, 0, op[2], { dev: there.dev, n: there.n, doc, at: offs[i] }]); });
+          if (pieces.length) from = pieces;
+        }
+      }
       if (from.length) fields.from = from;
     }
     if (doc === 'book') {
@@ -1840,6 +1272,64 @@ class Recorder {
       cur = cur.slice(0, at) + ins[i] + cur.slice(at + del);
     });
     return from;
+  }
+
+  // Text that arrived from another device: the entry of that device's
+  // chain after which the document stood exactly so ({ dev, n }), or null
+  // when no other device's chunks here end that way (not synced yet; a
+  // checker matches those by their words later).
+  _arrivedFrom(s, doc, text) {
+    try {
+      for (const [dev, st] of this._others(s)) {
+        if (st.docs[doc] === text && st.last[doc]) return { dev, n: st.last[doc] };
+      }
+    } catch (err) { this.onError('arrived', err); }
+    return null;
+  }
+
+  // The other devices' chains as the folder has them: each one's documents
+  // as it last saw them, and the entry that last changed each. Read again
+  // only when their chunks change, and then only from where they were.
+  _others(s) {
+    const mine = this.device().slice(0, 8);
+    const logDir = path.join(s.dir, LOG_DIR);
+    let names = [];
+    try { names = fs.readdirSync(logDir).filter((f) => { const m = CHUNK_RE.exec(f); return m && m[2] !== mine; }).sort(); } catch { /* no log folder */ }
+    const sizes = names.map((n) => sizeOf(path.join(logDir, n)));
+    const sig = names.map((n, i) => n + ':' + sizes[i]).join('|');
+    const had = s.others;
+    if (had && had.sig === sig) return had.devs;
+    const files = new Map();
+    const byDev = new Map();
+    names.forEach((name, i) => {
+      const old = had && had.files.get(name);
+      const parsed = old && old.size === sizes[i] ? old.parsed : parseChunk(readQuiet(path.join(logDir, name)) || '');
+      files.set(name, { size: sizes[i], parsed });
+      const open = parsed.entries[0];
+      if (!open || open.kind !== 'open' || typeof open.dev !== 'string' || open.dev === this.device()) return;
+      if (!byDev.has(open.dev)) byDev.set(open.dev, []);
+      byDev.get(open.dev).push({ name, ...parsed });
+    });
+    const devs = new Map();
+    for (const [dev, chunks] of byDev) {
+      const entries = orderChunks(chunks).ordered.flatMap((c) => c.entries);
+      if (!entries.length) continue;
+      // carry on from where this device's chain was last read, if it still leads there
+      const before = had && had.devs.get(dev);
+      const at = before ? entries[before.n - 1] : null;
+      const resume = at && at.n === before.n && entryHash(at) === before.head;
+      const r = new V.Replayer(resume ? before.docs : {});
+      const last = resume ? { ...before.last } : {};
+      for (const e of entries) {
+        if (resume && e.n <= before.n) continue;
+        const doc = r.step(e);
+        if (doc) last[doc] = e.n;
+      }
+      const end = entries[entries.length - 1];
+      devs.set(dev, { n: end.n, head: entryHash(end), docs: r.text, last });
+    }
+    s.others = { sig, files, devs };
+    return devs;
   }
 
   /* ---- chunks ---- */

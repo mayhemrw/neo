@@ -28,7 +28,8 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before adding a feature. The product is 
 | `i18n.js` | `t()` / `tk()`, shared by main and the window. English source text is the key |
 | `spell-worker.js` | Hunspell WASM, forked with `utilityProcess`. Messages: `load`, `check`, `suggest`, `add` |
 | `spell-ro.js` | Romanian diacritics, used by the worker. Does not alter the manuscript |
-| `slog.js` | The Scribe's Log: hashing, the chain, chunk files, diff, check and replay, and the `Recorder` the main process keeps each book's log with. Format: `SLOG-FORMAT.md` |
+| `slog.js` | The Scribe's Log: the chain, chunk files, diff, finding moved text, and the `Recorder` the main process keeps each book's log with. Re-exports the checker's functions. Format: `SLOG-FORMAT.md` |
+| `slog-verify.js` | The Scribe's Log's checker, in plain JavaScript that also runs in a browser: reading a log's files, chain check, replay, origins traced across devices, the manuscript text, receipts checked against the chains, coverage and the clock check (`checkLog`). Shared by NEO, `slog-check` and the verifier page; NEO puts Node's crypto into it (`useHash`) |
 | `slog-stamp.js` | The main process's stamper: when to stamp, receipt files, the offline queue, fetching finished OpenTimestamps proofs |
 | `slog-hash.js`, `stamp-ots.js`, `stamp-tsa.js` | Outside timestamps for the Scribe's Log, in plain JavaScript that also runs in a browser: SHA-256/HMAC/SHA-1/RIPEMD-160, OpenTimestamps proofs and calendars, RFC 3161 tokens (checked through WebCrypto). The network is a `fetch` passed in. Trusted roots are in `certs/` |
 | `locales/<code>.json` | One language. Regional files (`fr-CA.json`) hold only the strings that differ |
@@ -71,7 +72,8 @@ A book whose `book.json` says `"format": "screenplay"` is a script. Right-click 
 Each book's log lives in its `scribes-log/` folder: `log.json` (made once) and one `.slog` chunk per session per device. `main.js` holds one `slog.Recorder`; every chapter, aux, json and book.json handler tells it what it read or wrote (`slogTap`, which never lets a logging failure stop a save). The window describes how text changed through `window.neo.slog.observe` before it saves; a save it didn't describe is still logged, as `unlogged`. Text found on disk that this process didn't write is `arrived`. `book.json`'s `scribesLog: false` switches a book's log off.
 
 - The device id and each book's cached state live in `userData/slog/`, never in the library.
-- `node scripts/slog-check.js "<book folder>"` checks every chain and replays it against the files on disk.
+- `node scripts/slog-check.js "<book folder>" [--bitcoin]` checks every chain, replays it against the files on disk, traces origins across devices, and checks every receipt (against FreeTSA's root in `certs/`), what the receipts cover, and the clock. `--bitcoin` checks finished OpenTimestamps proofs against their blocks at mempool.space.
+- Text that arrives from another device is traced to that device's chain: the Recorder adds a `{dev, n, doc, at}` source when the other device's chunks are already in the folder (`_arrivedFrom`), and the checker matches the rest by their words.
 - The window's side is the SCRIBE'S LOG section of `app.js`. A key, click or menu command opens a typed burst; it's described after a second's pause or two seconds' run, and every save describes its document first (`slogNote` in `persistChapter`, `flushAux`, `runSidecar` and `writeBookMeta`). Paste, drop, cut and copy are labeled by capture listeners, and every `snapshotStructure` label maps to a cause (`slogCauseOf`). A new tool that changes text over an `await`, or without a key, click or snapshot, needs `slogWith(label, fn)` or its words log as `unlogged`.
 - `npm run test:slog` (Electron; `xvfb-run` without a display) writes a book the way a writer does and checks its log has no `unlogged` entries.
 - Pocket's bridge has no `slog`, so nothing in the window logs there.
