@@ -1977,3 +1977,8 @@ body.light #nav-pane.script .nav-item.sp-scene .n-num { color: #8f8a80; }
 #paper.script #tp-title.tp-i { font-style: italic; }
 /* a loose card that holds writing set aside from the manuscript: how many words */
 .ob-held { margin-top: 6px; font-size: 11px; letter-spacing: 0.04em; color: var(--muted); }
+
+/* cards picked together (⌘-click, Shift-click, or a sweep across the board) */
+.ob-cell.ob-sel .ob-card { box-shadow: 0 0 0 2px var(--accent), 0 2px 10px rgba(0, 0, 0, 0.25); }
+.ob-lasso { position: fixed; z-index: 50; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border-radius: 3px; pointer-events: none; }
+.ob-lassoing, .ob-lassoing * { user-select: none !important; -webkit-user-select: none !important; }

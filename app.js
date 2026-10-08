@@ -2649,8 +2649,8 @@ function renderChapters() {
 
 // one label in the Scribe's Log for all of it, waits on the disk included
 function deleteChapterToDarlings(...args) { return slogWith({ src: 'move', cause: 'darling' }, () => deleteChapterToDarlingsNow(...args)); }
-async function deleteChapterToDarlingsNow(chId) {
-  snapshotStructure('chapter delete');
+async function deleteChapterToDarlingsNow(chId, quiet = false) {
+  if (!quiet) snapshotStructure('chapter delete');
   const kind = chapterKind(chId);
   const name = chapterName(chId);
   const index = book.chapterOrder.indexOf(chId);
@@ -2669,7 +2669,7 @@ async function deleteChapterToDarlingsNow(chId) {
   }
   if (currentChapterId === chId) currentChapterId = null;
   await deleteChapterQuiet(chId);
-  if (text) {
+  if (text && !quiet) {
     toast(kind === 'chapter'
       ? t('Chapter removed — its words are in Darlings, or {key} to undo', { key: KZ })
       : t('{name} removed — its words are in Darlings, or {key} to undo', { name, key: KZ }));
@@ -6294,13 +6294,13 @@ function spMoveScene(k, to) {
 // A scene card's Delete: the scene's lines leave the script for Darlings
 // (saved there first), its note goes with it, and ⌘Z puts it all back
 function deleteSceneToDarlings(...args) { return slogWith({ src: 'move', cause: 'darling' }, () => deleteSceneToDarlingsNow(...args)); }
-async function deleteSceneToDarlingsNow(cell) {
+async function deleteSceneToDarlingsNow(cell, quiet = false) {
   const sc = sceneOfCell(cell);
   if (!sc || !sc.s.p.isConnected) return;
   const nodes = sceneNodes(sc.s);
   const body = spBodyOf(sc.s.p);
   const chId = body.closest('.chapter').dataset.id;
-  snapshotStructure('scene delete');
+  if (!quiet) snapshotStructure('scene delete');
   const holder = document.createElement('div');
   for (const n of nodes) holder.appendChild(n.cloneNode(true));
   const text = nodes.map((n) => n.textContent).join('\n').trim();
@@ -6334,7 +6334,7 @@ async function deleteSceneToDarlingsNow(cell) {
   renderNav();
   renderBoard();
   updateCounters();
-  if (text) toast(t('Scene removed — its lines are in Darlings, or {key} to undo', { key: KZ }));
+  if (text && !quiet) toast(t('Scene removed — its lines are in Darlings, or {key} to undo', { key: KZ }));
 }
 
 // ---- the title page: title, "Written by", the writer, and at the foot
@@ -8226,6 +8226,12 @@ function outlineBoard() {
     if (e.target.closest('button')) return;
     cardPress(e, { kind: cell.dataset.kind, cell });
   });
+  // a sweep starts anywhere on the outline page that isn't a card or a control
+  $('#paper-scroll').addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.pointerType !== 'mouse' || !boardShowing()) return;
+    if (e.target.closest('.ob-cell, button, a, input, textarea, select, [contenteditable="true"], .ob-add, #outline-list')) return;
+    cardLasso(e);
+  });
   board.addEventListener('contextmenu', (e) => {
     const cell = e.target.closest('.ob-cell');
     if (!cell || cell.classList.contains('open')) return;
@@ -8309,6 +8315,7 @@ function showOutlineView() {
 function renderBoard() {
   const board = outlineBoard();
   if (!book) return;
+  requestAnimationFrame(showCardSelection);
   closeCardEditor(true);
   board.innerHTML = '';
   const z = cardZoom();
@@ -8893,6 +8900,11 @@ function goToCard(cell) {
 }
 
 async function cardMenu(cell, x, y) {
+  if (cardSel.size > 1 && cardSel.has(cardKey(cell))) {
+    const v = await popMenu(x, y, [{ label: t('Delete {n} cards', { n: cardSel.size }), value: 'delete', danger: true }], { from: cell });
+    if (v === 'delete') await deleteSelectedCards();
+    return;
+  }
   const chId = cell.dataset.ch;
   if (cell.dataset.kind === 'chapter') { await chapterMenu(chId, x, y, cell); return; }
   if (cell.dataset.kind === 'loose') {
@@ -8940,11 +8952,11 @@ async function cardMenu(cell, x, y) {
 // A section card's Delete: its writing leaves the manuscript for Darlings
 // (saved there before the chapter is), its note goes, and ⌘Z puts it back
 function deleteSectionToDarlings(...args) { return slogWith({ src: 'move', cause: 'darling' }, () => deleteSectionToDarlingsNow(...args)); }
-async function deleteSectionToDarlingsNow(chId, segIdx) {
+async function deleteSectionToDarlingsNow(chId, segIdx, quiet = false) {
   const body = chapterBodyEl(chId);
   const seg = chapterSegments(chId)[segIdx];
   if (!body || !seg) return;
-  snapshotStructure('section delete');
+  if (!quiet) snapshotStructure('section delete');
   const prose = seg.ps.filter((p) => !p.classList.contains('ghost'));
   if (seg.words) {
     const holder = document.createElement('div');
@@ -8976,7 +8988,7 @@ async function deleteSectionToDarlingsNow(chId, segIdx) {
     .catch((err) => window.neo.logError('section delete: ' + (err && err.message || err)));
   renderBoard();
   updateCounters();
-  if (seg.words) toast(t('Section removed — its words are in Darlings, or {key} to undo', { key: KZ }));
+  if (seg.words && !quiet) toast(t('Section removed — its words are in Darlings, or {key} to undo', { key: KZ }));
 }
 
 // ---- moving cards ----
@@ -9270,6 +9282,7 @@ document.addEventListener('touchmove', (e) => { if (cardDrag && cardDrag.live) e
 
 function cardPress(e, src) {
   const touch = e.pointerType !== 'mouse';
+  const pick = e.shiftKey ? 'range' : (IS_MAC ? e.metaKey : e.ctrlKey) ? 'toggle' : null;
   const st = { src, x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, live: false, held: false, timer: null, float: null, target: null };
   cardDrag = st;
   const finish = () => {
@@ -9300,7 +9313,8 @@ function cardPress(e, src) {
     // a press that went nowhere: a click (or, held on a touch screen, the menu)
     const cell = st.src.cell;
     if (held) cardMenu(cell, st.x, st.y);
-    else openCard(cell);
+    else if (pick) selectCard(cell, pick);
+    else { clearCardSelection(); openCard(cell); }
   };
   const cancel = () => finish();
   const esc = (ev) => { if (ev.key === 'Escape' && st.live) { ev.preventDefault(); ev.stopPropagation(); st.target = null; finish(); } };
@@ -9309,6 +9323,117 @@ function cardPress(e, src) {
   window.addEventListener('pointerup', up);
   window.addEventListener('pointercancel', cancel);
   window.addEventListener('keydown', esc, true);
+}
+
+// ---- several cards at once ----
+// ⌘-click (Ctrl-click) adds a card to the selection or takes it out,
+// Shift-click takes the run from the last one picked, and a drag across the
+// board's empty space sweeps up every card it touches. Delete (or the
+// right-click menu) removes them together: their writing goes to Darlings,
+// and one ⌘Z brings them all back. A plain click, or Esc, lets go.
+let cardSel = new Set();
+let cardSelAnchor = null;
+function cardKey(cell) {
+  const d = cell.dataset;
+  if (d.kind === 'loose') return 'l|' + d.loose;
+  if (d.kind === 'scene') return 'n|' + d.scene;
+  if (d.kind === 'chapter') return 'c|' + d.ch;
+  return 's|' + d.ch + '|' + (d.seg || '') + '|' + (d.virtual ? d.sec : '');
+}
+const selectableCells = () => $$('#outline-board .ob-cell:not([data-new]), #loose-list .ob-cell');
+function showCardSelection() {
+  for (const c of selectableCells()) c.classList.toggle('ob-sel', cardSel.has(cardKey(c)));
+}
+function clearCardSelection() {
+  if (!cardSel.size) return;
+  cardSel = new Set();
+  cardSelAnchor = null;
+  showCardSelection();
+}
+function selectCard(cell, how) {
+  closeCardEditor();
+  const key = cardKey(cell);
+  if (how === 'range' && cardSelAnchor) {
+    const cells = selectableCells();
+    const a = cells.findIndex((c) => cardKey(c) === cardSelAnchor);
+    const b = cells.indexOf(cell);
+    if (a >= 0 && b >= 0) for (const c of cells.slice(Math.min(a, b), Math.max(a, b) + 1)) cardSel.add(cardKey(c));
+    else cardSel.add(key);
+  } else if (cardSel.has(key)) cardSel.delete(key);
+  else cardSel.add(key);
+  cardSelAnchor = key;
+  showCardSelection();
+}
+function cardLasso(e) {
+  const x0 = e.clientX;
+  const y0 = e.clientY;
+  const keep = e.shiftKey || e.metaKey || e.ctrlKey ? new Set(cardSel) : new Set();
+  let box = null;
+  const move = (ev) => {
+    if (!box) {
+      if (Math.hypot(ev.clientX - x0, ev.clientY - y0) < 5) return;
+      closeCardEditor();
+      box = document.createElement('div');
+      box.className = 'ob-lasso';
+      document.body.appendChild(box);
+      document.body.classList.add('ob-lassoing');
+    }
+    ev.preventDefault();
+    const ts = window.getSelection();
+    if (ts && !ts.isCollapsed) ts.removeAllRanges(); // a sweep, not a text selection
+    const l = Math.min(x0, ev.clientX), t0 = Math.min(y0, ev.clientY);
+    const r = Math.max(x0, ev.clientX), b = Math.max(y0, ev.clientY);
+    Object.assign(box.style, { left: l + 'px', top: t0 + 'px', width: (r - l) + 'px', height: (b - t0) + 'px' });
+    cardSel = new Set(keep);
+    for (const c of $$('#outline-board .ob-cell:not([data-new])')) {
+      const q = c.querySelector('.ob-card').getBoundingClientRect();
+      if (q.right > l && q.left < r && q.bottom > t0 && q.top < b) cardSel.add(cardKey(c));
+    }
+    showCardSelection();
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    document.body.classList.remove('ob-lassoing');
+    if (box) box.remove();
+    else clearCardSelection(); // a click on the empty board lets go
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+}
+// Delete or Backspace with cards picked (not while writing on one)
+document.addEventListener('keydown', (e) => {
+  if (!cardSel.size || !book || currentTab !== 'outline') return;
+  if (e.target && e.target.closest && e.target.closest('[contenteditable="true"], input, textarea')) return;
+  if (e.key === 'Escape') { clearCardSelection(); return; }
+  if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSelectedCards(); }
+});
+
+async function deleteSelectedCards() {
+  const cells = selectableCells().filter((c) => cardSel.has(cardKey(c)));
+  clearCardSelection();
+  if (!cells.length || !book) return;
+  snapshotStructure('cards delete');
+  const chapters = new Set(cells.filter((c) => c.dataset.kind === 'chapter').map((c) => c.dataset.ch));
+  // a book keeps at least one chapter of its story
+  const stories = book.chapterOrder.filter((c) => isStory(c));
+  if (stories.length && stories.every((c) => chapters.has(c))) chapters.delete(stories[0]);
+  // sections from the last up, so the ones before keep their places; none
+  // from a chapter that's going whole
+  const sections = cells.filter((c) => c.dataset.kind === 'section' && !chapters.has(c.dataset.ch))
+    .sort((a, b) => Number(b.dataset.seg || -1) - Number(a.dataset.seg || -1));
+  for (const c of sections) {
+    if (c.dataset.virtual) deleteSectionNote(c.dataset.ch, c.dataset.sec);
+    else await deleteSectionToDarlings(c.dataset.ch, Number(c.dataset.seg), true);
+  }
+  const scenes = cells.filter((c) => c.dataset.kind === 'scene').sort((a, b) => Number(b.dataset.scene) - Number(a.dataset.scene));
+  for (const c of scenes) await deleteSceneToDarlings(c, true);
+  for (const chId of chapters) await deleteChapterToDarlings(chId, true);
+  for (const c of cells.filter((x) => x.dataset.kind === 'loose')) await removeLooseCard(c.dataset.loose, true);
+  renderLooseCards();
+  if (currentTab === 'outline') renderOutline();
+  updateCounters();
+  toast(t('{n} cards removed — their writing is in Darlings, or {key} to undo', { n: cells.length, key: KZ }), 6000);
 }
 
 function beginCardDrag(st) {
@@ -9327,7 +9452,9 @@ function beginCardDrag(st) {
   st.src.cell.classList.add('ob-lifted');
   document.body.classList.add('ob-dragging');
   // the loose pane opens to take a card
-  if (st.src.kind === 'section' && (st.src.cell.dataset.written || st.src.cell.dataset.sec)) $('#side-pane').classList.add('drop-ready');
+  const c = st.src.cell;
+  if ((st.src.kind === 'section' && (c.dataset.written || c.dataset.sec)) || st.src.kind === 'scene' ||
+      (st.src.kind === 'chapter' && canSetChapterAside(c.dataset.ch))) $('#side-pane').classList.add('drop-ready');
 }
 
 function endCardDrag(st) {
@@ -9359,7 +9486,8 @@ function dragOver(st) {
 
 // where a card would land: { cell, side } on the board, or the loose pane
 function dragTarget(st) {
-  const kind = st.src.kind;
+  // a loose card holding a whole chapter goes back in as a chapter
+  const kind = st.src.kind === 'loose' && st.src.cell.dataset.held === 'chapter' ? 'chapter' : st.src.kind;
   const pane = $('#side-pane');
   const pr = pane.getBoundingClientRect();
   const overPane = pane.classList.contains('open') && st.x >= pr.left && st.x <= pr.right && st.y >= pr.top && st.y <= pr.bottom;
@@ -9381,7 +9509,7 @@ function dragTarget(st) {
   // over the middle of a chapter card: into that chapter (a chapter joins
   // it as a section; a section or loose card goes to its end)
   const middle = st.x > r.left + r.width * 0.25 && st.x < r.right - r.width * 0.25 && st.y >= r.top && st.y <= r.bottom;
-  if (middle && best.dataset.kind === 'chapter' && (kind === 'section' || kind === 'loose' || (kind === 'chapter' && best.dataset.ch !== st.src.cell.dataset.ch))) {
+  if (middle && best.dataset.kind === 'chapter' && (kind === 'section' || kind === 'loose' || (kind === 'chapter' && st.src.kind === 'chapter' && best.dataset.ch !== st.src.cell.dataset.ch))) {
     return { cell: best, side: 'into' };
   }
   let side = st.x < r.left + r.width / 2 ? 'before' : 'after';
@@ -9433,12 +9561,23 @@ function showDropCaret(target) {
 
 function dropCard(src, target) {
   if (!target || !book) return;
+  clearCardSelection(); // the cards picked may stand elsewhere after a move
   const cell = src.cell;
   if (target.loose) {
     if (src.kind === 'section') sectionToLoose(cell.dataset.ch, Number(cell.dataset.seg), cell.dataset.virtual ? cell.dataset.sec : null);
+    else if (src.kind === 'chapter') chapterToLoose(cell.dataset.ch);
+    else if (src.kind === 'scene') sceneToLoose(cell);
     return;
   }
   const tc = target.cell;
+  // a card holding a chapter: a chapter again, before or after the one it's dropped by
+  if (src.kind === 'loose' && cell.dataset.held === 'chapter') {
+    const at = book.chapterOrder.indexOf(tc.dataset.ch);
+    if (at < 0) return;
+    looseToChapter(cell.dataset.loose, at + (tc.dataset.kind === 'chapter' && target.side === 'before' ? 0 : 1));
+    renderBoard();
+    return;
+  }
   if (target.side === 'into') {
     const into = tc.dataset.ch;
     if (src.kind === 'chapter') { joinChapter(cell.dataset.ch, into).then(() => { if (currentTab === 'outline') renderBoard(); }); return; }
@@ -9681,6 +9820,7 @@ function saveSceneCard(cell, note, slug) {
 function looseToScene(looseId, before) {
   const card = (book.looseCards || []).find((c) => c.id === looseId);
   if (!card) return;
+  if (card.html) { heldSceneBack(card, before); return; }
   snapshotStructure('loose card placed');
   book.looseCards = book.looseCards.filter((c) => c.id !== looseId);
   const h = insertScene(before - 1, '');
@@ -9759,12 +9899,12 @@ function renderLooseCards() {
       const holder = document.createElement('div');
       holder.innerHTML = c.html;
       const first = [...holder.children].map((x) => x.textContent).join(' ').replace(/\s+/g, ' ').trim();
-      if (!c.text) text.textContent = first.length > 120 ? first.slice(0, 117) + '…' : first;
+      if (!c.text) text.textContent = c.title || (first.length > 120 ? first.slice(0, 117) + '…' : first);
       const n = document.createElement('div');
       n.className = 'ob-held';
       n.textContent = t('{n} words', { n: (c.words || countWords(holder.textContent)).toLocaleString() });
       card.appendChild(n);
-      cell.dataset.held = '1';
+      cell.dataset.held = c.held || 'section';
     }
     list.appendChild(cell);
   }
@@ -9803,11 +9943,11 @@ function saveLooseCard(id, val) {
 }
 
 // (a card holding writing sends it to Darlings: a move)
-function removeLooseCard(id) {
+function removeLooseCard(id, quiet = false) {
   const card = book && (book.looseCards || []).find((x) => x.id === id);
-  return card && card.html ? slogWith({ src: 'move', cause: 'darling' }, () => removeLooseCardNow(id)) : removeLooseCardNow(id);
+  return card && card.html ? slogWith({ src: 'move', cause: 'darling' }, () => removeLooseCardNow(id, quiet)) : removeLooseCardNow(id, quiet);
 }
-async function removeLooseCardNow(id) {
+async function removeLooseCardNow(id, quiet = false) {
   const card = (book.looseCards || []).find((x) => x.id === id);
   if (!card) return;
   // words on the card go to Darlings first; the card goes only once they're safe there
@@ -9830,12 +9970,152 @@ async function removeLooseCardNow(id) {
       return;
     }
     renderDarlings();
-    toast(t('The card’s words are in Darlings'));
+    if (!quiet) toast(t('The card’s words are in Darlings'));
   }
-  snapshotStructure('loose card removed');
+  if (!quiet) snapshotStructure('loose card removed');
   book.looseCards = (book.looseCards || []).filter((x) => x.id !== id);
   scheduleMetaSave();
   renderLooseCards();
+}
+
+// ---- whole chapters and scenes set aside as loose cards ----
+// The card carries the writing (as html) and what belongs to it, and is
+// written to book.json before the chapter or the scene leaves the page, so
+// the words are always somewhere on disk. Placed again, it comes back whole.
+
+// a chapter of the story that isn't the book's only one
+function canSetChapterAside(chId) {
+  return !!chId && isStory(chId) && book.chapterOrder.filter((c) => isStory(c)).length > 1;
+}
+
+// book.json with the card in it, or the card taken back out and false
+async function saveHeldCard(card) {
+  let stamp = null;
+  try { stamp = await writeBookMeta(book.id, book); } catch (err) { window.neo.logError('loose card: ' + (err && err.message || err)); }
+  if (typeof stamp !== 'string') {
+    book.looseCards = (book.looseCards || []).filter((c) => c !== card);
+    toast(t('NEO couldn’t save the card, so the writing stays where it was'));
+    return false;
+  }
+  book.modified = stamp;
+  savedMetaSig = metaSig(book);
+  return true;
+}
+
+async function chapterToLoose(chId) {
+  if (!canSetChapterAside(chId)) return;
+  const body = chapterBodyEl(chId);
+  if (body && body.querySelector('.ph-mark')) { toast(t('That chapter has a placeholder in it. Move the placeholder first.')); return; }
+  snapshotStructure('card to loose');
+  if (body) syncChapter(body, chId);
+  const kind = chapterKind(chId);
+  const card = {
+    id: 'lc-' + Date.now().toString(36),
+    held: 'chapter',
+    title: (book.chapterTitles || {})[chId] || '',
+    text: (book.chapterNotes || {})[chId] || '',
+    html: chapterHTML[chId] || '',
+    notes: JSON.parse(JSON.stringify((book.sectionNotes || {})[chId] || [])),
+    words: chapterWords(chId)
+  };
+  if (kind !== 'chapter') card.kind = kind;
+  (book.looseCards = book.looseCards || []).push(card);
+  if (!(await saveHeldCard(card))) return;
+  if (book.chapterTitles) delete book.chapterTitles[chId];
+  if (currentChapterId === chId) currentChapterId = null;
+  await deleteChapterQuiet(chId);
+  renderLooseCards();
+  if (currentTab === 'outline') renderBoard();
+  updateCounters();
+  toast(t('The chapter is on a loose card, its words with it. Drag it back between two chapters to put it in again.'), 6000);
+}
+
+function looseToChapter(looseId, index) {
+  const card = (book.looseCards || []).find((c) => c.id === looseId);
+  if (!card) return;
+  snapshotStructure('loose card placed');
+  const chId = 'ch-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+  book.chapterOrder.splice(Math.max(0, Math.min(index, book.chapterOrder.length)), 0, chId);
+  chapterHTML[chId] = card.html || '<p><br></p>';
+  if (card.title) (book.chapterTitles = book.chapterTitles || {})[chId] = card.title;
+  if (card.text) (book.chapterNotes = book.chapterNotes || {})[chId] = card.text;
+  if (card.notes && card.notes.length) (book.sectionNotes = book.sectionNotes || {})[chId] = card.notes;
+  if (card.kind) setChapterKind(chId, card.kind);
+  book.looseCards = book.looseCards.filter((c) => c.id !== looseId);
+  // the chapter's file is written before book.json lets the card go
+  persistChapter(chId).then(() => saveMeta())
+    .catch((err) => window.neo.logError('loose to chapter: ' + (err && err.message || err)));
+  renderChapters();
+  renderLooseCards();
+  updateCounters();
+}
+
+async function sceneToLoose(cell) {
+  const sc = sceneOfCell(cell);
+  if (!sc || !sc.s.p.isConnected) return;
+  const nodes = sceneNodes(sc.s);
+  const body = spBodyOf(sc.s.p);
+  const chId = body.closest('.chapter').dataset.id;
+  snapshotStructure('card to loose');
+  const holder = document.createElement('div');
+  for (const n of nodes) holder.appendChild(n.cloneNode(true));
+  const head = holder.firstElementChild;
+  if (head) head.removeAttribute('data-scene-id');
+  const card = {
+    id: 'lc-' + Date.now().toString(36),
+    held: 'scene',
+    text: (cell.dataset.sid && (book.sceneNotes || {})[cell.dataset.sid]) || '',
+    html: captureBody(holder),
+    words: countWords(nodes.map((n) => n.textContent).join('\n'))
+  };
+  (book.looseCards = book.looseCards || []).push(card);
+  if (!(await saveHeldCard(card))) return;
+  for (const n of nodes) n.remove();
+  if (!body.querySelector('p')) body.innerHTML = '<p><br></p>';
+  if (cell.dataset.sid && book.sceneNotes) delete book.sceneNotes[cell.dataset.sid];
+  syncChapter(body, chId);
+  clearTimeout(saveTimers[chId]);
+  persistChapter(chId).then(() => saveMeta())
+    .catch((err) => window.neo.logError('scene to loose: ' + (err && err.message || err)));
+  breakRun++;
+  spRepaginate();
+  renderNav();
+  renderLooseCards();
+  renderBoard();
+  updateCounters();
+  toast(t('The scene is on a loose card, its lines with it. Drag it back onto the board to put it in again.'), 6000);
+}
+
+// a card holding a scene's lines: back in before scene `before` (or at the end)
+function heldSceneBack(card, before) {
+  const scenes = scriptScenes();
+  const target = scenes[before] && scenes[before].s.p.isConnected ? scenes[before].s.p : null;
+  const dest = target ? spBodyOf(target) : spBodies()[spBodies().length - 1];
+  if (!dest) return;
+  snapshotStructure('loose card placed');
+  const holder = document.createElement('div');
+  holder.innerHTML = card.html;
+  const nodes = [...holder.children];
+  if (!nodes.length) return;
+  // an empty script's one blank line gives way
+  if (!dest.textContent.trim() && dest.children.length === 1) dest.innerHTML = '';
+  if (card.text) {
+    const id = newSceneId();
+    (book.sceneNotes = book.sceneNotes || {})[id] = card.text;
+    nodes[0].dataset.sceneId = id;
+  }
+  for (const n of nodes) { if (target) target.before(n); else dest.appendChild(n); }
+  book.looseCards = book.looseCards.filter((c) => c.id !== card.id);
+  const chId = dest.closest('.chapter').dataset.id;
+  syncChapter(dest, chId);
+  clearTimeout(saveTimers[chId]);
+  persistChapter(chId).then(() => saveMeta())
+    .catch((err) => window.neo.logError('loose to scene: ' + (err && err.message || err)));
+  breakRun++;
+  spRepaginate();
+  renderNav();
+  renderLooseCards();
+  updateCounters();
 }
 
 // the right-hand pane holds loose cards while the Outline is up (there are
