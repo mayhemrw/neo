@@ -6,6 +6,10 @@
 // A sees B's changes arrive, writes more, merges the log into an archive,
 // and exports for verification both ways plus NEO's own .txt and .docx.
 // The verifier page then checks the exports and matches the manuscripts.
+// Versions too: A names one, B finds it (and A's session) in its own
+// History and rebuilds it to A's words, and each computer plays the
+// chapter back across both chains (A's after the merge, so from the
+// archive), ending exactly as its page; the verifier plays the export.
 // The first run quits by closing its window with the book open (Windows'
 // close button), the second by File → Quit with the book open, the third
 // by File → Quit from the shelf; each session's last hash must be stamped
@@ -257,6 +261,39 @@ async function runAll() {
       const arr = r.items.find((i) => /another device|other computer|arrived/i.test(i.title + ' ' + i.text));
       assert.ok(arr && arr.status !== 'bad', JSON.stringify(r.items));
     }],
+    ['a version named on A is in B\'s History, rebuilt to A\'s words', () => {
+      assert.equal(notes.A1.named.error, null);
+      assert.equal(notes.A1.named.name, 'Sent to Maria');
+      const h = notes.B1.history;
+      assert.equal(h.me, devB);
+      assert.ok(h.named, 'B lists it');
+      assert.equal(h.named.dev, devA, 'as A\'s');
+      assert.equal(h.named.text, notes.A1.named.text);
+      assert.ok(h.versions.length >= 1 && h.versions.every((d) => d === devA), 'A\'s session, and nothing of B\'s yet: ' + JSON.stringify(h.versions));
+    }],
+    ['each computer plays the chapter back across both chains, ending as its page', () => {
+      for (const n of ['B1', 'A2']) {
+        const p = notes[n].play;
+        assert.ok(p && !p.error, n + ' ' + JSON.stringify(p));
+        assert.deepEqual(p.problems, [], n);
+        assert.equal(p.endsAsPage, true, n);
+        assert.ok(p.steps.includes(devA) && p.steps.includes(devB), n + ' both computers\' steps');
+        assert.equal(p.steps[0], devA, n + ' A wrote first');
+      }
+      assert.equal(notes.A2.play.steps[notes.A2.play.steps.length - 1], devA, 'A wrote last');
+      // (A's played after the merge: the steps come from the archive too)
+      const html = notes.A2.play.html;
+      const classOf = (needle) => { for (const m of html.matchAll(/<span class="([^"]*)">([^<]*)<\/span>/g)) if (m[2].includes(needle)) return m[1]; return null; };
+      assert.equal(classOf(LAPTOP), 'pb-o-typed');
+      assert.equal(classOf(OUTSIDE), 'pb-o-pasted');
+      assert.equal(classOf(WIND), 'pb-o-moved', 'typed on A, moved on B');
+      assert.match(classOf('Mara counted the boats twice.'), /pb-o-imported/);
+    }],
+    ['the verifier plays the export with the text through to the end', () => {
+      const w = notes.V.watched;
+      assert.match(w.status, /Step (\d+) of \1$/);
+      for (const words of [WIND, LAPTOP, DESK, OUTSIDE]) assert.ok(w.text.includes(words), words);
+    }],
     ['the verifier sent nothing anywhere', () => {
       assert.deepEqual(notes.V.requests, []);
       assert.deepEqual(notes.V.errors, []);
@@ -361,6 +398,17 @@ function deviceStep() {
     throw new Error('the session\'s end wasn\'t stamped within 30 s');
   }
   const save = (to) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath: to }); };
+  // the first chapter played back, as the History window gets it: which
+  // computer made each step, and the last frame against the page
+  const playChapter = () => js(`(async () => {
+    await slogSaveAll();
+    const id = book.chapterOrder[0];
+    const data = await window.neo.history.playback(book.id, id, null);
+    if (!data || data.error) return { error: (data && data.error) || 'nothing' };
+    const pb = SlogPlayback.Playback.fromData(data);
+    const last = pb.frame(pb.length, { origins: true });
+    return { steps: pb.steps.map((s) => s.dev), endsAsPage: last.text === chapterHTML[id], html: last.html, problems: pb.problems };
+  })()`);
   async function main() {
     await app.whenReady();
     try {
@@ -400,7 +448,22 @@ function deviceStep() {
         wc.paste();
         await tick(300);
         await pause();
+        // File → Name This Version…, as the window does it
+        out.named = await js(`(async () => {
+          await slogSaveAll();
+          const r = await window.neo.history.mark(book.id, 'Sent to Maria');
+          return { name: r && r.name, error: (r && r.error) || null, text: chapterHTML[book.chapterOrder[0]] };
+        })()`);
       } else if (STEP === 'B1') {
+        // A's named version and A's session, in B's own History
+        out.history = await js(`(async () => {
+          const id = book.chapterOrder[0];
+          const list = await window.neo.history.list(book.id);
+          const ch = Object.values(list.chapters).find((c) => c.id === id);
+          const named = (list.named || []).find((n) => n.name === 'Sent to Maria');
+          const text = named ? await window.neo.history.text(book.id, { named: named.file }, id) : null;
+          return { me: list.me, versions: ch ? ch.versions.map((v) => v.dev) : [], named: named ? { dev: named.dev, text: text && text.text } : null };
+        })()`);
         // B writes, and moves A's words to the end
         await caretEnd(0, 1);
         await type(' ' + LAPTOP);
@@ -413,6 +476,7 @@ function deviceStep() {
         wc.paste();
         await tick(300);
         await pause();
+        out.play = await playChapter();
       } else if (STEP === 'A2') {
         out.sawLaptop = (await js(`chapterHTML[book.chapterOrder[0]]`)).includes(LAPTOP);
         await caretEnd(0, 0);
@@ -426,6 +490,7 @@ function deviceStep() {
         await type(' Again.');
         await pause();
         out.typedAfterMerge = true;
+        out.play = await playChapter();
         // File → Scribe's Log → Export for Verification…, both ways
         out.exports = { none: path.join(TMP, 'book-no-text.zip'), full: path.join(TMP, 'book-with-text.zip') };
         out.exportToasts = [];
@@ -498,6 +563,14 @@ function verifierStep() {
       fs.copyFileSync(page, page2);
       const w = await openVerifier(page2);
       out.withText = await w.choose([A2.exports.full, path.join(TMP, 'book.txt')]);
+      // the chapter watched on the export with the text, through to its end
+      await w.js(`document.getElementById('watch-start').click()`);
+      for (let i = 0; i < 100 && !(await w.js('!!window.verifierPlayer()')); i++) await new Promise((resolve) => setTimeout(resolve, 100));
+      out.watched = await w.js(`(() => {
+        const root = document.querySelector('#player .pb');
+        root.querySelector('.pb-page').dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
+        return { pos: root.dataset.pos, status: root.querySelector('.pb-status').textContent, text: root.querySelector('.pb-page').innerText };
+      })()`);
       out.requests.push(...w.requests);
       out.errors.push(...w.errors);
       w.close();
