@@ -329,6 +329,26 @@ async function main() {
     await pause();
     await js(`switchTab('manuscript')`);
     await tick(300);
+    // Backspace on a *** line takes the whole break (the scene-break fix), and ⌘Z puts it back
+    const brk = await js(`(() => {
+      const bodies = [...document.querySelectorAll('.chapter-body')];
+      for (let c = 0; c < bodies.length; c++) {
+        const ps = [...bodies[c].querySelectorAll('p')];
+        const i = ps.findIndex((p) => p.classList.contains('scene-break') && !p.classList.contains('ghost'));
+        if (i > 0) return { c, i, n: bodies[c].querySelectorAll('p.scene-break').length };
+      }
+      return null;
+    })()`);
+    assert.ok(brk, 'a scene break to remove');
+    await caret(brk.c, brk.i, false);
+    wc.sendInputEvent({ type: 'keyDown', keyCode: 'Backspace' });
+    wc.sendInputEvent({ type: 'keyUp', keyCode: 'Backspace' });
+    await tick(300);
+    await pause();
+    notes.breakGone = (await js(`document.querySelectorAll('.chapter-body')[${brk.c}].querySelectorAll('p.scene-break').length`)) === brk.n - 1;
+    await js(`structuralUndo()`);
+    await tick(800);
+    await pause();
     // notes
     await js(`switchTab('notes')`);
     await tick(500);
@@ -509,6 +529,10 @@ async function main() {
       }],
       ['cards picked and deleted together go to Darlings as a move', () => {
         assert.ok(edits.some((e) => e.doc === 'darlings' && e.src === 'move' && e.cause === 'darling' && e.from && e.x.ins.join('').includes(notes.pickedWords.slice(0, 20))));
+      }],
+      ['Backspace on a *** line removes the break, logged as typing', () => {
+        assert.equal(notes.breakGone, true);
+        assert.ok(edits.some((e) => /^ch-/.test(e.doc) && e.src === 'typed' && !e.x && e.ops.some((op) => op[1] >= '<p class="scene-break">***</p>'.length - 10)), 'an edit that only deletes the break');
       }],
       ['a section deleted to Darlings is a move there', () => assert.ok(edits.some((e) => e.doc === 'darlings' && e.src === 'move' && e.cause === 'darling' && e.from && e.x.ins.join('').includes(notes.looseWords.slice(0, 20))))],
       ['the export screen says what a log can and can\'t show, and that times are exact', () => {
