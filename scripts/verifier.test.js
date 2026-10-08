@@ -164,6 +164,12 @@ describe('verifier: checking and saying so', () => {
     assert.equal(blocks[0].height, 900123);
     assert.equal(blocks[0].root, C.rootAsShown(log.block.msg));
     assert.match(byKey(items, 'bitcoin').lines.join(' '), new RegExp('Block 900123: merkle root ' + blocks[0].root));
+    // the close's pending proof, kept beside its finished copy, isn't counted as still waiting
+    assert.equal(byKey(items, 'stamps').lines.find((l) => l.startsWith('OpenTimestamps')), 'OpenTimestamps: 1 in a Bitcoin block');
+    assert.match(byKey(items, 'stamps').lines.join(' '), /1 earlier OpenTimestamps receipt is the pending copy of a proof since confirmed/);
+    assert.doesNotMatch(byKey(items, 'stamps').lines.join(' '), /waiting for Bitcoin/);
+    assert.equal(ck.stats.receipts.pending, 0);
+    assert.equal(ck.stats.receipts.superseded, 1);
     // looked up: the block holds the root
     const again = async (bitcoin) => C.summarize(await C.checkInput((await C.sortInput([{ name: 'x.zip', bytes: await F.exportOf(log) }], { inflate })).logs[0], { ...TRUST, bitcoin }));
     items = await again(async (att) => ({ ok: att.msg === log.block.msg, time: log.last.ts + 3 * 3600e3 }));

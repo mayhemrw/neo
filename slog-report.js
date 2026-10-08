@@ -235,7 +235,11 @@
     const bySvc = {};
     let bitcoin = 0;
     let pending = 0;
+    // a pending proof whose finished copy came later (NEO keeps both) isn't waiting any more
+    const finished = new Set(results.filter((r) => r.kind === 'ots' && (r.status === 'bitcoin' || r.status === 'ok')).map((r) => r.dev + '|' + r.n));
+    let superseded = 0;
     for (const r of results) {
+      if (r.kind === 'ots' && r.status === 'pending' && finished.has(r.dev + '|' + r.n)) { superseded++; continue; }
       if (!bySvc[r.svc]) bySvc[r.svc] = {};
       add(bySvc[r.svc], r.status, 1);
       if (r.kind === 'ots' && (r.status === 'bitcoin' || r.status === 'ok')) bitcoin++;
@@ -308,7 +312,7 @@
       deleted: Math.max(0, deleted.total), deletedByHour: deleted.byHour, survivingByHour,
       samples: samples.sort((a, b) => a.ts - b.ts),
       sessions,
-      receipts: { total: results.length, bySvc, bitcoin, pending, stamped: stamps.length, stamps, longest, tails },
+      receipts: { total: results.length, bySvc, bitcoin, pending, superseded, stamped: stamps.length, stamps, longest, tails },
       flags: { clock, unclosed, damage },
       manuscript,
       archives: res.archives || []

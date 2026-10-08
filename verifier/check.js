@@ -210,11 +210,10 @@
 
     // outside timestamps
     const results = res.receipts.results;
-    const by = {};
-    for (const r of results) {
-      if (!by[r.svc]) by[r.svc] = {};
-      by[r.svc][r.status] = (by[r.svc][r.status] || 0) + 1;
-    }
+    // (counted as the report counts them: a pending proof whose finished
+    // copy came later isn't waiting any more)
+    const by = stats.receipts.bySvc;
+    const superseded = stats.receipts.superseded || 0;
     const st = res.receipts.stampEntries;
     if (!results.length && !(st.missing && st.missing.length)) {
       item('stamps', 'warn', 'No outside timestamps', ['Every time in this log is as the computer reported it. (Logs written before NEO stamped them, or never online, have none.)']);
@@ -227,7 +226,8 @@
         lines.push(`${svcName(svc)}: ` + Object.entries(s).map(([k, v]) => `${fmt(v)} ${({ ok: 'checked', bitcoin: 'in a Bitcoin block', pending: 'waiting for Bitcoin', unchecked: 'couldn\'t be checked', failed: 'failed' })[k] || k}`).join(', '));
       }
       if (st.matched || st.missing.length) lines.push(`Stamp entries in the log: ${fmt(st.matched)} matched to their receipts${st.missing.length ? ', ' + fmt(st.missing.length) + ' whose receipt is missing' : ''}.`);
-      const pending = results.filter((r) => r.status === 'pending').length;
+      if (superseded) lines.push(`${plural(superseded, 'earlier OpenTimestamps receipt is', 'earlier OpenTimestamps receipts are')} the pending copy of a proof since confirmed in Bitcoin, so not counted again.`);
+      const pending = stats.receipts.pending;
       if (pending) lines.push('"Waiting for Bitcoin" is an OpenTimestamps proof that NEO hadn\'t yet collected from Bitcoin when this was made (that takes hours, and NEO keeps asking for two weeks); FreeTSA\'s receipt dates those stretches.');
       if (failed.length || st.missing.length || res.receipts.problems.length) {
         item('stamps', 'bad', 'Some outside timestamps don\'t check', [...lines, ...res.receipts.problems.slice(0, 8).map((p) => p.problem + (p.n ? ' (entry ' + p.n + ')' : ''))]);

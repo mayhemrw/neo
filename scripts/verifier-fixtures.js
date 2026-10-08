@@ -76,14 +76,14 @@ function tokenFor(hex, at) {
 }
 // An OpenTimestamps proof of `hex` in block `height`; returns { proof
 // (base64), msg (the merkle root the block must hold, hex) }
-function otsProof(hex, height) {
+function otsProof(hex, height, { pending = false } = {}) {
   const digest = new Uint8Array(Buffer.from(hex, 'hex'));
   const file = { hashOp: 'sha256', digest, timestamp: ots.node(digest) };
   const c1 = { op: { tag: 0xf0, arg: new Uint8Array(16).fill(3) }, stamp: ots.node(H.concat(digest, new Uint8Array(16).fill(3))) };
   file.timestamp.ops.push(c1);
   const c2 = { op: { tag: 0x08 }, stamp: ots.node(H.sha256(c1.stamp.msg)) };
   c1.stamp.ops.push(c2);
-  c2.stamp.attestations.push({ type: 'bitcoin', height });
+  c2.stamp.attestations.push(pending ? { type: 'pending', uri: 'https://a.pool.opentimestamps.org' } : { type: 'bitcoin', height });
   return { proof: Buffer.from(ots.serialize(file)).toString('base64'), msg: H.toHex(c2.stamp.msg) };
 }
 // A block header holding `msg` as its merkle root, dated `time` (ms): {
@@ -145,6 +145,8 @@ function bookLog({ v = 2, stamps = true, bitcoin = null } = {}) {
   if (bitcoin && stamps && v >= 2) {
     const h = slog.entryHash(c2);
     const p = otsProof(h, bitcoin);
+    // as NEO keeps them: the pending proof sent at the close, then the finished one hours later
+    receipts.push({ svc: 'ots', dev: DEV, n: c2.n, h, ts: c2.ts, ots: otsProof(h, bitcoin, { pending: true }).proof });
     receipts.push({ svc: 'ots', dev: DEV, n: c2.n, h, ts: c2.ts, ots: p.proof });
     block = { height: bitcoin, msg: p.msg, ...blockFor(p.msg, c2.ts + 3 * 3600e3) };
   }
