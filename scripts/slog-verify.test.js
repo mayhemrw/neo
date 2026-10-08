@@ -98,7 +98,7 @@ describe('slog-verify: the core on its own', () => {
     const files = filesOf([a]);
     // a bare context: no require, no Buffer, no process; WebCrypto and the encoders only
     const ctx = vm.createContext({ crypto: globalThis.crypto, TextEncoder, TextDecoder, Uint8Array, DataView, Promise, console });
-    for (const f of ['slog-hash.js', 'stamp-tsa.js', 'stamp-ots.js', 'slog-verify.js']) {
+    for (const f of ['slog-hash.js', 'slog-zip.js', 'stamp-tsa.js', 'stamp-ots.js', 'slog-verify.js']) {
       vm.runInContext(fs.readFileSync(path.join(__dirname, '..', f), 'utf8'), ctx, { filename: f });
     }
     ctx.files = files;

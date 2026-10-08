@@ -10619,6 +10619,96 @@ async function slogToggle(msg) {
   toast(msg.on ? t('Scribe\'s Log is on for this book') : t('Scribe\'s Log is off for this book. What it recorded stays in the book\'s folder.'));
 }
 
+// What a Scribe's Log can and can't show (main.js puts the same words in
+// every export's README)
+function slogCanShow() {
+  return [
+    t('A Scribe\'s Log can show that it hasn\'t been altered since each outside timestamp, that the writing happened over the dates shown, which text was typed in NEO, moved within the book, pasted from outside or imported, and that it ends in exactly a given manuscript.'),
+    t('It can\'t show that a person pressed the keys, that the ideas weren\'t a machine\'s, or anything about writing done outside NEO. It\'s a record of the writing process, not proof of authorship.')
+  ];
+}
+// The lines NEO's own exports add around the manuscript (the title page,
+// headings, a contents page), as SHA-256 of each line as the manuscript
+// hash normalizes text, as written and in capitals (the .txt sets
+// headings in capitals). The verifier drops lines with these hashes from a
+// .txt or .docx it's given, then hashes what's left, so a manuscript can be
+// matched without the export ever holding these lines.
+async function slogAddedLines() {
+  const lines = new Set();
+  const add = (s) => {
+    if (!s) return;
+    for (const form of [String(s), String(s).toUpperCase()]) {
+      const norm = form.normalize('NFC').replace(/\s+/gu, ' ').trim();
+      if (norm) lines.add(norm);
+    }
+  };
+  const author = book.author || t('Anonymous');
+  add(book.title);
+  add(book.subtitle);
+  add(author);
+  add(t('by {author}', { author }));
+  add(t('Contents'));
+  const { sections, toc } = exportChapters();
+  for (const ch of sections) {
+    add(ch.heading);
+    add(plainHeading(ch));
+    add(ch.subtitle);
+    add(ch.byline);
+  }
+  for (const e of toc) add(e.label);
+  const out = [];
+  for (const line of lines) {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(line));
+    out.push([...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join(''));
+  }
+  return out.sort();
+}
+// Everything the open book has waiting, written: what an export of its log
+// should include
+async function slogSaveAll() {
+  if (slogLive()) slogFlush();
+  flushAllSaves();
+  const bookId = book.id;
+  const saving = Object.keys(chapterChain).filter((k) => k.startsWith(bookId + '/')).map((k) => chapterChain[k]);
+  await Promise.allSettled([...saving, saveMeta()]);
+}
+
+// File → Scribe's Log → Export for Verification…: which kind, said plainly,
+// then main.js closes the session, stamps its end and writes the .zip
+async function slogExport(msg) {
+  const b = slogBridge();
+  if (!book || msg.bookId !== book.id || !b || !b.exportLog) return;
+  const can = slogCanShow().map((p) => `<p>${escHtml(p)}</p>`).join('');
+  const kind = await optionModal(escHtml(t('Export for Verification')),
+    can + `<p>${escHtml(t('Either kind carries exact times, as each computer and each outside timestamp recorded them, and its own copy of the verifier, so anyone can check it in a web browser without NEO.'))}</p>`, [
+      { label: escHtml(t('Without the text')), desc: escHtml(t('How the book was written, but none of its words. Every check still works except matching a manuscript word for word; a manuscript can still be matched against the log\'s fingerprint.')), value: 'clear' },
+      { label: escHtml(t('With the text')), desc: escHtml(t('This export contains every word of this book as you wrote it, including every passage you deleted and every author name the book has had. Send it only to someone you\'d trust with your drafts.')), value: 'full', danger: true }
+    ]);
+  if (!kind) return;
+  await slogSaveAll();
+  const added = await slogAddedLines();
+  toast(t('Getting the log ready…'), 30000);
+  let res;
+  try { res = await b.exportLog(book.id, { kind, added }); } catch (err) { res = { error: (err && err.message) || String(err) }; }
+  if (!res) { $('#hint').hidden = true; return; }
+  if (res.error) { toast(res.error, 8000); return; }
+  toast(res.stamped
+    ? t('Log exported. It ends on an outside timestamp.')
+    : t('Log exported. The last stretch of writing isn\'t timestamped yet (no network?): its times are as this computer reported them.'), 8000);
+}
+
+// File → Scribe's Log → Merge Log into Archive
+async function slogArchive(msg) {
+  const b = slogBridge();
+  if (!book || msg.bookId !== book.id || !b || !b.archive) return;
+  await slogSaveAll();
+  let res;
+  try { res = await b.archive(book.id); } catch (err) { res = { error: (err && err.message) || String(err) }; }
+  if (!res || res.error) { toast(t('The log wasn\'t merged: {why}', { why: (res && res.error) || '?' }), 8000); return; }
+  if (!res.merged) { toast(t('Nothing new to merge: the log\'s closed sessions are already in its archive.')); return; }
+  toast(t('Merged {n} files into {name}. Sessions still open stay as they are.', { n: res.merged, name: res.archive }), 6000);
+}
+
 /* ================================================================== */
 /*  SAVING                                                             */
 /* ================================================================== */
@@ -14900,6 +14990,8 @@ window.neo.onMenu(async (msg) => {
   }
   slogGesture(); // a menu command is the writer's own doing, like a key
   if (msg.type === 'scribesLog') await slogToggle(msg);
+  if (msg.type === 'slogExport') await slogExport(msg);
+  if (msg.type === 'slogArchive') await slogArchive(msg);
   if (msg.type === 'help') showHelp();
   if (msg.type === 'about') showAbout();
   if (msg.type === 'checkUpdate') checkForUpdate();

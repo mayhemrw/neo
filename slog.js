@@ -24,6 +24,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const V = require('./slog-verify.js');
+const F = require('./slog-files.js');
 
 const FORMAT = 1;          // log.json's version
 const CHUNK_FORMAT = 2;    // a chunk's (its open line's v); 2 adds stamp entries, and 1 still reads
@@ -655,9 +656,6 @@ function parseQuiet(text) {
   if (typeof text !== 'string') return undefined;
   try { return JSON.parse(text); } catch { return undefined; }
 }
-function sizeOf(file) {
-  try { return fs.statSync(file).size; } catch { return -1; }
-}
 // Beside, pushed to the disk, then swapped in. With keep, a file that's
 // already there wins (log.json is made once, and a synced copy may arrive
 // first): false says so.
@@ -1019,6 +1017,28 @@ class Recorder {
     return { on: !(meta && meta.scribesLog === false), logging: fs.existsSync(path.join(dir, LOG_DIR, LOG_INFO)), n: null, chunk: null };
   }
 
+  // Before an export: the session's chunk ends (the next entry starts a new
+  // one), so every file of the log is closed or written out. Resolves, once
+  // it's on disk, to where this device's chain stands: { dir, bookId,
+  // logId, dev, n, head, ms (the manuscript's hash as the log has it),
+  // chunk (the chunk just closed, or null) }, or null for a book with no log.
+  async finish(dir, bookId) {
+    const s = this.session(dir, bookId);
+    if (!s.info) return null;
+    if (!s.chain) return null;
+    const chunk = s.chunk ? s.chunk.name : null;
+    await this._close(s, 'close');
+    return {
+      dir: s.dir, bookId, logId: s.info.logId, dev: this.device(), n: s.chain.n, head: s.chain.head,
+      ms: manuscriptHash(manuscriptText(s.docs)), chunk
+    };
+  }
+  // The chunk this device is writing for a book, if one's open
+  activeChunk(bookId) {
+    const s = this.sessions.get(bookId);
+    return s && s.chunk ? s.chunk.name : null;
+  }
+
   // The book closed: its chunk ends. Resolves once the last line is down.
   close(bookId, why = 'close') {
     const s = this.sessions.get(bookId);
@@ -1104,25 +1124,23 @@ class Recorder {
   // chunks on disk exactly, otherwise by reading and replaying them.
   _chainState(s, useCache) {
     const dev = this.device();
-    const logDir = path.join(s.dir, LOG_DIR);
-    let names = [];
-    try {
-      names = fs.readdirSync(logDir).filter((f) => {
-        const m = CHUNK_RE.exec(f);
-        return m && m[2] === dev.slice(0, 8);
-      });
-    } catch { /* no chunks yet */ }
+    // (loose or merged into an archive, here or on another computer)
+    const listing = F.listLog(s.dir);
+    for (const b of listing.broken) this.onError('archive', new Error(`${s.bookId}: ${b.name}: ${b.problem}`));
+    const names = F.chunkNames(listing, dev.slice(0, 8));
     if (useCache) {
       const c = parseQuiet(readQuiet(this._cacheFile(s)));
       if (c && c.v === 1 && c.dev === dev && c.logId === s.info.logId && c.bookId === s.bookId &&
           c.count === names.length && Number.isSafeInteger(c.n) && c.docs && typeof c.docs === 'object' &&
-          (c.count === 0 ? c.n === 0 : names.includes(c.last) && sizeOf(path.join(logDir, c.last)) === c.size)) {
+          (c.count === 0 ? c.n === 0 : names.includes(c.last) && listing.files.get(c.last).size === c.size)) {
         return { n: c.n, head: c.head, last: c.last, count: c.count, docs: c.docs };
       }
     }
     const chunks = [];
     for (const name of names) {
-      const parsed = parseChunk(readQuiet(path.join(logDir, name)) || '');
+      let text = '';
+      try { text = listing.files.get(name).read().toString('utf8'); } catch (err) { this.onError('read', err); }
+      const parsed = parseChunk(text);
       const open = parsed.entries[0];
       if (open && open.dev !== dev) continue; // another device whose id starts the same way
       chunks.push({ name, ...parsed });
@@ -1292,18 +1310,18 @@ class Recorder {
   // only when their chunks change, and then only from where they were.
   _others(s) {
     const mine = this.device().slice(0, 8);
-    const logDir = path.join(s.dir, LOG_DIR);
-    let names = [];
-    try { names = fs.readdirSync(logDir).filter((f) => { const m = CHUNK_RE.exec(f); return m && m[2] !== mine; }).sort(); } catch { /* no log folder */ }
-    const sizes = names.map((n) => sizeOf(path.join(logDir, n)));
+    const listing = F.listLog(s.dir);
+    const names = F.chunkNames(listing).filter((n) => CHUNK_RE.exec(n)[2] !== mine);
+    const sizes = names.map((n) => listing.files.get(n).size);
     const sig = names.map((n, i) => n + ':' + sizes[i]).join('|');
+    const readName = (name) => { try { return listing.files.get(name).read().toString('utf8'); } catch { return ''; } };
     const had = s.others;
     if (had && had.sig === sig) return had.devs;
     const files = new Map();
     const byDev = new Map();
     names.forEach((name, i) => {
       const old = had && had.files.get(name);
-      const parsed = old && old.size === sizes[i] ? old.parsed : parseChunk(readQuiet(path.join(logDir, name)) || '');
+      const parsed = old && old.size === sizes[i] ? old.parsed : parseChunk(readName(name));
       files.set(name, { size: sizes[i], parsed });
       const open = parsed.entries[0];
       if (!open || open.kind !== 'open' || typeof open.dev !== 'string' || open.dev === this.device()) return;
@@ -1366,10 +1384,12 @@ class Recorder {
     const dev = this.device();
     const logDir = path.join(s.dir, LOG_DIR);
     fs.mkdirSync(logDir, { recursive: true });
+    // (a name an archive holds is taken too)
+    const taken = F.listLog(s.dir).files;
     let name;
     for (let k = 1; ; k++) {
       name = chunkName(this.now(), dev, k);
-      if (name !== s.last && !fs.existsSync(path.join(logDir, name))) break;
+      if (name !== s.last && !taken.has(name) && !fs.existsSync(path.join(logDir, name))) break;
     }
     const prevChunk = s.last;
     s.chunk = { name, writer: new ChunkWriter(path.join(logDir, name)), bytes: 0, failed: false };

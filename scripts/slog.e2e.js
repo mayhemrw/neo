@@ -10,7 +10,7 @@
 
 'use strict';
 
-const { app, BrowserWindow, clipboard, ipcMain } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain } = require('electron');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
@@ -31,6 +31,7 @@ fs.writeFileSync(path.join(LIB, 'library.json'), JSON.stringify({
   authorName: '', penNames: [], firstRunDone: true, pageTheme: 'night', hintShown: true,
   shelves: [{ id: 'shelf-1', name: 'Works in Progress', bookIds: [] }]
 }));
+const EXPORT_TO = path.join(tmp, 'export.zip');
 const MANUSCRIPT = path.join(tmp, 'harbor.txt');
 fs.writeFileSync(MANUSCRIPT, [
   'The harbor was quiet before the storm.',
@@ -74,7 +75,8 @@ stampServer.listen(0, '127.0.0.1', () => {
 const slog = require('../slog.js');
 const tsa = require('../stamp-tsa.js');
 const { readReceipts } = require('../slog-stamp.js');
-const { checkBook, report } = require('./slog-check.js');
+const { checkBook, checkZip, report } = require('./slog-check.js');
+const files = require('../slog-files.js');
 
 let wc;
 const js = (code) => wc.executeJavaScript(code, true);
@@ -344,6 +346,24 @@ async function main() {
     while (await js(`!!printPaperback.busy || !!document.getElementById('pm-dedication')`)) await tick(50);
     await tick(800);
     assert.ok(await js(`book.chapterOrder.some((c) => chapterKind(c) === 'dedication')`), 'the dedication is a page');
+    // File → Scribe's Log → Export for Verification…: the screen, the kind
+    // without the text, the save (where the dialog would ask)
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath: EXPORT_TO });
+    await js(`(() => { slogExport({ type: 'slogExport', bookId: book.id }); })()`);
+    const screen = `[...document.querySelectorAll('.modal-backdrop')].pop()`;
+    for (let i = 0; i < 100 && !(await js(`!!(${screen} && ${screen}.querySelector('.fr-choice'))`)); i++) await tick(50);
+    notes.exportScreen = await js(`${screen}.innerText`);
+    await js(`${screen}.querySelector('.fr-choice').click()`);
+    for (let i = 0; i < 200 && !fs.existsSync(EXPORT_TO); i++) await tick(100);
+    await tick(500);
+    notes.exportToast = await js(`document.getElementById('hint').textContent`);
+    // …and File → Scribe's Log → Merge Log into Archive
+    await js(`(() => { slogArchive({ type: 'slogArchive', bookId: book.id }); })()`);
+    await tick(1500);
+    notes.archiveToast = await js(`document.getElementById('hint').textContent`);
+    await caret(1, 0, true);
+    await type(' After the merge.');
+    await pause();
     // closing the book ends its chunk
     await js(`backToShelf()`);
     await tick(1500);
@@ -364,9 +384,12 @@ async function main() {
       }
       return null;
     };
-    const logDir = path.join(bookDir, slog.LOG_DIR);
-    const entries = fs.readdirSync(logDir).filter(slog.isChunkName).sort()
-      .flatMap((n) => slog.parseChunk(fs.readFileSync(path.join(logDir, n), 'utf8')).entries);
+    // (loose and merged into the archive)
+    const listing = files.listLog(bookDir);
+    const entries = files.chunkNames(listing)
+      .flatMap((n) => slog.parseChunk(listing.files.get(n).read().toString('utf8')).entries);
+    const exported = fs.existsSync(EXPORT_TO) ? await checkZip(EXPORT_TO, {}) : null;
+    const exportZip = fs.existsSync(EXPORT_TO) ? require('../slog-zip.js').unzipSync(new Uint8Array(fs.readFileSync(EXPORT_TO)), require('zlib').inflateRawSync).files : {};
     const edits = entries.filter((e) => e.kind === 'edit' || e.kind === 'base');
     for (const e of edits) console.log(`  ${e.n} ${e.kind} ${e.doc} ${e.src}${e.cause ? '/' + e.cause : ''}${e.ev ? ' ev ' + e.ev : ''}${e.from ? ' from ' + JSON.stringify(e.from.map((p) => p[3].n || p[3].doc || 'log')) : ''}  ${JSON.stringify(e.x ? e.x.ins.map((s) => s.slice(0, 50)) : e.ops)}`);
     // the stretches of text whose move wasn't traced, to say which failed
@@ -439,6 +462,27 @@ async function main() {
         assert.ok(back && back.from, 'back into the chapter, from the card');
       }],
       ['a section deleted to Darlings is a move there', () => assert.ok(edits.some((e) => e.doc === 'darlings' && e.src === 'move' && e.cause === 'darling' && e.from && e.x.ins.join('').includes(notes.looseWords.slice(0, 20))))],
+      ['the export screen says what a log can and can\'t show, and that times are exact', () => {
+        assert.match(notes.exportScreen, /can't show that a person pressed the keys/);
+        assert.match(notes.exportScreen, /exact times/);
+        assert.match(notes.exportScreen, /every passage you deleted/);
+      }],
+      ['the export without the text checks, ends on a stamp, and holds no words', () => {
+        assert.ok(exported, 'written');
+        assert.equal(exported.ok, true, JSON.stringify(exported.problems));
+        assert.equal(exported.manifest.text, 'none');
+        assert.equal(exported.manifest.stamped && exported.manifest.stamped.tsa, true);
+        assert.ok(exported.manifest.manuscript.added.length >= 2, 'the title page and headings');
+        assert.match(notes.exportToast, /ends on an outside timestamp/);
+        const text = Object.entries(exportZip).filter(([n]) => n.startsWith('chunks/')).map(([, b]) => Buffer.from(b).toString()).join('');
+        assert.ok(text.length > 0 && !text.includes('"x"') && !text.includes('The wind rose'));
+        for (const n of ['README.txt', 'verifier.html', 'manifest.json', 'log.json']) assert.ok(exportZip[n], n);
+      }],
+      ['merging into an archive leaves a log that checks, and writing carries on', () => {
+        assert.match(notes.archiveToast, /^Merged \d+ files into archive-/);
+        assert.ok(listing.archives.length === 1, 'one archive');
+        assert.ok(edits.some((e) => e.src === 'typed' && e.x && e.x.ins.join('').includes('After the merge.')));
+      }],
       ['a dedication typed in the paperback dialog is typed', () => assert.ok(edits.some((e) => /^ch-/.test(e.doc) && e.src === 'typed' && e.x && e.x.ins.join('').includes(DEDICATION)))]
     ];
     for (const [name, fn] of checks) {

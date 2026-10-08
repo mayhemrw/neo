@@ -3,7 +3,8 @@
 // in NEO, in scripts/slog-check.js, and inside the standalone verifier page.
 //
 //   reading      chunks and receipt files, and the files of a scribes-log
-//                folder handed in as { name: text or bytes }
+//                folder handed in as { name: text or bytes }, archives
+//                (slog-zip.js) unpacked into their places
 //   the chain    order, numbering, links, commitments (verifyChain)
 //   replay       the documents rebuilt from the ops (replay)
 //   origins      where every unit of text first came from, across devices
@@ -24,13 +25,20 @@
   const H = hasRequire ? require('./slog-hash.js') : globalThis.SlogHash;
   const TSA = hasRequire ? require('./stamp-tsa.js') : globalThis.StampTsa;
   const OTS = hasRequire ? require('./stamp-ots.js') : globalThis.StampOts;
+  const Z = hasRequire ? require('./slog-zip.js') : globalThis.SlogZip;
 
   const CHUNK_FORMATS = new Set([1, 2]);
   const KINDS = new Set(['open', 'edit', 'base', 'doc', 'on', 'off', 'sleep', 'wake', 'clock', 'close', 'stamp']);
   // 20261007T160512Z-7f3a9c2e.slog, with -2, -3… if a name is ever taken
   const CHUNK_RE = /^(\d{8}T\d{6}Z)-([0-9a-f]{8})(?:-([1-9]\d{0,3}))?\.slog$/;
   const RECEIPT_RE = /^(\d{8}T\d{6}Z)-([0-9a-f]{8})(?:-([1-9]\d{0,3}))?\.stamps$/;
+  // archive-20261009T181500Z-7f3a9c2e.zip: closed chunks and receipt files
+  // merged into one file (by the device named, at the time named)
+  const ARCHIVE_RE = /^archive-(\d{8}T\d{6}Z)-([0-9a-f]{8})(?:-([1-9]\d{0,3}))?\.zip$/;
   const isChunkName = (name) => typeof name === 'string' && CHUNK_RE.test(name);
+  const isArchiveName = (name) => typeof name === 'string' && ARCHIVE_RE.test(name);
+  // what an archive holds, at the paths the files had in the folder
+  const isArchivable = (p) => typeof p === 'string' && (isChunkName(p) || (p.startsWith('stamps/') && RECEIPT_RE.test(p.slice(7))));
 
   /* ------------------------------------------------------------------ */
   /*  Hashing                                                            */
@@ -229,8 +237,24 @@
   // grouped by the device their open entry names. Returns { info, key,
   // logId, chains: [{ dev, chunks }], receipts: [{ file, line }], certs,
   // problems, notes }.
-  function readLog(files) {
-    const out = { info: null, key: null, logId: null, chains: [], receipts: [], certs: [], problems: [], notes: [] };
+  //
+  // Archives (archive-….zip) are unpacked first (expandArchives); with
+  // `inflateSync` (Node's zlib.inflateRawSync) readLog does it itself, and
+  // checkLog does it in any case. Paths may also be as an export has them
+  // (chunks/<chunk>.slog) or under a scribes-log/ folder (logPaths).
+  function readLog(files, { inflateSync = null, expanded = null } = {}) {
+    files = logPaths(files);
+    if (!expanded && Object.keys(files).some(isArchiveName)) {
+      expanded = inflateSync ? expandArchivesSync(files, inflateSync)
+        : { files: Object.fromEntries(Object.entries(files).filter(([p]) => !isArchiveName(p))), problems: Object.keys(files).filter(isArchiveName).map((p) => p + ': an archive that wasn\'t unpacked'), notes: [], archives: [] };
+    }
+    if (expanded) files = expanded.files;
+    const out = { info: null, key: null, logId: null, chains: [], receipts: [], certs: [], problems: [], notes: [], archives: [] };
+    if (expanded) {
+      out.problems.push(...expanded.problems);
+      out.notes.push(...expanded.notes);
+      out.archives = expanded.archives;
+    }
     const names = Object.keys(files).sort();
     const base = (p) => p.slice(p.lastIndexOf('/') + 1);
     const infoName = names.find((p) => p === 'log.json');
@@ -261,6 +285,121 @@
       }
     }
     out.chains = [...byDev].map(([dev, chunks]) => ({ dev, chunks }));
+    return out;
+  }
+
+  // Paths as readLog takes them, from a folder dropped whole
+  // (scribes-log/…) or an export (chunks/<chunk>.slog beside stamps/)
+  function logPaths(files) {
+    const keys = Object.keys(files);
+    let strip = '';
+    const top = keys.length && keys.every((p) => p.includes('/')) ? keys[0].slice(0, keys[0].indexOf('/') + 1) : '';
+    if (top && keys.every((p) => p.startsWith(top)) && keys.some((p) => p === top + 'log.json')) strip = top;
+    const out = {};
+    for (const p of keys) {
+      let q = p.slice(strip.length);
+      if (q.startsWith('chunks/') && isChunkName(q.slice(7))) q = q.slice(7);
+      if (!(q in out)) out[q] = files[p];
+    }
+    return out;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Archives                                                           */
+  /* ------------------------------------------------------------------ */
+
+  const sameBytes = (a, b) => H.equal(a, b);
+  const startsWith = (long, short) => long.length > short.length && H.equal(long.subarray(0, short.length), short);
+
+  // A log's files with every archive's contents put in their places: the
+  // folder's loose files, plus whatever each archive holds that isn't there.
+  // The same file in two places must be the same bytes. A closed chunk
+  // never changes, so two copies that differ are damage, except a copy
+  // that's the start of the other (a sync still under way, or a receipt
+  // file another device was still writing): the longer one is taken, and
+  // it's noted. unpacked: [{ name, files, problems }] for each archive.
+  function mergeArchives(files, unpacked) {
+    const out = {};
+    const where = {};
+    const problems = [];
+    const notes = [];
+    const archives = [];
+    for (const [p, v] of Object.entries(files)) {
+      if (isArchiveName(p)) continue;
+      out[p] = v;
+      where[p] = 'the folder';
+    }
+    for (const a of unpacked.slice().sort((x, y) => (x.name < y.name ? -1 : 1))) {
+      for (const pr of a.problems) problems.push(`${a.name}: ${pr}`);
+      let count = 0;
+      for (const [p, bytes] of Object.entries(a.files)) {
+        if (!isArchivable(p)) { problems.push(`${a.name}: holds ${p}, which isn't part of a log`); continue; }
+        count++;
+        if (!(p in out)) { out[p] = bytes; where[p] = a.name; continue; }
+        const had = bytesOf(out[p]);
+        if (sameBytes(had, bytes)) continue;
+        if (startsWith(bytes, had)) {
+          notes.push({ file: p, note: `a shorter copy in ${where[p]}; the whole one in ${a.name} is used` });
+          out[p] = bytes;
+          where[p] = a.name;
+        } else if (startsWith(had, bytes)) {
+          notes.push({ file: p, note: `a shorter copy in ${a.name}; the whole one in ${where[p]} is used` });
+        } else problems.push(`${p}: two different copies (${where[p]} and ${a.name})`);
+      }
+      archives.push({ name: a.name, files: count });
+    }
+    return { files: out, problems, notes, archives };
+  }
+  function expandArchivesSync(files, inflateRawSync) {
+    const unpacked = [];
+    for (const p of Object.keys(files).filter(isArchiveName)) {
+      try { unpacked.push({ name: p, ...Z.unzipSync(bytesOf(files[p]), inflateRawSync) }); } catch (err) { unpacked.push({ name: p, files: {}, problems: ['can\'t be read: ' + err.message] }); }
+    }
+    return mergeArchives(files, unpacked);
+  }
+  async function expandArchives(files, inflateRaw) {
+    files = logPaths(files);
+    const unpacked = [];
+    for (const p of Object.keys(files).filter(isArchiveName)) {
+      try { unpacked.push({ name: p, ...await Z.unzip(bytesOf(files[p]), inflateRaw) }); } catch (err) { unpacked.push({ name: p, files: {}, problems: ['can\'t be read: ' + err.message] }); }
+    }
+    return mergeArchives(files, unpacked);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Exports                                                            */
+  /* ------------------------------------------------------------------ */
+
+  // The files an export carries beside the log (NEO's README, its own copy
+  // of the verifier, and the manifest itself), not listed in the manifest
+  const EXPORT_EXTRAS = new Set(['README.txt', 'verifier.html', 'manifest.json']);
+
+  // An unzipped export ({ name: bytes }) as checkLog takes it: { manifest,
+  // files, problems }. Every file is checked against the manifest's size
+  // and SHA-256; one missing, changed or not listed is a problem. (The
+  // chains, receipts and words are checked by checkLog, as for any log.)
+  function readExportFiles(unzipped, problems = []) {
+    const out = { manifest: null, files: {}, problems: problems.slice() };
+    const m = unzipped['manifest.json'];
+    if (!m) { out.problems.push('no manifest.json: not an export from NEO'); } else {
+      try { out.manifest = JSON.parse(textOf(m)); } catch (err) { out.problems.push('manifest.json can\'t be read: ' + err.message); }
+    }
+    const man = out.manifest;
+    if (man && (man.kind !== 'scribes-log-export' || !Array.isArray(man.files))) {
+      out.problems.push('manifest.json isn\'t a Scribe\'s Log export\'s');
+    }
+    const listed = new Map();
+    if (man && Array.isArray(man.files)) for (const f of man.files) if (f && typeof f.path === 'string') listed.set(f.path, f);
+    for (const [name, bytes] of Object.entries(unzipped)) {
+      if (EXPORT_EXTRAS.has(name)) continue;
+      const f = listed.get(name);
+      const b = bytesOf(bytes);
+      if (!f) { if (man) out.problems.push(name + ': not in the manifest'); } else if (f.size !== b.length || f.sha256 !== sha256hex(b)) out.problems.push(name + ': not the file the manifest lists');
+      // chunks and receipt files as text, certificates as bytes
+      out.files[name] = /\.der$/.test(name) ? b : (() => { try { return textOf(b); } catch { out.problems.push(name + ': isn\'t UTF-8'); return ''; } })();
+    }
+    for (const name of listed.keys()) if (!(name in unzipped)) out.problems.push(name + ': in the manifest but not in the export');
+    out.files = logPaths(out.files);
     return out;
   }
 
@@ -1220,7 +1359,7 @@
     if (!newest) problems.push('no chunks');
     return {
       ok: !problems.length && devices.every((d) => d.ok), logId: log.logId, problems, notes: log.notes.slice(),
-      devices, newest, words, links
+      devices, newest, words, links, archives: log.archives || []
     };
   }
 
@@ -1228,7 +1367,13 @@
   // the clock check. files: as readLog takes them. Options as for
   // checkReceipts (anchors, certs, bitcoin).
   async function checkLog(files, opts = {}) {
-    const log = files && files.chains ? files : readLog(files);
+    let log = files && files.chains ? files : null;
+    if (!log) {
+      const paths = logPaths(files);
+      log = Object.keys(paths).some(isArchiveName)
+        ? readLog(paths, { expanded: opts.inflateSync ? expandArchivesSync(paths, opts.inflateSync) : await expandArchives(paths, opts.inflate) })
+        : readLog(paths);
+    }
     const res = checkChains(log);
     const chains = new Map();
     for (const d of res.devices) {
@@ -1267,10 +1412,10 @@
   }
 
   Object.assign(exports, {
-    CHUNK_FORMATS, KINDS, CHUNK_RE, RECEIPT_RE, isChunkName,
+    CHUNK_FORMATS, KINDS, CHUNK_RE, RECEIPT_RE, ARCHIVE_RE, isChunkName, isArchiveName, isArchivable,
     canonical, useHash, sha256hex, clearPart, entryHash, saltFor, commitment, normalizeManuscript, manuscriptHash,
     markupRanges, applyOps, applyLengths, insertOffsets, viewOf, sameChar,
-    parseLines, parseChunk, readLog, orderChunks, verifyChain, Replayer, replay,
+    parseLines, parseChunk, readLog, logPaths, readExportFiles, EXPORT_EXTRAS, mergeArchives, expandArchivesSync, expandArchives, orderChunks, verifyChain, Replayer, replay,
     runsTidy, runsSlice, originOf, Tracer, trace, traceAll, matchArrivals,
     AUX_DOCS, JSON_DOCS, chapterDoc, docChapter, decodeEntities, chapterLines, manuscriptText, proseMask, composition, originsAt,
     checkReceipts, matchStampEntries, coverage, clockCheck, deviceNames, checkChains, checkLog,

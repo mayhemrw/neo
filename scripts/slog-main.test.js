@@ -12,13 +12,15 @@ const vm = require('node:vm');
 const { createRequire } = require('node:module');
 const { describe, test } = require('node:test');
 const slog = require('../slog.js');
-const { checkBook } = require('./slog-check.js');
+const { checkBook, checkZip } = require('./slog-check.js');
+const F = require('../slog-files.js');
 
 const root = path.join(__dirname, '..');
 const localRequire = createRequire(path.join(root, 'main.js'));
 const source = fs.readFileSync(path.join(root, 'main.js'), 'utf8');
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'neo-slog-user-'));
 
+let saveAs = null; // where a save dialog "chooses", or null to cancel
 function loadMain() {
   const handlers = new Map();
   const sent = [];
@@ -35,7 +37,7 @@ function loadMain() {
     ipcMain: { on() {}, handle: (name, fn) => handlers.set(name, fn) },
     BrowserWindow: { getFocusedWindow: () => null, getAllWindows: () => [] },
     Menu: { buildFromTemplate: (items) => items, setApplicationMenu() {} },
-    dialog: {},
+    dialog: { showSaveDialog: async (_w, o) => (saveAs ? { canceled: false, filePath: saveAs } : { canceled: true, defaultPath: o.defaultPath }) },
     utilityProcess: { fork: () => ({ on() {}, postMessage() {} }) },
     screen: {}
   };
@@ -245,6 +247,66 @@ describe('Scribe\'s Log in main.js', { concurrency: 1 }, () => {
     assert.equal(e.filter((x) => x.kind === 'base' || x.kind === 'edit').length, e.slice(0, n).filter((x) => x.kind === 'base' || x.kind === 'edit').length);
     assertChecks(dir);
     assertChecks(copyDir);
+  });
+
+  test('Export for Verification and Merge Log into Archive, from the File menu', async () => {
+    const lib = tempLibrary();
+    const book = main.call('book:create', { title: 'Tide: A/B "Book"' });
+    const dir = path.join(lib, book.id);
+    main.call('slog:open', book.id);
+    main.call('slog:observe', book.id, 'chapter', 'ch-1', '<p>The tide went out.</p>', { src: 'typed', dur: 500, ev: 18 });
+    main.call('chapter:write', book.id, 'ch-1', '<p>The tide went out.</p>');
+    await main.call('slog:event', book.id, { type: 'close' });
+    main.call('slog:open', book.id);
+    main.call('slog:observe', book.id, 'chapter', 'ch-1', '<p>The tide went out. It came back.</p>', { src: 'typed', dur: 500, ev: 14 });
+    main.call('chapter:write', book.id, 'ch-1', '<p>The tide went out. It came back.</p>');
+    // cancelled at the save dialog: nothing written, the session's chunk closed all the same
+    saveAs = null;
+    assert.equal(await main.call('slog:export', book.id, { kind: 'clear', added: [] }), null);
+    assert.equal(main.get('slogRecorder').activeChunk(book.id), null);
+    // saved, without the text
+    const out = path.join(lib, 'export.zip');
+    saveAs = out;
+    const added = ['a'.repeat(64), 'not a hash'];
+    const res = await main.call('slog:export', book.id, { kind: 'clear', added });
+    assert.equal(res.path, out);
+    assert.equal(res.stamped, false); // no stamper here
+    assert.equal(res.intact, true);
+    const checked = await checkZip(out);
+    assert.equal(checked.ok, true, JSON.stringify(checked.problems));
+    assert.equal(checked.manifest.title, 'Tide: A/B "Book"');
+    assert.equal(checked.manifest.text, 'none');
+    assert.deepEqual(checked.manifest.manuscript.added, ['a'.repeat(64)]);
+    assert.equal(checked.manifest.manuscript.hash, slog.manuscriptHash('The tide went out. It came back.'));
+    const z = await F.readExport(new Uint8Array(fs.readFileSync(out)));
+    assert.ok(!JSON.stringify(z.files).includes('tide'));
+    const readme = Buffer.from(require('../slog-zip.js').unzipSync(new Uint8Array(fs.readFileSync(out)), require('zlib').inflateRawSync).files['README.txt']).toString();
+    assert.match(readme, /can't show that a person pressed the keys/);
+    assert.match(readme, /isn't covered by an outside timestamp yet/);
+    // with the text
+    saveAs = path.join(lib, 'full.zip');
+    const full = await main.call('slog:export', book.id, { kind: 'full', added: [] });
+    const fz = await checkZip(full.path);
+    assert.equal(fz.ok, true);
+    assert.equal(fz.words, true);
+    assert.equal(fz.manifest.text, 'full');
+    // merged: both closed sessions into an archive, and it still checks
+    const merged = await main.call('slog:archive', book.id);
+    assert.equal(merged.error, undefined);
+    assert.ok(merged.merged >= 2, JSON.stringify(merged));
+    assert.ok(fs.readdirSync(path.join(dir, slog.LOG_DIR)).some((f) => /^archive-.*\.zip$/.test(f)));
+    assertChecks(dir);
+    // writing goes on after the merge
+    main.call('slog:open', book.id);
+    main.call('slog:observe', book.id, 'chapter', 'ch-1', '<p>The tide went out. It came back. Again.</p>', { src: 'typed', dur: 500, ev: 7 });
+    main.call('chapter:write', book.id, 'ch-1', '<p>The tide went out. It came back. Again.</p>');
+    await main.call('slog:event', book.id, { type: 'close' });
+    assertChecks(dir);
+    // a book with no log
+    fs.mkdirSync(path.join(lib, 'book-unlogged-x'));
+    assert.ok((await main.call('slog:archive', 'book-unlogged-x')).error);
+    assert.ok((await main.call('slog:export', 'book-unlogged-x', { kind: 'clear' })).error);
+    saveAs = null;
   });
 
   test('names from the window still pass libName', () => {

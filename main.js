@@ -899,6 +899,127 @@ ipcMain.handle('slog:event', (_e, bookId, ev) => {
 });
 ipcMain.handle('slog:status', (_e, bookId) => slogTap((s) => s.status(bookDir(bookId), bookId)) || null);
 
+// File → Scribe's Log → Export for Verification…: the book's whole log in
+// one .zip, with its own copy of the verifier, for someone else to check.
+// kind: 'clear' (no text: every entry's words taken off) or 'full'. The
+// window has asked which, said what each holds, and saved everything; this
+// closes the session's chunk, stamps the end (waiting up to 30 seconds for
+// the receipt), asks where to save, and writes the zip. added: hashes of
+// the lines NEO's own exports add to the manuscript (title page, headings),
+// so the verifier can match a .txt or .docx without the text.
+const SLOG_STAMP_WAIT = 30000;
+const slogFiles = require('./slog-files.js');
+function slogTrust() {
+  const tsa = require('./stamp-tsa.js');
+  const pem = (f) => tsa.pemToDer(fs.readFileSync(path.join(__dirname, 'certs', f), 'utf8'));
+  return { anchors: [pem('freetsa-root.pem')], certs: [pem('freetsa-tsa.pem')] };
+}
+// What a log can and can't show, in every export and on its screen
+function slogCanShow() {
+  return [
+    t('A Scribe\'s Log can show that it hasn\'t been altered since each outside timestamp, that the writing happened over the dates shown, which text was typed in NEO, moved within the book, pasted from outside or imported, and that it ends in exactly a given manuscript.'),
+    t('It can\'t show that a person pressed the keys, that the ideas weren\'t a machine\'s, or anything about writing done outside NEO. It\'s a record of the writing process, not proof of authorship.')
+  ];
+}
+function slogReadme(kind, m) {
+  const when = new Date(m.exported).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+  const lines = [
+    t('Scribe\'s Log export: {title}', { title: m.title || t('Untitled') }),
+    '',
+    kind === 'full'
+      ? t('This is the full record of how this book was written in NEO, made on {when}. It holds every word as it was written, including passages later deleted.', { when })
+      : t('This is the record of how this book was written in NEO, made on {when}, without the text: what changed, where, when and how, but none of the words.', { when }),
+    '',
+    ...slogCanShow().flatMap((p) => [p, '']),
+    t('Times are exact, as each computer and each outside timestamp recorded them.'),
+    '',
+    t('To check it: open verifier.html in any web browser (it works offline) and drop this .zip on it. To check a manuscript against the log, drop the manuscript (.txt or .docx) there too.'),
+    '',
+    m.stamped && m.stamped.tsa
+      ? t('The log ends on an outside timestamp.')
+      : t('The last stretch of writing isn\'t covered by an outside timestamp yet: its times are only as the computer reported them.'),
+    '',
+    t('What\'s inside:'),
+    '  manifest.json  ' + t('what this is, the manuscript\'s fingerprint, and each file\'s SHA-256'),
+    '  log.json       ' + (kind === 'full' ? t('the log\'s id and the key its words are sealed with') : t('the log\'s id')),
+    '  chunks/        ' + t('the log itself: one file per writing session per computer'),
+    '  stamps/        ' + t('the outside timestamps (FreeTSA and OpenTimestamps) and the certificates to check them'),
+    '  verifier.html  ' + t('the checker, from the NEO that made this export'),
+    '',
+    t('The format is described in SLOG-FORMAT.md, in NEO\'s source.'),
+    ''
+  ];
+  return lines.join('\r\n');
+}
+// The checker from this NEO (scripts/build-verifier.js makes verifier/verifier.html)
+function slogVerifierPage() {
+  try { return fs.readFileSync(path.join(__dirname, 'verifier', 'verifier.html'), 'utf8'); } catch { /* not built */ }
+  return '<!doctype html><meta charset="utf-8"><title>Scribe\'s Log verifier</title>' +
+    '<body style="font:16px/1.5 system-ui,sans-serif;max-width:36em;margin:3em auto;padding:0 1em">' +
+    '<h1>Scribe\'s Log verifier</h1><p>This copy of NEO was built without its verifier page, so this export doesn\'t carry one. ' +
+    'The log itself is complete: any checker that follows SLOG-FORMAT.md can check it.</p>';
+}
+const slogFileName = (title) => [...String(title || t('Untitled'))].filter((c) => c >= ' ' && !'\\/:*?"<>|'.includes(c)).join('').replace(/\s+/g, ' ').trim().slice(0, 80) || t('Untitled');
+ipcMain.handle('slog:export', async (_e, bookId, opts = {}) => {
+  const dir = bookDir(bookId);
+  const kind = opts.kind === 'full' ? 'full' : 'clear';
+  if (!fs.existsSync(path.join(dir, slog.LOG_DIR, slog.LOG_INFO))) return { error: t('This book has no Scribe\'s Log yet.') };
+  const win = BrowserWindow.getFocusedWindow();
+  // the session's chunk closes and its end is stamped, while the writer picks a place
+  let head = null;
+  try { head = await scribe().finish(dir, bookId); } catch (err) { logError('scribe\'s log export', err); }
+  const settled = head && head.head && slogStamper
+    ? slogStamper.settle(head, { wait: SLOG_STAMP_WAIT }).catch((err) => { logError('scribe\'s log export', err); return { tsa: false, ots: false }; })
+    : Promise.resolve({ tsa: false, ots: false });
+  const meta = readJSON(path.join(dir, 'book.json'), {}) || {};
+  const name = slogFileName(meta.title) + ' - ' + (kind === 'full' ? t('Scribe\'s Log (with text)') : t('Scribe\'s Log (no text)'));
+  const { canceled, filePath } = await dialog.showSaveDialog(win, {
+    defaultPath: path.join(exportFolder(), name + '.zip'),
+    filters: [{ name: 'ZIP', extensions: ['zip'] }]
+  });
+  const stamped = await settled;
+  if (canceled || !filePath) return null;
+  rememberExportFolder(filePath);
+  try {
+    const { anchors, certs } = slogTrust();
+    const exported = Date.now();
+    const m = {
+      exported, app: app.getVersion(), title: meta.title || '', author: meta.author || '',
+      manuscript: head ? head.ms : null,
+      added: Array.isArray(opts.added) ? opts.added.filter((h) => /^[0-9a-f]{64}$/.test(h)) : [],
+      stamped: head && head.head ? { dev: head.dev, n: head.n, tsa: !!stamped.tsa, ots: !!stamped.ots } : null
+    };
+    m.readme = slogReadme(kind, m);
+    m.verifier = slogVerifierPage();
+    const built = await slogFiles.buildExport(dir, { kind, meta: m, anchors, certs });
+    const bytes = require('./slog-zip.js').zip(built.entries, { deflateRawSync: (b) => require('zlib').deflateRawSync(b, { level: 9 }), time: exported });
+    fs.writeFileSync(filePath, bytes);
+    return { path: filePath, kind, stamped: !!stamped.tsa, intact: built.result.ok, files: built.entries.length };
+  } catch (err) {
+    logError('scribe\'s log export', err);
+    return { error: t('Could not write the file ({why})', { why: (err && err.message) || String(err) }) };
+  }
+});
+
+// File → Scribe's Log → Merge Log into Archive: the book's closed chunks and
+// receipt files (and any older archive) into one archive file, checked byte
+// for byte before the files it replaces are removed
+ipcMain.handle('slog:archive', async (_e, bookId) => {
+  const dir = bookDir(bookId);
+  if (!fs.existsSync(path.join(dir, slog.LOG_DIR, slog.LOG_INFO))) return { error: t('This book has no Scribe\'s Log yet.') };
+  try {
+    const rec = scribe();
+    const active = new Set([rec.activeChunk(bookId)].filter(Boolean));
+    const res = slogFiles.mergeIntoArchive(dir, {
+      dev: rec.device(), active, openReceipts: slogStamper ? slogStamper.openReceipts(dir) : new Set()
+    });
+    return { archive: res.archive, files: res.files, merged: res.removed.length, skipped: res.skipped.length };
+  } catch (err) {
+    logError('scribe\'s log archive', err);
+    return { error: err.message };
+  }
+});
+
 ipcMain.handle('book:delete', async (_e, bookId, title) => {
   const win = BrowserWindow.getFocusedWindow();
   const { response } = await dialog.showMessageBox(win, {
@@ -2464,12 +2585,21 @@ function buildMenu() {
         // the open book's log: the window flips scribesLog in book.json
         {
           label: t('Scribe\'s Log'),
-          type: 'checkbox',
-          checked: slogMenu.on,
           enabled: !!slogMenu.bookId,
-          click: () => sendToWindow({ type: 'scribesLog', bookId: slogMenu.bookId, on: !slogMenu.on })
+          submenu: [
+            {
+              label: t('Log This Book'),
+              type: 'checkbox',
+              checked: slogMenu.on,
+              enabled: !!slogMenu.bookId,
+              click: () => sendToWindow({ type: 'scribesLog', bookId: slogMenu.bookId, on: !slogMenu.on })
+            },
+            ...(slogStampLabel() ? [{ label: slogStampLabel(), enabled: false }] : []),
+            { type: 'separator' },
+            { label: t('Export for Verification…'), enabled: !!slogMenu.bookId, click: () => sendToWindow({ type: 'slogExport', bookId: slogMenu.bookId }) },
+            { label: t('Merge Log into Archive'), enabled: !!slogMenu.bookId, click: () => sendToWindow({ type: 'slogArchive', bookId: slogMenu.bookId }) }
+          ]
         },
-        ...(slogStampLabel() ? [{ label: slogStampLabel(), enabled: false }] : []),
         { label: t('Email Settings…'), click: () => sendToWindow({ type: 'emailSettings' }) },
         { label: t('Cover Art…'), click: () => sendToWindow({ type: 'coverArt' }) },
         {

@@ -2,7 +2,7 @@
 
 The Scribe's Log is a tamper-evident record of how a book was written in NEO. This document defines the files well enough for anyone to write their own checker. NEO's own implementation is `slog.js` (writing) and `slog-verify.js` (checking, shared by NEO, `scripts/slog-check.js` and the standalone verifier).
 
-Draft status: the parts below are implemented and tested. Exports and signatures are reserved and will be specified when they're built.
+Draft status: the parts below are implemented and tested. Signatures are reserved and will be specified when they're built.
 
 ## What it can and can't show
 
@@ -17,6 +17,7 @@ Each book folder holds a `scribes-log/` folder:
 - `log.json`: `{ "v": 1, "logId": "<16 hex>", "key": "<32 bytes, base64>" }`, written once. The key salts text commitments. It's never included in a log shared without its text.
 - Chunk files, `YYYYMMDDTHHMMSSZ-<8 hex>.slog`: one session on one device. The time is the session's start in UTC; the hex is the first 8 characters of the device id. A name already taken gets `-2`, `-3`, and so on before `.slog`. Names sort by time, but chain order is decided by links (below), never by names.
 - `stamps/`: outside timestamp receipts (see Outside timestamps), in files named like chunks but ending `.stamps`, and `stamps/certs/<sha256 of the certificate>.der`, each certificate the receipts are checked with, once.
+- `archive-YYYYMMDDTHHMMSSZ-<8 hex>.zip`: closed chunks and receipt files merged into one file (see Archives). The time is when it was made, in UTC; the hex, the device that made it.
 
 A device id is 128 random bits, made once per installation. It's never derived from hardware.
 
@@ -175,11 +176,64 @@ A manuscript exported as plain text from NEO gives the same `T` once its title p
 
 **Certificates.** RFC 3161 tokens are requested without certificates; `stamps/certs/` holds the signing certificate and its root, so tokens stay checkable after the certificates expire.
 
+## Archives
+
+A long book's log can be merged into one file: NEO's File → Scribe's Log → Merge Log into Archive, only when the writer asks. An archive is a standard zip (stored or deflated entries, UTF-8 names, no zip64) holding files at the paths they had in the folder: chunks at the top (`<chunk>.slog`) and receipt files under `stamps/`, each byte for byte as it was. Nothing else: `log.json` and `stamps/certs/` stay where they are.
+
+A reader takes every archive and every loose file as one folder. The same path in two places must be the same bytes; when one copy is the start of the other (a sync still bringing a file, or a receipt file another device was still writing), the longer is used and that's noted; two copies that differ otherwise are damage, as is an archive that can't be read, an entry whose CRC-32 or size doesn't match, or an entry that isn't a chunk or a receipt file.
+
+When NEO makes an archive it includes every older archive's files, so one archive holds everything merged so far. It takes:
+
+- every closed chunk (one whose last line is `close`), any device's, since a closed chunk never changes;
+- a chunk without `close` only once it's a day old, by its time on disk and its last entry (a session that ended without closing);
+- receipt files no one is still writing: this device's once its stamper has closed them, another device's once they're a day old;
+- never the chunk being written.
+
+It writes the archive, reads it back from the disk and compares every file with what went in, and only then removes the loose files it holds and the older archives. A failure removes the new archive and nothing else. A device whose chunks were archived elsewhere carries on: its chain's next chunk names the archived one as `prevChunk`, as it would a loose one.
+
+## Exports
+
+NEO's File → Scribe's Log → Export for Verification… writes a book's log as one zip for someone else to check. First the session being written closes and its last entry is stamped (NEO waits up to 30 seconds for an RFC 3161 receipt); the manifest says whether the export ends on a stamped entry. There are two kinds:
+
+- **No text** (`"text": "none"`): every chunk line with `x` taken off. Entry hashes cover only the clear part, so every chain still checks, every op still replays by length, and every receipt still checks. `log.json` carries `v` and `logId` but not the key. A line that can't be read can't be cleared of words, so it's replaced by a line starting `!` (still unreadable, so the damage stays visible); a last line cut short is left off.
+- **Full** (`"text": "full"`): every chunk as written, and `log.json` with its key, so every commitment checks and every document replays exactly.
+
+```
+README.txt       what this is, how to check it, what it can and can't show
+verifier.html    the standalone verifier from the NEO that made it
+manifest.json    see below
+log.json
+chunks/<chunk>.slog       every chunk, loose or archived, unpacked
+stamps/<file>.stamps      every receipt file, loose or archived
+stamps/certs/<sha256>.der
+```
+
+`manifest.json`:
+
+| Field | Meaning |
+|---|---|
+| `kind` | `"scribes-log-export"` |
+| `format` | `1` |
+| `text` | `"none"` or `"full"` |
+| `exported` | When, ms UTC |
+| `app` | The NEO version |
+| `title`, `author` | The book's title and its own author name (`book.json`'s `author`, which may be empty) |
+| `logId` | The log's id |
+| `devices` | How many chains |
+| `manuscript` | `{ "hash": <the manuscript hash as the exporting device's chain has it>, "added": [<hex SHA-256>, …] }` (below) |
+| `stamped` | `{ "dev", "n", "tsa", "ots" }`: the exporting device's last entry, and whether an RFC 3161 receipt and an OpenTimestamps proof for it were in hand; `null` if that device has no chain |
+| `intact` | Whether the log checked as it went out |
+| `files` | `[{ "path", "size", "sha256" }]` for every file but `README.txt`, `verifier.html` and `manifest.json` |
+
+A checker compares every file with `files` (a file missing, changed or not listed is a problem), then checks the log as for a folder. The README and the verifier page are NEO's, not the log's, and aren't listed.
+
+**Matching a manuscript without the text.** NEO's own .txt and .docx exports add lines that aren't in the manuscript hash: the title page (title, subtitle, author, "by" and the author), headings, and a contents page. `added` holds the SHA-256 of each such line, normalized as the manuscript hash normalizes text (NFC, whitespace runs to one space, trimmed), as written and in capitals (the .txt sets headings in capitals). A checker drops the lines of a .txt or .docx whose normalized SHA-256 is in `added`, then compares the manuscript hash of what's left with `manuscript.hash`.
+
 ## Checking a log
 
 For each device:
 
-1. Read every chunk whose `open` names that device. Ignore a final line without `\n`, and a chunk with no complete line at all.
+1. Read every chunk whose `open` names that device, loose or in an archive. Ignore a final line without `\n`, and a chunk with no complete line at all.
 2. Order the chunks by links: the first has `prevChunk: null`; each next one names the one before. Two chunks naming the same predecessor is a fork; a chunk no chain reaches is unlinked. Both are damage.
 3. Walk the entries in order. `n` must rise by exactly 1, and each `prev` must equal the hash of the entry before it.
 4. With the key and words present, each `c` must match, each inserted string must have its recorded length, and each `markup` list must match the tags in its string.

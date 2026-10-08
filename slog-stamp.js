@@ -26,6 +26,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const slog = require('./slog.js');
+const files = require('./slog-files.js');
 const ots = require('./stamp-ots.js');
 const tsa = require('./stamp-tsa.js');
 
@@ -72,6 +73,7 @@ class Stamper {
     this.onError = onError;
     this.onChange = onChange;
     this.files = new Map();     // bookKey → the open receipt file
+    this.kept = new Map();      // bookKey → { n, tsa, ots }: the receipts in hand for the newest entry stamped
     this.sending = new Map();   // bookKey → a send in progress
     this.backoff = 0;           // index into BACKOFF; failures in a row
     this.retryAt = 0;
@@ -173,6 +175,48 @@ class Stamper {
     return { last: s ? s.at : null, waiting: !!this.state.queue[key] };
   }
 
+  // The receipt files this computer is still writing for a book (Merge Log
+  // into Archive leaves them be)
+  openReceipts(dir) {
+    const out = new Set();
+    for (const f of this.files.values()) if (f.dir === dir) out.add(f.name);
+    return out;
+  }
+
+  // An export's last stamp: the head `h` ({ dir, bookId, logId, dev, n,
+  // head }) stamped by an RFC 3161 service, waiting up to `wait` ms for it.
+  // A stamp already on its way is waited for; one waiting for the network
+  // is tried now; a head already stamped returns at once. Resolves to
+  // { tsa, ots }: whether a receipt of each kind for entry n is in hand, its
+  // receipt file written out.
+  async settle(h, { wait = 30000 } = {}) {
+    const key = bookKey(h.logId, h.dev);
+    const have = () => this.kept.get(key) || { n: 0, tsa: false, ots: false };
+    const got = () => { const k = have(); return k.n === h.n ? { tsa: k.tsa, ots: k.ots } : { tsa: false, ots: false }; };
+    let timer;
+    const late = new Promise((resolve) => { timer = setTimeout(resolve, wait); });
+    try {
+      const work = (async () => {
+        const inFlight = this.sending.get(key);
+        if (inFlight) await inFlight.catch(() => {});
+        if (got().tsa) return;
+        // read back: a stamp from before NEO was last started
+        const there = readReceipts(h.dir).filter((r) => r.line && r.line.dev === h.dev && r.line.n === h.n && r.line.h === h.head);
+        if (there.length) {
+          this.kept.set(key, { n: h.n, tsa: there.some((r) => r.line.svc !== 'ots'), ots: there.some((r) => r.line.svc === 'ots') });
+          if (got().tsa) return;
+        }
+        if (this.stopped) return;
+        const q = this.state.queue[key];
+        await this._send(q && q.n === h.n ? q : h, q && q.n === h.n ? q.need : (got().ots ? ['tsa'] : null)).catch((err) => this.onError('stamp', err));
+      })();
+      await Promise.race([work, late]);
+    } finally { clearTimeout(timer); }
+    const f = this.files.get(key);
+    if (f) await f.writer.flush().catch(() => {});
+    return got();
+  }
+
   /* ---- sending ---- */
 
   // Stamps one head with every service (or those in `need`). A service that
@@ -262,6 +306,10 @@ class Stamper {
     const key = bookKey(h.logId, h.dev);
     this._receiptFile(h).writer.append(JSON.stringify(line)).catch((err) => this.onError('receipt', err));
     if (verified && verified.signer) this._keepCerts(h);
+    const k = this.kept.get(key);
+    const mark = k && k.n === h.n ? k : { n: h.n, tsa: false, ots: false };
+    mark[line.svc === 'ots' ? 'ots' : 'tsa'] = true;
+    this.kept.set(key, mark);
     const written = this.recorder.stamped(h.dir, h.bookId, h.logId, entry);
     if (written) {
       const s = this.state.stamped[key];
@@ -286,9 +334,9 @@ class Stamper {
     let name;
     for (let k = 1; ; k++) {
       name = `${utcName(this.now())}-${h.dev.slice(0, 8)}${k > 1 ? '-' + k : ''}.stamps`;
-      if (!fs.existsSync(path.join(dir, name))) break;
+      if (!files.logHas(h.dir, STAMP_DIR + '/' + name)) break;
     }
-    f = { name, writer: new slog.ChunkWriter(path.join(dir, name)), closeAt: 0 };
+    f = { name, dir: h.dir, writer: new slog.ChunkWriter(path.join(dir, name)), closeAt: 0 };
     const open = this.recorder.heads().some((x) => bookKey(x.logId, x.dev) === key);
     if (!open) f.closeAt = this.now() + CLOSE_AFTER;
     this.files.set(key, f);
@@ -352,7 +400,7 @@ class Stamper {
         let name;
         for (let k = 1; ; k++) {
           name = `${utcName(this.now())}-${p.dev.slice(0, 8)}${k > 1 ? '-' + k : ''}.stamps`;
-          if (!fs.existsSync(path.join(dir, name))) break;
+          if (!files.logHas(p.dir, STAMP_DIR + '/' + name)) break;
         }
         slog.writeWhole(path.join(dir, name), lines.join('\n') + '\n', { keep: true });
       } catch (err) {
@@ -388,13 +436,14 @@ class Stamper {
 
 // A book's receipts, read back: [{ file, line }] in file order. A last line
 // without its newline (a write cut short) is set aside, as in a chunk.
+// (Loose or merged into an archive.)
 function readReceipts(bookDir) {
-  const dir = path.join(bookDir, slog.LOG_DIR, STAMP_DIR);
+  const listing = files.listLog(bookDir);
   const out = [];
-  let names = [];
-  try { names = fs.readdirSync(dir).filter((f) => RECEIPT_RE.test(f)).sort(); } catch { return out; }
-  for (const file of names) {
-    const text = fs.readFileSync(path.join(dir, file), 'utf8');
+  const names = [...listing.files.keys()].filter((p) => p.startsWith(STAMP_DIR + '/') && RECEIPT_RE.test(p.slice(STAMP_DIR.length + 1))).sort();
+  for (const rel of names) {
+    const file = rel.slice(STAMP_DIR.length + 1);
+    const text = listing.files.get(rel).read().toString('utf8');
     const lines = text.split('\n');
     lines.pop(); // after the last newline: nothing, or a half line
     for (const l of lines) {

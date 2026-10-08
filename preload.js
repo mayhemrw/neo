@@ -68,7 +68,9 @@ contextBridge.exposeInMainWorld('neo', {
     open: (bookId) => ipcRenderer.invoke('slog:open', bookId),
     observe: (bookId, kind, name, value, label) => ipcRenderer.invoke('slog:observe', bookId, kind, name, value, label),
     event: (bookId, ev) => ipcRenderer.invoke('slog:event', bookId, ev),
-    status: (bookId) => ipcRenderer.invoke('slog:status', bookId)
+    status: (bookId) => ipcRenderer.invoke('slog:status', bookId),
+    exportLog: (bookId, opts) => ipcRenderer.invoke('slog:export', bookId, opts),
+    archive: (bookId) => ipcRenderer.invoke('slog:archive', bookId)
   },
 
   writingStyleState: (st) => ipcRenderer.send('style:state', st),

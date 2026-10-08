@@ -3,6 +3,11 @@
 // verifier.html, built from the same slog-verify.js):
 //
 //   node scripts/slog-check.js "<book folder>" [--bitcoin]
+//   node scripts/slog-check.js "<export>.zip" [--bitcoin]
+//
+// A folder's archives (Merge Log into Archive) are read with its loose
+// chunks. An export (Export for Verification…) is checked against its
+// manifest first, then like a folder, without a disk to compare.
 //
 // Every device's chain is checked (numbering, links, commitments, words),
 // replayed from empty, and compared with the documents on disk. The chain
@@ -28,27 +33,15 @@ const fs = require('fs');
 const path = require('path');
 const slog = require('../slog.js');
 const V = require('../slog-verify.js');
+const files = require('../slog-files.js');
 const tsa = require('../stamp-tsa.js');
 const ots = require('../stamp-ots.js');
 
-// A book's scribes-log folder as the checker takes it: { path: text or bytes }
-function loadLog(dir) {
-  const logDir = path.join(dir, slog.LOG_DIR);
-  const files = {};
-  const take = (rel, bytes = false) => {
-    try { files[rel] = bytes ? new Uint8Array(fs.readFileSync(path.join(logDir, rel))) : fs.readFileSync(path.join(logDir, rel), 'utf8'); } catch { /* gone meanwhile */ }
-  };
-  let names = [];
-  try { names = fs.readdirSync(logDir); } catch { return files; }
-  for (const n of names) if (n === slog.LOG_INFO || slog.isChunkName(n)) take(n);
-  let stamps = [];
-  try { stamps = fs.readdirSync(path.join(logDir, 'stamps')); } catch { /* none */ }
-  for (const n of stamps) if (V.RECEIPT_RE.test(n)) take('stamps/' + n);
-  let certs = [];
-  try { certs = fs.readdirSync(path.join(logDir, 'stamps', 'certs')); } catch { /* none */ }
-  for (const n of certs) if (/^[0-9a-f]{64}\.der$/.test(n)) take('stamps/certs/' + n, true);
-  return files;
-}
+// A book's scribes-log folder as the checker takes it: { path: text or
+// bytes }, archives included whole (the core unpacks them)
+const loadLog = (dir) => files.loadLog(dir);
+const zlib = require('zlib');
+const inflateSync = (b) => zlib.inflateRawSync(b);
 
 // The trusted roots and the certificates NEO ships (certs/)
 function shippedCerts() {
@@ -77,19 +70,44 @@ function withDisk(dir, files, res) {
 
 // The chains only: synchronous, no receipts
 function checkBook(dir) {
-  const files = loadLog(dir);
-  const log = V.readLog(files);
-  return withDisk(dir, files, V.checkChains(log));
+  const raw = loadLog(dir);
+  const log = V.readLog(raw, { inflateSync });
+  return withDisk(dir, raw, V.checkChains(log));
 }
 
 // Everything, receipts included
 async function checkBookFull(dir, { bitcoin = false, fetch = globalThis.fetch } = {}) {
-  const files = loadLog(dir);
+  const raw = loadLog(dir);
   const { anchors, certs } = shippedCerts();
-  const res = await V.checkLog(V.readLog(files), {
+  const res = await V.checkLog(V.readLog(raw, { inflateSync }), {
     anchors, certs, bitcoin: bitcoin ? (att) => ots.checkBlock(fetch, att) : null
   });
-  return withDisk(dir, files, res);
+  return withDisk(dir, raw, res);
+}
+
+// An export (.zip from Export for Verification…), or an archive on its
+// own: the files checked against the manifest, then the log as for a
+// folder, with nothing on disk to compare it with
+async function checkZip(file, { bitcoin = false, fetch = globalThis.fetch } = {}) {
+  const bytes = new Uint8Array(fs.readFileSync(file));
+  const { anchors, certs } = shippedCerts();
+  let ex;
+  let given;
+  if (V.isArchiveName(path.basename(file))) {
+    given = { [path.basename(file)]: bytes };
+    // (its log.json is beside it, in the scribes-log folder)
+    try { given[slog.LOG_INFO] = fs.readFileSync(path.join(path.dirname(file), slog.LOG_INFO), 'utf8'); } catch { /* an archive on its own */ }
+    ex = { manifest: null, problems: [] };
+  } else {
+    ex = await files.readExport(bytes);
+    given = ex.files;
+  }
+  const res = await V.checkLog(given, { anchors, certs, inflateSync, bitcoin: bitcoin ? (att) => ots.checkBlock(fetch, att) : null });
+  res.problems = [...ex.problems, ...res.problems];
+  res.ok = res.ok && !ex.problems.length;
+  res.manifest = ex.manifest;
+  res.devices = res.devices.map((d) => ({ ...d, chainEntries: d.entries, chunks: d.chunks.length, entries: d.entries.length, lastTs: d.last || 0, differ: null }));
+  return res;
 }
 
 const when = (ms) => (ms == null ? '?' : new Date(ms).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z'));
@@ -101,6 +119,12 @@ const span = (ms) => {
 
 function report(dir, res) {
   const lines = [`Scribe's Log: ${dir}`];
+  const m = res.manifest;
+  if (m) {
+    lines.push(`export: ${m.text === 'full' ? 'with the text' : 'no text'}, made ${when(m.exported)} by NEO ${m.app}; "${m.title}"${m.author ? ' by ' + m.author : ''}`);
+    lines.push(`  manuscript hash ${m.manuscript && m.manuscript.hash}; ${m.stamped && m.stamped.tsa ? 'ends on an outside timestamp' : 'the last stretch isn\'t stamped'}`);
+  }
+  if (res.archives && res.archives.length) lines.push('archives: ' + res.archives.map((a) => `${a.name} (${a.files} files)`).join(', '));
   for (const p of res.problems) lines.push('  problem: ' + p);
   res.devices.forEach((d, i) => {
     const newest = i === res.devices.length - 1;
@@ -121,9 +145,11 @@ function report(dir, res) {
     }
     for (const p of d.problems.slice(0, 20)) lines.push('  problem: ' + JSON.stringify(p));
     for (const n of d.notes) lines.push('  note: ' + JSON.stringify(n));
-    lines.push(d.differ.length
-      ? `  replay differs from disk in: ${d.differ.join(', ')}`
-      : '  replay matches the disk exactly');
+    if (d.differ) {
+      lines.push(d.differ.length
+        ? `  replay differs from disk in: ${d.differ.join(', ')}`
+        : '  replay matches the disk exactly');
+    }
     const cov = res.coverage && res.coverage.get(d.dev);
     if (cov) {
       const last = cov.stamps[cov.stamps.length - 1];
@@ -161,10 +187,11 @@ if (require.main === module) {
   const args = process.argv.slice(2);
   const dir = (args.find((a) => !a.startsWith('--')) || '').replace(/"+$/, '');
   if (!dir) {
-    console.error('usage: node scripts/slog-check.js "<book folder>" [--bitcoin]');
+    console.error('usage: node scripts/slog-check.js "<book folder>" | "<export or archive .zip>" [--bitcoin]');
     process.exit(2);
   }
-  checkBookFull(path.resolve(dir), { bitcoin: args.includes('--bitcoin') }).then((res) => {
+  const zip = /\.zip$/i.test(dir) && fs.statSync(dir).isFile();
+  (zip ? checkZip(path.resolve(dir), { bitcoin: args.includes('--bitcoin') }) : checkBookFull(path.resolve(dir), { bitcoin: args.includes('--bitcoin') })).then((res) => {
     console.log(report(dir, res));
     process.exit(res.ok ? 0 : 1);
   }, (err) => {
@@ -173,4 +200,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { checkBook, checkBookFull, loadLog, report };
+module.exports = { checkBook, checkBookFull, checkZip, loadLog, report };
