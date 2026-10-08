@@ -807,6 +807,7 @@
           if (!Array.isArray(pieces)) throw new Error('from isn\'t a list');
           const before = pieces.some((p) => p && p[3] && p[3].doc === e.doc && !isDevSource(p[3])) ? { text: d.text, len: d.len, runs: d.runs.slice() } : null;
           const own = originOf(e);
+          const clean = problems.length;
           let last = [-1, 0];
           e.ops.forEach((op, i) => {
             const [at, del, len] = op;
@@ -857,10 +858,36 @@
             d.len += len - del;
           });
           runsTidy(d.runs);
+          if (e.src === 'arrived' && problems.length === clean) this._adopt(pieces, d);
         }
       } catch (err) {
         problems.push({ ...where, problem: err.message });
       }
+    }
+
+    // An arrival that leaves a document exactly as another device's stood
+    // takes that device's origins whole. Which of two like characters an
+    // edit kept and which it put in is only the diff's guess (a sentence
+    // moved to just after a full stop can come out as keeping the stop
+    // and putting in the sentence's own), so pieces alone can trade one
+    // origin for another; the device that made the change knows. Only when
+    // every piece names the same entry of the same device, and the lengths
+    // (and the words, when they're here) are the same.
+    _adopt(pieces, d) {
+      let one = null;
+      for (const p of pieces) {
+        const s = Array.isArray(p) ? p[3] : null;
+        if (!isDevSource(s)) return;
+        if (one && (s.dev !== one.dev || s.n !== one.n || s.doc !== one.doc)) return;
+        one = s;
+      }
+      if (!one || !this.resolve) return;
+      const r = this.resolve(one.dev, one.n, one.doc);
+      if (!r || r.error) return;
+      const src = r.state;
+      if (src.len !== d.len) return;
+      if (d.text !== null && src.text != null && d.text !== src.text) return;
+      d.runs = src.runs.slice();
     }
 
     // The origins a piece takes from its source, checked: it must fit

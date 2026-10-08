@@ -215,6 +215,33 @@ describe('slog-verify: text from another device', () => {
     assert.deepEqual(origins(d, 'ch-1', TYPED), ['typed']);
     assert.deepEqual(origins(d, 'ch-1', PASTED), ['paste']);
   });
+
+  test('an arrival takes the other device\'s origins whole, not the diff\'s guess at which full stop is which', async () => {
+    // A types a sentence; B moves it to the end; A's diff of what arrived
+    // keeps the moved sentence's stop and puts in the one before it
+    const a = chainOf(DEV_A);
+    const b = chainOf(DEV_B, { start: T0 + 1000 });
+    a.open();
+    const start = '<p>Calm.</p><p>End.</p>';
+    a.base('ch-1', 'import', start);
+    const typed = a.edit('ch-1', 'typed', [[8, 0, 6]], [' Wind.']);
+    const was = '<p>Calm. Wind.</p><p>End.</p>';
+    b.open();
+    b.base('ch-1', 'arrived', was, { from: [[0, 0, was.length, { dev: DEV_A, n: typed.n, doc: 'ch-1', at: 0 }]] });
+    const now = '<p>Calm.</p><p>End. Wind.</p>';
+    const moved = b.add('edit', { doc: 'ch-1', src: 'move', ops: slog.recordOps([[8, 6, 0], [19, 0, 6]], ['', ' Wind.']), from: [[1, 0, 6, { n: b.chain.n + 1, op: 0, at: 0 }]] }, ['', ' Wind.']);
+    b.close();
+    const at = now.indexOf('End') + 3; // (A's diff: Calm's stop and " Wind" out, ". Wind" in after End)
+    a.edit('ch-1', 'arrived', [[7, 6, 0], [at, 0, 6]], ['', '. Wind'], { from: [[1, 0, 6, { dev: DEV_B, n: moved.n, doc: 'ch-1', at }]] });
+    a.close();
+    for (const words of [true, false]) {
+      const res = await V.checkLog(filesOf([a, b], { key: words, words }));
+      const d = devOf(res, DEV_A);
+      assert.equal(res.ok, true, JSON.stringify(res.devices.map((x) => x.problems)));
+      assert.deepEqual(d.traced['ch-1'].runs, devOf(res, DEV_B).traced['ch-1'].runs, 'A\'s origins are B\'s, ' + (words ? 'with' : 'without') + ' the words');
+      if (words) assert.deepEqual([...new Set(origins(d, 'ch-1', ' Wind.'))], ['typed']);
+    }
+  });
 });
 
 describe('slog-verify: receipts, coverage and the clock', () => {
