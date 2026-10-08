@@ -123,6 +123,48 @@ describe('slog-verify: the core on its own', () => {
   });
 });
 
+describe('slog-verify: runs of origins', () => {
+  // the lists the Tracer keeps (each search starts where the last change
+  // was, and each insert tidies its own place): against a plain list of
+  // one origin per unit, over thousands of random cuts and inserts, the
+  // units always agree and the list is always tidy
+  test('cut and insert anywhere, in any order: the same units, always tidy', () => {
+    let seed = 11;
+    const rnd = (n) => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return (seed >>> 8) % n; };
+    const O = ['a', 'b', 'c', 'd|1||', 'd|1||t'];
+    let grown = 0;
+    for (let round = 0; round < 40; round++) {
+      const runs = [];
+      let units = [];
+      for (let step = 0; step < 300; step++) {
+        const len = units.length;
+        // mostly near the last change, as writing is; sometimes anywhere
+        const at = step && rnd(4) ? Math.min(len, Math.max(0, (runs._last || 0) + rnd(9) - 4)) : rnd(len + 1);
+        // (more put in than taken out, so the list grows to hundreds of runs)
+        const del = rnd(3) ? 0 : rnd(Math.min(8, len - at) + 1);
+        const add = [];
+        let addUnits = [];
+        for (let k = rnd(4); k > 0; k--) {
+          const n = rnd(7); // (an empty run now and then, as a cut can leave)
+          const o = O[rnd(O.length)];
+          add.push([n, o]);
+          addUnits = addUnits.concat(Array(n).fill(o));
+        }
+        const gone = V.runsCut(runs, at, del);
+        assert.deepEqual(gone.flatMap(([n, o]) => Array(n).fill(o)), units.slice(at, at + del));
+        V.runsInsert(runs, at, add);
+        units = units.slice(0, at).concat(addUnits, units.slice(at + del));
+        runs._last = at;
+        assert.ok(runs.every(([n]) => n > 0), `round ${round}, step ${step}: no empty or negative run`);
+        assert.deepEqual(runs.flatMap(([n, o]) => Array(n).fill(o)), units, `round ${round}, step ${step}`);
+        for (let i = 1; i < runs.length; i++) assert.notEqual(runs[i][1], runs[i - 1][1], 'neighbors differ');
+      }
+      grown = Math.max(grown, runs.length);
+    }
+    assert.ok(grown > 100, 'the lists grew long: ' + grown);
+  });
+});
+
 describe('slog-verify: text from another device', () => {
   // A types and pastes; B's first open finds A's text (arrived)
   function twoDevices({ link }) {

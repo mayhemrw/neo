@@ -555,43 +555,96 @@
 
   // Runs of units that share an origin: [[length, origin], …]. A run is
   // never changed in place, so a list can be copied by its array alone.
+  //
+  // A long document's runs number in the thousands (the report's detailed
+  // origins split them by the hour), and each op used to walk them from the
+  // start. Writing happens in one place for a while, so the list remembers
+  // where the last change was ([index, offset of that run's start], kept
+  // aside in `PLACES`) and the next search starts there. Only these four
+  // functions change a list, and each leaves its place right; a copy
+  // (slice) has none and starts from the front. The results are the same
+  // either way.
+  const PLACES = new WeakMap();
   function runsSplit(runs, pos) {
+    let i = 0;
     let acc = 0;
-    for (let i = 0; i < runs.length; i++) {
-      if (acc === pos) return i;
+    const h = PLACES.get(runs);
+    if (h && h[0] <= runs.length) {
+      i = h[0];
+      acc = h[1];
+      // back to the first run that starts at or before pos (and before any
+      // empty runs at pos, as a walk from the front would find it)
+      while (i > 0 && (pos < acc || (pos === acc && runs[i - 1][0] === 0))) { i--; acc -= runs[i][0]; }
+    }
+    for (; i < runs.length; i++) {
+      if (acc === pos) { PLACES.set(runs, [i, acc]); return i; }
       const [len, o] = runs[i];
       if (pos < acc + len) {
         runs.splice(i, 1, [pos - acc, o], [acc + len - pos, o]);
+        PLACES.set(runs, [i + 1, pos]);
         return i + 1;
       }
       acc += len;
     }
-    if (acc === pos) return runs.length;
+    if (acc === pos) { PLACES.set(runs, [runs.length, acc]); return runs.length; }
     throw new Error('op out of range');
   }
   function runsCut(runs, at, len) {
     const i = runsSplit(runs, at);
     const j = runsSplit(runs, at + len);
-    return runs.splice(i, j - i);
+    const out = runs.splice(i, j - i);
+    PLACES.set(runs, [i, at]);
+    return out;
   }
   function runsSlice(runs, at, len) {
     const copy = runs.slice();
     return runsCut(copy, at, len);
   }
+  // (and tidies the place it changed: the run before, what went in and the
+  // run after, merged where they share an origin and empty runs dropped.
+  // A cut leaves its place to the insert that always follows it, so a
+  // list kept this way stays tidy without a pass over the whole of it.)
   function runsInsert(runs, at, add) {
-    runs.splice(runsSplit(runs, at), 0, ...add);
+    const i = runsSplit(runs, at);
+    runs.splice(i, 0, ...add);
+    const a = i > 0 ? i - 1 : 0;
+    const start = i > 0 ? at - runs[i - 1][0] : at;
+    const end = Math.min(runs.length, i + add.length + 1);
+    const out = [];
+    for (let k = a; k < end; k++) {
+      const r = runs[k];
+      if (!r[0]) continue;
+      const last = out[out.length - 1];
+      if (last && last[1] === r[1]) out[out.length - 1] = [last[0] + r[0], r[1]];
+      else out.push(r);
+    }
+    runs.splice(a, end - a, ...out);
+    PLACES.set(runs, [a, start]);
   }
   function runsTidy(runs) {
+    const h = PLACES.get(runs);
+    let hi = h ? h[0] : -1;
+    let nh = null;
     let w = 0;
-    for (const r of runs) {
-      if (!r[0]) continue;
-      if (w && runs[w - 1][1] === r[1]) runs[w - 1] = [runs[w - 1][0] + r[0], r[1]];
-      else runs[w++] = r;
+    let acc = 0;
+    let lastStart = 0;
+    for (let k = 0; k < runs.length; k++) {
+      const r = runs[k];
+      if (!r[0]) { if (k === hi) hi++; continue; } // (a place on an empty run moves on to the next)
+      if (w && runs[w - 1][1] === r[1]) {
+        runs[w - 1] = [runs[w - 1][0] + r[0], r[1]];
+        if (k === hi) nh = [w - 1, lastStart];
+      } else {
+        if (k === hi) nh = [w, acc];
+        lastStart = acc;
+        runs[w++] = r;
+      }
+      acc += r[0];
     }
     runs.length = w;
+    if (h) PLACES.set(runs, nh || [w, acc]);
     return runs;
   }
-
   // Where an entry's own words come from, when no `from` piece says otherwise
   function originOf(e) {
     if (e.kind === 'edit' && e.src === 'unlogged' && e.cause === 'off') return 'while off';
@@ -618,16 +671,29 @@
     return runs.map(([len, o]) => { const p = parseOrigin(o); return p.hour === null && !o.includes('|') ? [len, o] : [len, detailOrigin(p.cat, p.hour, p.paste, true, p.tag)]; });
   }
   // the origin of the nearest unit of prose (not markup) before pos (dir
-  // -1) or at or after it (dir 1), or null
+  // -1) or at or after it (dir 1), or null. Searched from the run around
+  // pos (found from the list's last place, as runsSplit does), outwards.
+  const isTagOrigin = (o) => o.charCodeAt(o.length - 1) === 116 && o.includes('|'); // ("…|t" or "…|mt")
   function proseNear(runs, pos, dir) {
-    const starts = [];
+    let i = 0;
     let acc = 0;
-    for (const r of runs) { starts.push(acc); acc += r[0]; }
-    if (dir < 0) {
-      for (let i = runs.length - 1; i >= 0; i--) if (starts[i] < pos && !parseOrigin(runs[i][1]).tag) return runs[i][1];
-    } else {
-      for (let i = 0; i < runs.length; i++) if (starts[i] + runs[i][0] > pos && !parseOrigin(runs[i][1]).tag) return runs[i][1];
+    const h = PLACES.get(runs);
+    if (h && h[0] <= runs.length) {
+      i = h[0];
+      acc = h[1];
+      while (i > 0 && pos < acc) { i--; acc -= runs[i][0]; }
     }
+    // the first run that ends after pos: every run before it ends at or before pos
+    while (i < runs.length && acc + runs[i][0] <= pos) { acc += runs[i][0]; i++; }
+    if (dir < 0) {
+      let start = acc;
+      for (let k = i; k >= 0; k--) {
+        if (k < i) start -= runs[k][0];
+        if (k < runs.length && start < pos && !isTagOrigin(runs[k][1])) return runs[k][1];
+      }
+      return null;
+    }
+    for (let k = i; k < runs.length; k++) if (!isTagOrigin(runs[k][1])) return runs[k][1];
     return null;
   }
 
@@ -859,7 +925,7 @@
             if (d.text !== null) d.text = put !== null ? d.text.slice(0, at) + put + d.text.slice(at + del) : (len ? null : d.text.slice(0, at) + d.text.slice(at + del));
             d.len += len - del;
           });
-          runsTidy(d.runs);
+          // (each op's insert tidied its own place: no pass over the whole list)
           if (e.src === 'arrived' && problems.length === clean) this._adopt(pieces, d);
         }
       } catch (err) {
@@ -1522,7 +1588,7 @@
     canonical, useHash, sha256hex, clearPart, entryHash, saltFor, commitment, normalizeManuscript, manuscriptHash,
     markupRanges, applyOps, applyLengths, insertOffsets, viewOf, sameChar,
     parseLines, parseChunk, readLog, logPaths, readExportFiles, EXPORT_EXTRAS, mergeArchives, expandArchivesSync, expandArchives, orderChunks, verifyChain, Replayer, replay,
-    runsTidy, runsSlice, originOf, Tracer, trace, traceAll, matchArrivals,
+    runsTidy, runsSlice, runsCut, runsInsert, originOf, Tracer, trace, traceAll, matchArrivals,
     detailOrigin, parseOrigin, originCat,
     AUX_DOCS, JSON_DOCS, chapterDoc, docChapter, decodeEntities, chapterLines, manuscriptText, proseMask, composition, originsAt,
     checkReceipts, matchStampEntries, coverage, clockCheck, deviceNames, checkChains, checkLog,

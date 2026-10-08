@@ -235,7 +235,7 @@ npm run package:linux      # AppImage via electron-builder; also package, packag
 
 Tests use `node:test` and load `app.js` or `spell-worker.js` inside `vm`. They are not run by CI. The only CI check is a Windows smoke test that the packaged exe boots and creates a library (`.github/workflows/build.yml`, on `v*` tags). Pocket builds from `.github/workflows/pocket.yml`.
 
-`node scripts/history-bench.js [sessions] [entries per session]` times versions and playback on a synthetic novel-length log (600 sessions, 200,000 entries by default). `node scripts/check-romanian-package.js <Resources dir>` compares a packaged app's dictionaries to the source tree. `node scripts/benchmark-spellcheck.js` times the checker. Neither is an npm script.
+`node scripts/history-bench.js [sessions] [entries per session]` times versions, playback and the verification report on a synthetic novel-length log (600 sessions, 200,000 entries by default). `node scripts/check-romanian-package.js <Resources dir>` compares a packaged app's dictionaries to the source tree. `node scripts/benchmark-spellcheck.js` times the checker. Neither is an npm script.
 
 ## Handing changes to Hugh
 

@@ -147,4 +147,16 @@ console.log(`checkpoints: ${cpN.length} plus the tail, ${(cpBytes / 1e6).toFixed
   console.log(`playback, ${doc} (${pb.length} steps): log read ${tRead.toFixed(0)} ms, built ${tBuild.toFixed(0)} ms, every frame in order ${(tPlay / (pb.length + 1)).toFixed(2)} ms each, 200 seeks ${(tSeek / 200).toFixed(1)} ms each, ends as on disk: ${ok}`);
   console.log(`playback as data: ${(json.length / 1e6).toFixed(1)} MB, ${tData.toFixed(0)} ms out, ${tBack.toFixed(0)} ms back, ends as on disk: ${same}`);
 }
-fs.rmSync(root, { recursive: true, force: true });
+// the verification report on the same log: checked, then counted (the
+// report's detailed origins), as File → Scribe's Log → Verification Report… does
+(async () => {
+  const V = require('../slog-verify.js');
+  const F = require('../slog-files.js');
+  const R = require('../slog-report.js');
+  const t0 = Date.now();
+  const res = await V.checkLog(F.loadLog(dir));
+  const t1 = Date.now();
+  const stats = R.reportStats(res, {});
+  console.log(`report: checked in ${((t1 - t0) / 1000).toFixed(1)} s (ok ${res.ok}), counted in ${((Date.now() - t1) / 1000).toFixed(1)} s, ${stats.total} characters`);
+  fs.rmSync(root, { recursive: true, force: true });
+})();
