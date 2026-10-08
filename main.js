@@ -605,6 +605,50 @@ function slogImportToken(fp, parsed) {
 }
 
 // ---------------------------------------------------------------------------
+// Versions (slog-history.js): a chapter's past versions are rebuilt from the
+// log; what the log can't hold lives in the book's versions/ folder: the
+// versions the writer names, and with the log off, a copy of the chapters
+// each session changed. None of it is part of the log or its exports.
+// ---------------------------------------------------------------------------
+const slogHistory = require('./slog-history.js');
+let historyCopies = null;
+function sessionCopies() {
+  if (!historyCopies) {
+    historyCopies = new slogHistory.SessionCopies({
+      dev: () => scribe().device(),
+      idleMs: slog.IDLE_MS,
+      onError: (where, err) => logError(where, err)
+    });
+  }
+  return historyCopies;
+}
+// Whether a book's versions come from copies: its log is switched off (or
+// can't be read). Asked after the log has squared itself with the disk.
+function historyFromCopies(bookId) {
+  const st = slogTap((s) => s.status(bookDir(bookId), bookId));
+  return !!st && !(st.on && st.logging);
+}
+function historyTap(fn) {
+  try { return fn(sessionCopies()); } catch (err) { logError('versions', err); return undefined; }
+}
+// A named version of the whole book as it stands: with the log on, where
+// this computer's chain stands once everything so far is on disk; with it
+// off, a copy of every chapter. auto: null (the writer named it), or what
+// named it: 'restore' before a restore, 'replace' before Replace All
+// (phase 4), 'word' at a Word export (phase 6). Returns the version.
+async function historyMark(bookId, name, auto = null) {
+  const dir = bookDir(bookId);
+  const dev = scribe().device();
+  let head = null;
+  try { head = await scribe().head(dir, bookId); } catch (err) { logError('scribe\'s log', err); }
+  const at = Date.now();
+  const copy = head ? null : slogHistory.copyWholeBook(dir, { dev, at });
+  return slogHistory.writeNamed(dir, { name, auto, at, dev, head, copy });
+}
+// what later phases call (Replace All, Word export)
+const history = { mark: historyMark };
+
+// ---------------------------------------------------------------------------
 // IPC — the renderer's whole view of the disk
 // ---------------------------------------------------------------------------
 
@@ -682,8 +726,9 @@ ipcMain.handle('book:duplicate', (_e, bookId, title) => {
     Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
   const dest = bookDir(id);
   // a chapter iCloud hasn't brought down yet would be missing from the copy
-  // (the Scribe's Log isn't copied, so its chunks needn't be down)
-  const waiting = (dir) => fs.readdirSync(dir, { withFileTypes: true }).some((e) => (e.isDirectory() ? !(dir === src && e.name === slog.LOG_DIR) && waiting(path.join(dir, e.name)) : /\.icloud$/.test(e.name)));
+  // (the Scribe's Log and versions aren't copied, so they needn't be down)
+  const own = (name) => name === slog.LOG_DIR || name === slogHistory.VERSIONS_DIR;
+  const waiting = (dir) => fs.readdirSync(dir, { withFileTypes: true }).some((e) => (e.isDirectory() ? !(dir === src && own(e.name)) && waiting(path.join(dir, e.name)) : /\.icloud$/.test(e.name)));
   if (waiting(src)) throw new Error('Some of this book is still downloading from iCloud. Try again in a moment');
   const copyDir = (from, to) => {
     fs.mkdirSync(to, { recursive: true });
@@ -691,8 +736,9 @@ ipcMain.handle('book:duplicate', (_e, bookId, title) => {
       // (a write caught halfway, a spare copy, a placeholder: not the book)
       if (/\.(tmp|bak|icloud)$/.test(ent.name) || ent.name === 'book.json') continue;
       // (the original's Scribe's Log stays its own: the copy starts a log of
-      // its own, from a baseline of what was copied that names the original's)
-      if (from === src && ent.name === slog.LOG_DIR) continue;
+      // its own, from a baseline of what was copied that names the
+      // original's. Its versions stay too: the copy's history starts here.)
+      if (from === src && own(ent.name)) continue;
       const a = path.join(from, ent.name);
       const b = path.join(to, ent.name);
       if (ent.isDirectory()) copyDir(a, b);
@@ -752,6 +798,8 @@ ipcMain.handle('book:writeMeta', (_e, bookId, meta) => {
   meta.modified = new Date().toISOString();
   writeJSON(path.join(dir, 'book.json'), meta);
   slogTap((s) => s.metaWritten(dir, bookId, meta));
+  // (the log switched back on: the stretch with it off ends here)
+  if (meta.scribesLog !== false && !historyFromCopies(bookId)) historyTap((c) => c.end(bookId));
   writeCatalog();
   return meta.modified;
 });
@@ -808,6 +856,7 @@ ipcMain.handle('chapter:write', (_e, bookId, chapterId, html, expected) => {
   }
   writeFileDurable(file, html);
   slogTap((s) => s.wrote(bookDir(bookId), bookId, doc, html));
+  if (historyFromCopies(bookId)) historyTap((c) => c.saved(bookDir(bookId), bookId, chapterId));
   return true;
 });
 // shared with Pocket's bridge (same rule): the disk copy differs from what
@@ -829,6 +878,12 @@ function chapterDiverged(cur, expected, html) {
 ipcMain.handle('chapter:delete', (_e, bookId, chapterId) => {
   const file = path.join(bookDir(bookId), 'chapters', libName(chapterId) + '.html');
   slogTap((s) => s.touch(bookDir(bookId), bookId));
+  // (with the log off, its last words go in the session's copy)
+  if (fs.existsSync(file) && historyFromCopies(bookId)) {
+    let last = null;
+    try { last = fs.readFileSync(file, 'utf8'); } catch { /* gone already */ }
+    historyTap((c) => c.deleting(bookDir(bookId), bookId, chapterId, last));
+  }
   if (fs.existsSync(file)) fs.unlinkSync(file);
   slogTap((s) => s.removed(bookDir(bookId), bookId, slog.chapterDoc(chapterId)));
   return true;
@@ -895,9 +950,38 @@ ipcMain.handle('slog:event', (_e, bookId, ev) => {
   libName(bookId);
   if (!ev || ev.type !== 'close') return null;
   if (slogMenu.bookId === bookId) { slogMenu.bookId = null; slogMenuRefresh(true); }
+  historyTap((c) => c.end(bookId));
   return slogTap((s) => s.close(bookId, 'close')) || null;
 });
 ipcMain.handle('slog:status', (_e, bookId) => slogTap((s) => s.status(bookDir(bookId), bookId)) || null);
+
+// Named versions. mark: File → Name This Version… (the window has saved
+// everything first). named: the book's named versions, oldest first, each
+// with whether this computer made it. rename / remove: one version's file.
+ipcMain.handle('history:mark', async (_e, bookId, name) => {
+  const clean = slogHistory.cleanName(name);
+  if (!clean) return { error: t('A version needs a name.') };
+  try {
+    return await history.mark(bookId, clean);
+  } catch (err) {
+    logError('versions', err);
+    return { error: t('The version wasn\'t saved: {why}', { why: err.message }) };
+  }
+});
+ipcMain.handle('history:named', (_e, bookId) => {
+  const dev = slogTap((s) => s.device());
+  return slogHistory.listNamed(bookDir(bookId)).map((v) => ({ ...v, mine: v.dev === dev }));
+});
+ipcMain.handle('history:rename', (_e, bookId, file, name) => {
+  const dir = bookDir(bookId);
+  libName(file);
+  try { return slogHistory.renameNamed(dir, file, name); } catch (err) { return { error: err.message }; }
+});
+ipcMain.handle('history:remove', (_e, bookId, file) => {
+  const dir = bookDir(bookId);
+  libName(file);
+  try { return slogHistory.deleteNamed(dir, file); } catch (err) { logError('versions', err); return false; }
+});
 
 // File → Scribe's Log → Export for Verification…: the book's whole log in
 // one .zip, with its own copy of the verifier, for someone else to check.
@@ -1124,6 +1208,7 @@ ipcMain.handle('book:delete', async (_e, bookId, title) => {
     const { shell } = require('electron');
     // the log's last line goes down before the folder moves
     await Promise.resolve(slogTap((s) => s.drop(bookId))).catch((err) => logError('scribe\'s log', err));
+    historyTap((c) => c.drop(bookId));
     if (slogMenu.bookId === bookId) { slogMenu.bookId = null; slogMenuRefresh(true); }
     try {
       await shell.trashItem(bookDir(bookId));
@@ -2672,6 +2757,7 @@ function buildMenu() {
           accelerator: 'CmdOrCtrl+E',
           click: () => sendToWindow({ type: 'emailDraft' })
         },
+        { label: t('Name This Version…'), enabled: !!slogMenu.bookId, click: () => sendToWindow({ type: 'nameVersion', bookId: slogMenu.bookId }) },
         // the open book's log: the window flips scribesLog in book.json
         {
           label: t('Scribe\'s Log'),
@@ -3370,6 +3456,8 @@ app.on('window-all-closed', () => {
 // up to a few seconds, then goes ahead.
 let slogQuitting = false;
 app.on('will-quit', (e) => {
+  // (a log-off book's session copy: written now, it's quick and synchronous)
+  if (!slogQuitting && historyCopies) historyTap((c) => c.endAll());
   if (slogQuitting || !slogRecorder || (!slogRecorder.busy() && !slogStamper)) return;
   e.preventDefault();
   slogQuitting = true;

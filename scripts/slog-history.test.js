@@ -12,7 +12,8 @@ const path = require('node:path');
 const { describe, test } = require('node:test');
 const slog = require('../slog.js');
 const F = require('../slog-files.js');
-const { History, chapterWords } = require('../slog-history.js');
+const H = require('../slog-history.js');
+const { History, chapterWords } = H;
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'neo-history-'));
 let made = 0;
@@ -248,5 +249,182 @@ describe('History', { concurrency: 1 }, () => {
     assert.equal(ix.logId, null);
     assert.deepEqual(ix.chapters, {});
     assert.match(env.history().rebuild(env.dir, 'x', 1).error, /no Scribe's Log/);
+  });
+});
+
+// The book's versions/ folder: named versions (from the log, or from a copy
+// of the book with it off) and the copies log-off sessions leave behind.
+describe('Versions in the book', { concurrency: 1 }, () => {
+  const DEV_A = 'a'.repeat(32);
+  const DEV_B = 'b'.repeat(32);
+  const vdir = (env) => path.join(env.dir, H.VERSIONS_DIR);
+  const write = (env, id, html) => fs.writeFileSync(path.join(env.dir, 'chapters', id + '.html'), html);
+
+  test('names are one clean line; each file is written once', () => {
+    const env = setup();
+    assert.equal(H.cleanName('  Sent\tto\n Maria\u0007 '), 'Sent to Maria');
+    assert.equal(H.cleanName('x'.repeat(500)).length, 120);
+    assert.equal(H.cleanName(' \n '), '');
+    const at = Date.UTC(2026, 9, 8, 19, 3, 12);
+    const head = { dev: DEV_A, n: 4, h: 'c'.repeat(64) };
+    const a = H.writeNamed(env.dir, { name: 'Sent to Maria', at, dev: DEV_A, head });
+    const b = H.writeNamed(env.dir, { name: 'Same second', at, dev: DEV_A, head, auto: 'restore' });
+    assert.equal(a.file, '20261008T190312Z-aaaaaaaa.json');
+    assert.equal(b.file, '20261008T190312Z-aaaaaaaa-2.json');
+    assert.deepEqual({ ...a }, { file: a.file, name: 'Sent to Maria', at, dev: DEV_A, auto: null, n: 4, h: head.h });
+    assert.equal(b.auto, 'restore');
+    assert.throws(() => H.writeNamed(env.dir, { name: '  ', at, dev: DEV_A, head }), /needs a name/);
+    // what isn't a named version is passed over: half-written, a sync
+    // service's conflict copy, someone else's file, nonsense
+    fs.writeFileSync(path.join(vdir(env), '20261008T190312Z-aaaaaaaa.json.tmp'), '{');
+    fs.writeFileSync(path.join(vdir(env), '20261008T190312Z-aaaaaaaa (1).json'), fs.readFileSync(path.join(vdir(env), a.file)));
+    fs.writeFileSync(path.join(vdir(env), 'notes.json'), '{}');
+    fs.writeFileSync(path.join(vdir(env), '20261008T200000Z-aaaaaaaa.json'), '{"v":1,"name":"no head","at":1,"dev":"x"}');
+    assert.deepEqual(H.listNamed(env.dir).map((v) => v.name), ['Sent to Maria', 'Same second']);
+    // renaming rewrites that file only; deleting removes it
+    const r = H.renameNamed(env.dir, a.file, ' For the agent ');
+    assert.equal(r.name, 'For the agent');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(vdir(env), a.file), 'utf8')).n, 4);
+    assert.throws(() => H.renameNamed(env.dir, '../book.json', 'x'), /isn't there/);
+    assert.equal(H.deleteNamed(env.dir, b.file), true);
+    assert.equal(H.deleteNamed(env.dir, b.file), false);
+    assert.deepEqual(H.listNamed(env.dir).map((v) => v.name), ['For the agent']);
+  });
+
+  test('a named version from the log is the book where the chain stood', async () => {
+    const env = setup({ chapters: { 'ch-1': '<p>First.</p>' } });
+    const rec = env.recorder();
+    rec.open(env.dir, 'book-a');
+    save(rec, env, 'ch-1', '<p>First, then second.</p>');
+    const head = await rec.head(env.dir, 'book-a');
+    assert.equal(head.dev, rec.device());
+    const named = H.writeNamed(env.dir, { name: 'Sent to Maria', at: env.clock, dev: head.dev, head });
+    save(rec, env, 'ch-1', '<p>Rewritten after.</p>');
+    await rec.close('book-a');
+    const h = env.history();
+    assert.equal(h.versionText(env.dir, { named: named.file }, 'ch-1').text, '<p>First, then second.</p>');
+    assert.match(h.versionText(env.dir, { named: named.file }, 'ch-9').error, /didn't exist then/);
+    // the same from a checkpoint at exactly that entry
+    const cp = env.history({ home: path.join(env.root, 'other'), every: 1 });
+    cp.index(env.dir);
+    assert.equal(cp.versionText(env.dir, { named: named.file }, 'ch-1').text, '<p>First, then second.</p>');
+    // a version file pointing at the wrong entry shows nothing
+    const file = path.join(vdir(env), named.file);
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    fs.writeFileSync(file, JSON.stringify({ ...raw, h: 'f'.repeat(64) }));
+    assert.match(h.versionText(env.dir, { named: named.file }, 'ch-1').error, /doesn't match the book's log/);
+    fs.writeFileSync(file, JSON.stringify({ ...raw, n: raw.n + 50 }));
+    assert.match(h.versionText(env.dir, { named: named.file }, 'ch-1').error, /isn't in that computer's chain/);
+    // nothing in versions/ is a document of the book, or part of its log
+    assert.ok(!Object.keys(slog.readBookDocs(env.dir).docs).some((d) => /version/.test(d)));
+    assert.deepEqual(h.index(env.dir).problems, []);
+    assert.deepEqual(env.errors, []);
+  });
+
+  test('with the log off: no head, and a session copies only what changed', async () => {
+    const env = setup({ chapters: { 'ch-1': '<p>One.</p>', 'ch-2': '<p>Two.</p>', 'ch-3': '<p>Three.</p>' }, titles: { 'ch-2': 'Middle' } });
+    saveMeta(env.recorder(), env, { ...env.meta, scribesLog: false });
+    const rec = env.recorder();
+    assert.equal(await rec.head(env.dir, 'book-a'), null);
+    let clock = Date.UTC(2026, 9, 8, 20, 15, 0);
+    const copies = new H.SessionCopies({ dev: () => DEV_A, now: () => (clock += 60000) });
+    // a session: two chapters saved, one of them back to what it was
+    write(env, 'ch-1', '<p>One, longer.</p>');
+    copies.saved(env.dir, 'book-a', 'ch-1');
+    copies.saved(env.dir, 'book-a', 'ch-2');
+    const first = copies.end('book-a');
+    assert.match(first, /^\d{8}T\d{6}Z-aaaaaaaa\.json\.gz$/);
+    let c = H.readCopy(env.dir, first);
+    assert.deepEqual(Object.keys(c.chapters).sort(), ['ch-1', 'ch-2'], 'nothing copied before: both are new');
+    assert.deepEqual(c.titles, { 'ch-2': 'Middle' });
+    assert.deepEqual(c.order, ['ch-1', 'ch-2', 'ch-3']);
+    assert.equal(copies.end('book-a'), null, 'one copy per session');
+    // a session that saved without changing anything copies nothing
+    copies.saved(env.dir, 'book-a', 'ch-1');
+    assert.equal(copies.end('book-a'), null);
+    // another computer's newer copy counts: only what differs from it goes
+    write(env, 'ch-2', '<p>Two, from the laptop.</p>');
+    H.writeCopy(env.dir, { dev: DEV_B, at: (clock += 60000), chapters: { 'ch-2': '<p>Two, from the laptop.</p>' }, meta: env.meta });
+    write(env, 'ch-1', '<p>One, longer still.</p>');
+    copies.saved(env.dir, 'book-a', 'ch-1');
+    copies.saved(env.dir, 'book-a', 'ch-2');
+    // a deleted chapter keeps its last words, marked gone
+    copies.deleting(env.dir, 'book-a', 'ch-3', '<p>Three, last words.</p>');
+    fs.rmSync(path.join(env.dir, 'chapters', 'ch-3.html'));
+    const third = copies.end('book-a');
+    c = H.readCopy(env.dir, third);
+    assert.deepEqual(c.chapters, { 'ch-1': '<p>One, longer still.</p>', 'ch-3': '<p>Three, last words.</p>' });
+    assert.deepEqual(c.gone, ['ch-3']);
+    // gone stays gone: deleting it again copies nothing more
+    copies.deleting(env.dir, 'book-a', 'ch-3', '<p>Three, last words.</p>');
+    assert.equal(copies.end('book-a'), null);
+    // the list: every chapter's copies as versions, with words and change
+    const h = env.history();
+    const list = h.list(env.dir);
+    assert.equal(list.logId, null);
+    assert.deepEqual(list.problems, []);
+    assert.deepEqual(list.devices.map((d) => [d.dev, d.name]), [[DEV_A, 'Device 1'], [DEV_B, 'Device 2']]);
+    assert.deepEqual(list.chapters['ch-1'].versions.map((v) => [v.kind, v.words, v.delta, v.dev]), [['saved', 2, 2, DEV_A], ['saved', 3, 1, DEV_A]]);
+    assert.deepEqual(list.chapters['ch-2'].versions.map((v) => [v.words, v.dev]), [[1, DEV_A], [4, DEV_B]]);
+    assert.equal(list.chapters['ch-2'].title, 'Middle');
+    const ch3 = list.chapters['ch-3'];
+    assert.equal(ch3.versions[0].gone, true);
+    assert.deepEqual(ch3.was, { at: 2, after: 'ch-2' });
+    assert.equal(h.versionText(env.dir, { copy: ch3.versions[0].file }, 'ch-3').text, '<p>Three, last words.</p>');
+    assert.match(h.versionText(env.dir, { copy: first }, 'ch-3').error, /didn't exist then/);
+  });
+
+  test('a session left idle ends on its own; a dropped book copies nothing', async () => {
+    const env = setup();
+    const copies = new H.SessionCopies({ dev: () => DEV_A, idleMs: 20 });
+    write(env, 'ch-1', '<p>Hello again.</p>');
+    copies.saved(env.dir, 'book-a', 'ch-1');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(copies.open('book-a'), false);
+    assert.equal(H.listCopies(env.dir).length, 1);
+    write(env, 'ch-1', '<p>Hello once more.</p>');
+    copies.saved(env.dir, 'book-a', 'ch-1');
+    copies.drop('book-a');
+    copies.endAll();
+    assert.equal(H.listCopies(env.dir).length, 1);
+  });
+
+  test('a named version with the log off copies the whole book, kept apart from session versions', () => {
+    const env = setup({ chapters: { 'ch-1': '<p>One.</p>', 'ch-2': '<p>Two.</p>' } });
+    const at = Date.UTC(2026, 9, 8, 21, 0, 0);
+    const copy = H.copyWholeBook(env.dir, { dev: DEV_A, at });
+    const named = H.writeNamed(env.dir, { name: 'Before the big rewrite', at, dev: DEV_A, copy });
+    assert.equal(named.copy, copy);
+    assert.equal(H.readCopy(env.dir, copy).all, true);
+    const h = env.history();
+    assert.equal(h.versionText(env.dir, { named: named.file }, 'ch-2').text, '<p>Two.</p>');
+    const list = h.list(env.dir);
+    assert.deepEqual(list.chapters, {}, 'the whole-book copy is the named version, not a session of every chapter');
+    assert.deepEqual(list.named.map((v) => v.name), ['Before the big rewrite']);
+    // deleting the version takes its copy with it
+    H.deleteNamed(env.dir, named.file);
+    assert.deepEqual(fs.readdirSync(vdir(env)), []);
+  });
+
+  test('a book whose log was off for a while: log versions and copies in one list', async () => {
+    const env = setup({ chapters: { 'ch-1': '<p>Logged.</p>' } });
+    const rec = env.recorder();
+    await session(rec, env, [['ch-1', '<p>Logged, then more.</p>']]);
+    saveMeta(rec, env, { ...env.meta, scribesLog: false });
+    const copies = new H.SessionCopies({ dev: () => rec.device(), now: () => (env.clock += 1000) });
+    write(env, 'ch-1', '<p>Written with the log off, at length.</p>');
+    copies.saved(env.dir, 'book-a', 'ch-1');
+    copies.end('book-a');
+    const meta = { ...env.meta };
+    delete meta.scribesLog;
+    saveMeta(rec, env, meta);
+    await session(rec, env, [['ch-1', '<p>Logged again.</p>']]);
+    const list = env.history().list(env.dir);
+    assert.deepEqual(list.problems, []);
+    assert.equal(list.devices.length, 1, 'the copies\' computer is the log\'s own');
+    const v = list.chapters['ch-1'].versions;
+    assert.deepEqual(v.map((x) => [x.kind, x.words]), [['baseline', 3], ['saved', 7], ['session', 2]]);
+    assert.ok(v.every((x, i) => !i || v[i - 1].ts <= x.ts));
+    assert.deepEqual(env.errors, []);
   });
 });

@@ -1033,6 +1033,22 @@ class Recorder {
       ms: manuscriptHash(manuscriptText(s.docs)), chunk
     };
   }
+  // Where this device's chain stands for a book, once everything logged so
+  // far is on disk: { dev, n, h } for a named version (slog-history.js),
+  // or null when the book isn't being logged. The log squares itself with
+  // the disk first, as before a save.
+  async head(dir, bookId) {
+    const s = this.session(dir, bookId, { start: true });
+    if (!s.on || !s.info || !s.chain || !s.chain.n || s.failed) return null;
+    const n = s.chain.n;
+    const h = s.chain.head;
+    const chunk = s.chunk;
+    if (chunk) {
+      await chunk.writer.flush();
+      if (chunk.writer.broken || chunk.failed) return null;
+    } else if (s.closing) await Promise.resolve(s.closing).catch(() => {});
+    return { dev: this.device(), n, h };
+  }
   // The chunk this device is writing for a book, if one's open
   activeChunk(bookId) {
     const s = this.sessions.get(bookId);

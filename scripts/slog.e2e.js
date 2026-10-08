@@ -386,6 +386,19 @@ async function main() {
     await caret(1, 0, true);
     await type(' Back on.');
     await pause();
+    // the stretch with the log off left a copy of what it changed
+    notes.offCopies = require('../slog-history.js').listCopies(bookDir);
+    // File → Name This Version…: a name, then the whole book where the log stands
+    await js(`(() => { nameVersion({ type: 'nameVersion', bookId: book.id }); })()`);
+    const ask = `[...document.querySelectorAll('.modal-backdrop')].pop()`;
+    for (let i = 0; i < 100 && !(await js(`!!(${ask} && ${ask}.querySelector('input'))`)); i++) await tick(50);
+    await js(`(() => { const s = ${ask}; s.querySelector('input').value = '  Sent to Maria '; s.querySelector('.m-ok').click(); })()`);
+    const vdir = path.join(bookDir, 'versions');
+    for (let i = 0; i < 100 && !(fs.existsSync(vdir) && fs.readdirSync(vdir).some((f) => f.endsWith('.json'))); i++) await tick(50);
+    await tick(300);
+    notes.versionToast = await js(`document.getElementById('hint').textContent`);
+    notes.named = require('../slog-history.js').listNamed(bookDir);
+    notes.namedDisk = Object.fromEntries(fs.readdirSync(path.join(bookDir, 'chapters')).map((f) => [f.slice(0, -5), fs.readFileSync(path.join(bookDir, 'chapters', f), 'utf8')]));
     // a dedication typed in the Paperback for KDP dialog becomes a page
     // (the pages themselves aren't set: that's the print tests' business)
     ipcMain.removeHandler('print:paperback');
@@ -630,6 +643,23 @@ async function main() {
         assert.match(notes.archiveToast, /^Merged \d+ files into archive-/);
         assert.ok(listing.archives.length === 1, 'one archive');
         assert.ok(edits.some((e) => e.src === 'typed' && e.x && e.x.ins.join('').includes('After the merge.')));
+      }],
+      ['File → Name This Version… keeps the book where the log stood, outside the log', () => {
+        assert.equal(notes.named.length, 1);
+        const v = notes.named[0];
+        assert.equal(v.name, 'Sent to Maria');
+        assert.ok(v.n > 0 && v.h && !v.copy, JSON.stringify(v));
+        assert.match(notes.versionToast, /Saved this version of the book as “Sent to Maria”/);
+        const H = require('../slog-history.js');
+        const h = new H.History({ home: path.join(tmp, 'history-check') });
+        for (const [id, html] of Object.entries(notes.namedDisk)) assert.equal(h.versionText(bookDir, { named: v.file }, id).text, html, id);
+        assert.ok(!entries.some((e) => JSON.stringify(e).includes('Maria')), 'the log never names it');
+      }],
+      ['the stretch with the log off left a copy of the chapter it changed', () => {
+        assert.equal(notes.offCopies.length, 1, JSON.stringify(notes.offCopies.map((c) => c.file)));
+        const texts = Object.values(notes.offCopies[0].chapters);
+        assert.equal(texts.length, 1);
+        assert.ok(texts[0].includes('Off the record.') && !texts[0].includes('Back on.'));
       }],
       ['a dedication typed in the paperback dialog is typed', () => assert.ok(edits.some((e) => /^ch-/.test(e.doc) && e.src === 'typed' && e.x && e.x.ins.join('').includes(DEDICATION)))]
     ];

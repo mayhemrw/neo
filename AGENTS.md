@@ -33,7 +33,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before adding a feature. The product is 
 | `slog-stamp.js` | The main process's stamper: when to stamp, receipt files, the offline queue, fetching finished OpenTimestamps proofs |
 | `slog-report.js` | The verification report: `reportStats` (origins overall and by chapter, pastes then revised, revision, sessions, the timeline, timestamps, flags, from `checkLog`'s result) and `renderReport` (one self-contained page, times exact, as dates or as weeks). Plain JavaScript that also runs in a browser, so NEO and the verifier make the same report |
 | `slog-files.js` | A book's `scribes-log/` folder on disk, loose files and archives read as one (`listLog`, `loadLog`); Merge Log into Archive (`mergeIntoArchive`); the exports for verification (`buildExport`, `readExport`). Node only |
-| `slog-history.js` | Versions rebuilt from the log (phase 3): `History.index` lists every chapter's session versions across every computer's chain (one per session that changed it; text that only arrived is the other computer's session), `rebuild`/`text` give the documents after any entry of a chain. Checkpoints and the index cache live in `userData/slog/history`, never in the library, and are rebuilt whenever they don't match the log. Node only |
+| `slog-history.js` | Versions rebuilt from the log (phase 3): `History.index` lists every chapter's session versions across every computer's chain (one per session that changed it; text that only arrived is the other computer's session), `rebuild`/`text` give the documents after any entry of a chain, `list` adds the copies of log-off sessions and the named versions, `versionText` gives one chapter of any of them. Checkpoints and the index cache live in `userData/slog/history`, never in the library, and are rebuilt whenever they don't match the log. Also the book's `versions/` folder (below) and `SessionCopies`. Node only |
 | `slog-zip.js` | Zip files for archives and exports: reading (inflate handed in, or the browser's `DecompressionStream`), writing, CRC-32. Plain JavaScript that also runs in a browser |
 | `verifier/` | The standalone verifier page that every export carries: `page.html` and `page.js` (the page), `check.js` (sorting what's dropped, checking it, saying what checked in plain words), `manuscript.js` (reading a .txt or .docx and matching it to the log's fingerprint), `build.js` (one self-contained page with the checker's files inside; main.js builds it for each export). Plain JavaScript that also runs in Node, except `page.js` |
 | `slog-hash.js`, `stamp-ots.js`, `stamp-tsa.js` | Outside timestamps for the Scribe's Log, in plain JavaScript that also runs in a browser: SHA-256/HMAC/SHA-1/RIPEMD-160, OpenTimestamps proofs and calendars, RFC 3161 tokens (checked through WebCrypto). The network is a `fetch` passed in. Trusted roots are in `certs/` |
@@ -94,6 +94,16 @@ Each book's log lives in its `scribes-log/` folder: `log.json` (made once) and o
 - The verifier (`verifier/`): `slogVerifierPage` in main.js builds it into every export with `verifier/build.js`, so it's always this NEO's checker; `npm run build:verifier` writes `verifier/verifier.html` (not committed) to try it in a browser. Its scripts are inlined with every `<` that could end a `<script>` written as `\x3C` (`scriptSafe`). Everything shown from a log goes in as text, never markup. It trusts only `certs/*-root.pem`. Its only network use is Check against Bitcoin (mempool.space, then blockstream.info), held to that by its Content-Security-Policy. `scripts/verifier.test.js` covers manuscripts, sorting, the summary and the build; `npm run test:verifier` (`scripts/verifier.e2e.js`) drives the page in a window with the network stopped; `slog.e2e.js` matches NEO's own .txt and .docx with it.
 - `captureBody` leaves the engine's style spans out of what's saved (`dropJunkSpans`); the page keeps them until the chapter is next opened, because taking them off at once breaks ⌘Z.
 
+## Versions
+
+"Versions" on screen, never "snapshots" (that's the ⌘E email PDF, and `snapshotStructure` in the code). A chapter's past versions are rebuilt from the log (`slog-history.js`); what the log can't hold lives in the book's `versions/` folder. None of it is part of the log: no checker reads it, and it never goes in an export or the report.
+
+- `versions/<UTC>-<dev8>.json` is a named version, written once: `{ v: 1, name, at, dev, auto, n, h }` with the log on (that computer's chain at entry `n`, whose hash `h` must match when it's rebuilt), or `{ …, copy }` naming a whole-book copy with it off. `auto` is null for one the writer named, or `restore`, `replace`, `word` for the ones NEO makes. Renaming rewrites that file; deleting removes it (and a whole-book copy only it names).
+- `versions/<UTC>-<dev8>.json.gz` is a copy: `{ v: 1, at, dev, all, order, titles, chapters: { id: html }, gone: [id] }`. With a book's log off (or unreadable), `main.js` tells `SessionCopies` which chapters were saved or deleted (`chapter:write`, `chapter:delete`); when the session ends (the book closed, NEO quit, 30 minutes with no saves, the log switched back on) the chapters that differ from their newest session copy on any computer are copied, once. A named version with the log off copies every chapter (`all`).
+- `history.mark(bookId, name, auto)` in `main.js` names a version (the Recorder's `head` flushes the log first). File → Name This Version… (`history:mark`; the window's `nameVersion` saves everything first). `history:named`, `history:rename`, `history:remove` are for the History window.
+- Duplicate leaves `versions/` behind, as it does `scribes-log/`: the copy's history starts at the copy. Nothing that reads a book's documents looks in `versions/`; the daily backup zips it with the rest of the book.
+- `scripts/slog-history.test.js` and the versions tests in `scripts/slog-main.test.js`; `slog.e2e.js` names a version and checks the log-off stretch's copy.
+
 ## Paperbacks for KDP
 
 Export → Paperback for KDP… (also on the shelf's right-click Export) writes a print interior PDF and a cover template PDF beside it. `printPaperback` and `buildPrintHtml` are the PRINT BOOK section of `app.js`; `makePaperback`, `renderPaged` and `kdpCoverHtml` are in `main.js`, behind `print:paperback`.
@@ -145,6 +155,8 @@ NEO Library/
     stickies.json
     cover-<ts>.<ext>    writer-chosen image
     art-<ts>.<ext>      painted image, plus art.json
+    scribes-log/        the Scribe's Log (SLOG-FORMAT.md)
+    versions/           named versions and log-off copies (see Versions)
 ```
 
 App settings and the cover-art API key live in Electron `userData` (`settings.json`, `secrets.json`), not in the library. The key is encrypted with `safeStorage` when the OS allows it. Do not write secrets into the library.

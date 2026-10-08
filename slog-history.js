@@ -34,6 +34,7 @@ V.useHash({
 });
 
 const CACHE_V = 1;
+const WRONG_ENTRY = 'this version doesn\'t match the book\'s log';
 const CHECKPOINT_EVERY = 25000;
 
 // Words in a chapter, as the manuscript sees them (scene breaks aren't
@@ -373,8 +374,10 @@ class History {
 
   // The documents as one chain had them after entry n, from the newest
   // checkpoint at or before it that still matches the log, or from the
-  // chain's start. Returns { docs } or { error }.
-  rebuild(dir, dev, n) {
+  // chain's start. Returns { docs } or { error }. With `h` (a named
+  // version's), entry n must be the one with that hash: a version file
+  // that points at another log, or a chain that was rewritten, shows no text.
+  rebuild(dir, dev, n, { h = null } = {}) {
     if (!Number.isSafeInteger(n) || n < 1) return { error: 'no such entry' };
     const listing = F.listLog(dir);
     const logId = this._logId(listing);
@@ -387,7 +390,7 @@ class History {
       if (cp) {
         docs = this._loadCheckpoint(logId, dev, cp);
         if (!docs) continue;
-        if (cp.n === n) return { docs };
+        if (cp.n === n) return h && cp.h !== h ? { error: WRONG_ENTRY } : { docs };
         const i = had.chunks.findIndex((k) => k.name === cp.chunk);
         if (i < 0) continue;
         skip = new Set(had.chunks.slice(0, i + 1).map((k) => k.name));
@@ -405,6 +408,7 @@ class History {
       if (cp && !(chain.chunks[0] && chain.chunks[0].entries[0] && chain.chunks[0].entries[0].prev === cp.h)) continue;
       const r = new V.Replayer(docs);
       let reached = cp ? cp.n : 0;
+      let last = null;
       for (const c of chain.chunks) {
         if (reached >= n) break;
         for (const e of c.entries) {
@@ -412,18 +416,87 @@ class History {
           if (e.n > n) break;
           r.step(e);
           reached = e.n;
+          last = e;
         }
       }
       if (reached !== n) return { error: `entry ${n} isn't in that computer's chain` };
+      if (h && V.entryHash(last) !== h) return { error: WRONG_ENTRY };
       if (r.problems.length) return { error: `entry ${r.problems[0].n} doesn't replay (${r.problems[0].problem})` };
       return { docs: r.text };
     }
     return { error: 'can\'t be rebuilt' };
   }
 
+  // Everything the History window lists for a book: every chapter's
+  // versions from the log (index) and from the copies of log-off sessions,
+  // oldest first, plus the named versions. Devices keep the report's names;
+  // a computer that only made copies or names is numbered after them.
+  list(dir) {
+    const ix = this.index(dir);
+    const problems = ix.logId ? ix.problems.slice() : [];
+    const copies = listCopies(dir);
+    const named = listNamed(dir);
+    const devices = ix.devices.map((d) => ({ ...d }));
+    const extra = new Map();
+    for (const x of [...copies, ...named]) {
+      if (devices.some((d) => d.dev === x.dev)) continue;
+      const e = extra.get(x.dev);
+      if (!e) extra.set(x.dev, { dev: x.dev, first: x.at, last: x.at, n: null });
+      else { e.first = Math.min(e.first, x.at); e.last = Math.max(e.last, x.at); }
+    }
+    [...extra.values()].sort((a, b) => a.first - b.first || (a.dev < b.dev ? -1 : 1))
+      .forEach((d) => devices.push({ ...d, name: 'Device ' + (devices.length + 1) }));
+    const chapters = {};
+    for (const [doc, ch] of Object.entries(ix.chapters)) chapters[doc] = { ...ch, versions: ch.versions.map((v) => ({ ...v })) };
+    const meta = bookFacts(readQuiet(path.join(dir, 'book.json')) || '') || { order: [], titles: {}, kinds: {} };
+    const inBook = meta.order.filter((id) => meta.kinds[id] !== 'contents');
+    for (const c of copies) {
+      if (c.all) continue; // a named version's copy: listed with the named versions
+      for (const [id, html] of Object.entries(c.chapters)) {
+        const doc = V.chapterDoc(id);
+        if (!chapters[doc]) {
+          const at = c.order.indexOf(id);
+          chapters[doc] = {
+            id, title: meta.titles[id] || c.titles[id] || null, inBook: inBook.includes(id), order: inBook.indexOf(id),
+            was: at >= 0 ? { at, after: at ? c.order[at - 1] : null } : null, versions: []
+          };
+        } else if (!chapters[doc].title && c.titles[id]) chapters[doc].title = c.titles[id];
+        chapters[doc].versions.push({ dev: c.dev, file: c.file, start: c.at, ts: c.at, words: chapterWords(html), kind: 'saved', gone: c.gone.includes(id), broken: false });
+      }
+    }
+    for (const ch of Object.values(chapters)) {
+      ch.versions.sort((a, b) => a.ts - b.ts || (a.dev < b.dev ? -1 : 1));
+      let prev = 0;
+      for (const v of ch.versions) {
+        v.delta = v.words === null ? null : v.words - prev;
+        if (v.words !== null) prev = v.gone ? 0 : v.words;
+      }
+    }
+    return { logId: ix.logId, devices, chapters, named, problems };
+  }
+
+  // One chapter's text in a version: `ref` is { dev, n, h } (a version
+  // from the log), { copy } (a copy file) or { named } (a named version's
+  // file). Returns { text } or { error }.
+  versionText(dir, ref, id) {
+    if (!ref || typeof id !== 'string') return { error: 'no such version' };
+    if (ref.named) {
+      const v = readNamedFile(dir, ref.named);
+      if (!v) return { error: 'that version isn\'t there' };
+      ref = v.copy ? { copy: v.copy } : { dev: v.dev, n: v.n, h: v.h };
+    }
+    if (ref.copy) {
+      const c = readCopy(dir, ref.copy);
+      if (!c) return { error: 'that version\'s copy can\'t be read' };
+      return typeof c.chapters[id] === 'string' ? { text: c.chapters[id] } : { error: 'that chapter didn\'t exist then' };
+    }
+    if (typeof ref.dev !== 'string' || !Number.isSafeInteger(ref.n)) return { error: 'no such version' };
+    return this.text(dir, ref.dev, ref.n, V.chapterDoc(id), { h: ref.h || null });
+  }
+
   // One document after entry n of a chain: { text } or { error }
-  text(dir, dev, n, doc) {
-    const r = this.rebuild(dir, dev, n);
+  text(dir, dev, n, doc, { h = null } = {}) {
+    const r = this.rebuild(dir, dev, n, { h });
     if (r.error) return r;
     const t = r.docs[doc];
     if (typeof t !== 'string') return { error: doc in r.docs ? 'the words for this version aren\'t in the log' : 'that chapter didn\'t exist then' };
@@ -431,4 +504,256 @@ class History {
   }
 }
 
-module.exports = { History, readChains, chapterWords, bookFacts, CHECKPOINT_EVERY };
+/* ------------------------------------------------------------------ */
+/*  Versions kept in the book: named versions and the log-off copies    */
+/* ------------------------------------------------------------------ */
+
+// book-x/versions/ holds what the log can't: the versions the writer names
+// ("Sent to Maria"), and, for a book with the log switched off, a gzipped
+// copy of the chapters each session changed. Every file is written once
+// and is small, so a synced library carries them to every computer.
+// Nothing that reads a book's documents looks in here, and none of it is
+// part of the log: no checker reads it, and it never goes in an export.
+//
+//   20261008T190312Z-589b9bf7.json      a named version: { v: 1, name, at,
+//       dev, auto, n, h } with the log on (that device's chain at entry n,
+//       whose hash is h), or { …, copy: "<copy file>" } with it off
+//   20261008T201500Z-589b9bf7.json.gz   a copy: { v: 1, at, dev, all,
+//       order, titles, chapters: { id: html }, gone: [id] }; `all` when a
+//       named version copied the whole book
+
+const VERSIONS_DIR = 'versions';
+const NAMED_RE = /^\d{8}T\d{6}Z-[0-9a-f]{8}(?:-\d+)?\.json$/;
+const COPY_RE = /^\d{8}T\d{6}Z-[0-9a-f]{8}(?:-\d+)?\.json\.gz$/;
+const AUTO = new Set(['restore', 'replace', 'word']);
+const NAME_MAX = 120;
+
+// A version's name as the writer typed it: one line, no control
+// characters, not too long. '' when nothing's left.
+function cleanName(name) {
+  return [...String(name == null ? '' : name).replace(/\s+/g, ' ').trim()]
+    .filter((c) => c >= ' ' && c !== '\u007f').join('').slice(0, NAME_MAX).trim();
+}
+
+const versionsDir = (bookDir) => path.join(bookDir, VERSIONS_DIR);
+const readdirQuiet = (dir) => { try { return fs.readdirSync(dir); } catch { return []; } };
+
+// A new file in versions/, never over one that's there (another computer's
+// sync may have brought one with the same second and device)
+function writeOnce(bookDir, dev, at, ext, data) {
+  const dir = versionsDir(bookDir);
+  fs.mkdirSync(dir, { recursive: true });
+  const base = `${F.utcName(at)}-${String(dev).slice(0, 8)}`;
+  for (let k = 1; ; k++) {
+    const name = base + (k > 1 ? '-' + k : '') + ext;
+    const file = path.join(dir, name);
+    if (fs.existsSync(file)) continue;
+    require('./slog.js').writeWhole(file, data, { keep: true });
+    return name;
+  }
+}
+
+function readNamedFile(bookDir, file) {
+  if (!NAMED_RE.test(file)) return null;
+  const v = safeJson(readQuiet(path.join(versionsDir(bookDir), file)));
+  if (!v || v.v !== 1 || typeof v.name !== 'string' || !Number.isFinite(v.at) || typeof v.dev !== 'string') return null;
+  const out = { file, name: v.name, at: v.at, dev: v.dev, auto: AUTO.has(v.auto) ? v.auto : null };
+  if (typeof v.copy === 'string' && COPY_RE.test(v.copy)) out.copy = v.copy;
+  else if (Number.isSafeInteger(v.n) && v.n > 0 && typeof v.h === 'string' && /^[0-9a-f]{64}$/.test(v.h)) { out.n = v.n; out.h = v.h; } else return null;
+  return out;
+}
+function readQuiet(file) { try { return fs.readFileSync(file, 'utf8'); } catch { return null; } }
+
+// Every named version of a book, oldest first. Files that aren't one
+// (a half-written .tmp, a sync service's stand-in) are passed over.
+function listNamed(bookDir) {
+  const out = [];
+  for (const f of readdirQuiet(versionsDir(bookDir))) {
+    const v = readNamedFile(bookDir, f);
+    if (v) out.push(v);
+  }
+  return out.sort(byWhen);
+}
+// oldest first; files made the same second by one computer in the order made
+const fileK = (f) => { const m = /^\d{8}T\d{6}Z-[0-9a-f]{8}-(\d+)\./.exec(f); return m ? +m[1] : 1; };
+const byWhen = (a, b) => a.at - b.at || fileK(a.file) - fileK(b.file) || (a.file < b.file ? -1 : 1);
+
+// A copy file, read whole: { file, at, dev, all, order, titles, chapters, gone }
+function readCopy(bookDir, file) {
+  if (!COPY_RE.test(file)) return null;
+  let c;
+  try { c = JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(versionsDir(bookDir), file))).toString('utf8')); } catch { return null; }
+  if (!c || c.v !== 1 || !Number.isFinite(c.at) || typeof c.dev !== 'string' || !c.chapters || typeof c.chapters !== 'object') return null;
+  const chapters = {};
+  for (const [id, html] of Object.entries(c.chapters)) if (typeof html === 'string') chapters[id] = html;
+  return {
+    file, at: c.at, dev: c.dev, all: c.all === true, chapters,
+    order: Array.isArray(c.order) ? c.order.filter((x) => typeof x === 'string') : [],
+    titles: c.titles && typeof c.titles === 'object' ? c.titles : {},
+    gone: Array.isArray(c.gone) ? c.gone.filter((id) => typeof id === 'string' && id in chapters) : []
+  };
+}
+// Every copy, oldest first
+function listCopies(bookDir) {
+  const out = [];
+  for (const f of readdirQuiet(versionsDir(bookDir))) {
+    const c = readCopy(bookDir, f);
+    if (c) out.push(c);
+  }
+  return out.sort(byWhen);
+}
+
+// The chapters a copy holds and what book.json said about them then
+function writeCopy(bookDir, { dev, at, all = false, chapters, gone = [], meta = null }) {
+  const order = meta && Array.isArray(meta.chapterOrder) ? meta.chapterOrder.filter((x) => typeof x === 'string') : [];
+  const titles = {};
+  const t = meta && meta.chapterTitles && typeof meta.chapterTitles === 'object' ? meta.chapterTitles : {};
+  for (const id of Object.keys(chapters)) if (typeof t[id] === 'string' && t[id].trim()) titles[id] = t[id];
+  const data = zlib.gzipSync(JSON.stringify({ v: 1, at, dev, all: !!all, order, titles, chapters, gone }));
+  return writeOnce(bookDir, dev, at, '.json.gz', data);
+}
+
+// A named version, written once. `head` is { dev, n, h } with the log on;
+// `copy` the file holding the book's chapters with it off.
+function writeNamed(bookDir, { name, auto = null, at, dev, head = null, copy = null }) {
+  const v = { v: 1, name: cleanName(name), at, dev, auto: AUTO.has(auto) ? auto : null };
+  if (!v.name) throw new Error('a version needs a name');
+  if (head) Object.assign(v, { n: head.n, h: head.h });
+  else if (copy) v.copy = copy;
+  else throw new Error('a version needs the log or a copy');
+  const file = writeOnce(bookDir, dev, at, '.json', JSON.stringify(v, null, 2) + '\n');
+  return readNamedFile(bookDir, file);
+}
+
+// Renaming rewrites that one small file; nothing else changes
+function renameNamed(bookDir, file, name) {
+  const v = readNamedFile(bookDir, file);
+  if (!v) throw new Error('that version isn\'t there');
+  const clean = cleanName(name);
+  if (!clean) throw new Error('a version needs a name');
+  const raw = safeJson(readQuiet(path.join(versionsDir(bookDir), file)));
+  raw.name = clean;
+  require('./slog.js').writeWhole(path.join(versionsDir(bookDir), file), JSON.stringify(raw, null, 2) + '\n');
+  return { ...v, name: clean };
+}
+
+// Deleting a named version removes its file (and the copy only it names).
+// The words are still in the log, or in the other copies.
+function deleteNamed(bookDir, file) {
+  const v = readNamedFile(bookDir, file);
+  if (!v) return false;
+  fs.rmSync(path.join(versionsDir(bookDir), file), { force: true });
+  if (v.copy && !listNamed(bookDir).some((o) => o.copy === v.copy)) {
+    const c = readCopy(bookDir, v.copy);
+    if (c && c.all) fs.rmSync(path.join(versionsDir(bookDir), v.copy), { force: true });
+  }
+  return true;
+}
+
+// Each chapter's newest text across every session's copy (any
+// computer's), for the chapters asked about: what a session's copy is
+// compared against. (A named version's copy of the whole book doesn't
+// count: each session's own versions stay complete without it.)
+function newestCopied(bookDir, ids) {
+  const want = new Set(ids);
+  const out = {};
+  for (const c of listCopies(bookDir).reverse()) {
+    if (c.all) continue;
+    for (const id of [...want]) {
+      if (id in c.chapters) { out[id] = c.gone.includes(id) ? null : c.chapters[id]; want.delete(id); }
+    }
+    if (!want.size) break;
+  }
+  return out;
+}
+
+// LOG-OFF SESSIONS: with the Scribe's Log switched off for a book, nothing
+// records its versions, so main.js says which chapters were saved and which
+// deleted, and at the session's end (the book closed, NEO quit, half an
+// hour with no saves: the same rules as a chunk) the chapters that differ
+// from their newest copy on any computer are copied, once, into versions/.
+class SessionCopies {
+  constructor({ dev, now = Date.now, idleMs = 30 * 60 * 1000, onError = () => {}, readMeta = null }) {
+    this.dev = dev; // () => this computer's device id
+    this.now = now;
+    this.idleMs = idleMs;
+    this.onError = onError;
+    this.readMeta = readMeta || ((dir) => safeJson(readQuiet(path.join(dir, 'book.json'))));
+    this.books = new Map();
+  }
+  _book(dir, bookId) {
+    let b = this.books.get(bookId);
+    if (b && b.dir !== dir) { this.end(bookId); b = null; }
+    if (!b) { b = { dir, saved: new Set(), gone: new Map(), timer: null }; this.books.set(bookId, b); }
+    clearTimeout(b.timer);
+    b.timer = setTimeout(() => this.end(bookId), this.idleMs);
+    if (b.timer.unref) b.timer.unref();
+    return b;
+  }
+  // a chapter of a log-off book reached the disk
+  saved(dir, bookId, id) {
+    const b = this._book(dir, bookId);
+    b.saved.add(id);
+    b.gone.delete(id);
+  }
+  // …or is about to be deleted: its last words are kept for the copy
+  deleting(dir, bookId, id, html) {
+    const b = this._book(dir, bookId);
+    if (typeof html === 'string' && html) b.gone.set(id, html);
+    b.saved.delete(id);
+  }
+  open(bookId) { return this.books.has(bookId); }
+  // The session ends: its copy is written (or nothing, when nothing
+  // changed). Returns the copy's file name, or null.
+  end(bookId) {
+    const b = this.books.get(bookId);
+    if (!b) return null;
+    this.books.delete(bookId);
+    clearTimeout(b.timer);
+    try {
+      const now = {};
+      for (const id of b.saved) {
+        const html = readQuiet(path.join(b.dir, 'chapters', id + '.html'));
+        if (html !== null) now[id] = html;
+      }
+      const ids = [...Object.keys(now), ...b.gone.keys()];
+      if (!ids.length) return null;
+      const had = newestCopied(b.dir, ids);
+      const chapters = {};
+      for (const [id, html] of Object.entries(now)) if (had[id] !== html) chapters[id] = html;
+      const gone = [];
+      for (const [id, html] of b.gone) if (had[id] !== null) { chapters[id] = html; gone.push(id); }
+      if (!Object.keys(chapters).length) return null;
+      return writeCopy(b.dir, { dev: this.dev(), at: this.now(), chapters, gone, meta: this.readMeta(b.dir) });
+    } catch (err) {
+      this.onError('versions', err);
+      return null;
+    }
+  }
+  // the book's folder is going away: nothing to copy into
+  drop(bookId) {
+    const b = this.books.get(bookId);
+    if (b) { clearTimeout(b.timer); this.books.delete(bookId); }
+  }
+  endAll() {
+    for (const bookId of [...this.books.keys()]) this.end(bookId);
+  }
+}
+
+// The whole book's chapters, for a named version while the log is off
+function copyWholeBook(bookDir, { dev, at }) {
+  const meta = safeJson(readQuiet(path.join(bookDir, 'book.json')));
+  const chapters = {};
+  for (const f of readdirQuiet(path.join(bookDir, 'chapters'))) {
+    if (!f.endsWith('.html')) continue;
+    const html = readQuiet(path.join(bookDir, 'chapters', f));
+    if (html !== null) chapters[f.slice(0, -5)] = html;
+  }
+  return writeCopy(bookDir, { dev, at, all: true, chapters, meta });
+}
+
+module.exports = {
+  History, readChains, chapterWords, bookFacts, CHECKPOINT_EVERY,
+  VERSIONS_DIR, cleanName, listNamed, readNamedFile, listCopies, readCopy, writeCopy, writeNamed, renameNamed, deleteNamed,
+  newestCopied, copyWholeBook, SessionCopies
+};

@@ -74,6 +74,14 @@ contextBridge.exposeInMainWorld('neo', {
     report: (bookId, opts) => ipcRenderer.invoke('slog:report', bookId, opts)
   },
 
+  // versions (main.js and slog-history.js; Pocket has none)
+  history: {
+    mark: (bookId, name) => ipcRenderer.invoke('history:mark', bookId, name),
+    named: (bookId) => ipcRenderer.invoke('history:named', bookId),
+    rename: (bookId, file, name) => ipcRenderer.invoke('history:rename', bookId, file, name),
+    remove: (bookId, file) => ipcRenderer.invoke('history:remove', bookId, file)
+  },
+
   writingStyleState: (st) => ipcRenderer.send('style:state', st),
   viewState: (st) => ipcRenderer.send('view:state', st),
   onMenu: (cb) => ipcRenderer.on('menu', (_e, msg) => cb(msg))

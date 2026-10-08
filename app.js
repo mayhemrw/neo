@@ -11150,6 +11150,24 @@ async function slogArchive(msg) {
   toast(t('Merged {n} files into {name}. Sessions still open stay as they are.', { n: res.merged, name: res.archive }), 6000);
 }
 
+// File → Name This Version…: the whole book as it stands, under a name
+// the writer gives it ("Sent to Maria"). main.js keeps it in the book's
+// versions/ folder: where the log stands, or with the log off, a copy of
+// every chapter. Everything waiting is saved first, so the version is
+// what's on the page.
+async function nameVersion(msg) {
+  const h = window.neo && window.neo.history;
+  if (!book || msg.bookId !== book.id || !h || !h.mark) return;
+  const bookId = book.id;
+  const name = await askInput(escHtml(t('Name This Version')), escHtml(t('For example: Sent to Maria')));
+  if (!name || !book || book.id !== bookId) return;
+  await slogSaveAll();
+  let res;
+  try { res = await h.mark(bookId, name); } catch (err) { res = { error: (err && err.message) || String(err) }; }
+  if (!res || res.error) { toast((res && res.error) || t('The version wasn\'t saved.'), 8000); return; }
+  toast(t('Saved this version of the book as “{name}”.', { name: res.name }), 5000);
+}
+
 /* ================================================================== */
 /*  SAVING                                                             */
 /* ================================================================== */
@@ -15424,7 +15442,7 @@ window.neo.onMenu(async (msg) => {
   if ($('#keyboard-shortcuts') && msg.type !== 'help') return;
   // a window the menu opens (⌘, for Goals, say) never stacks on one that's
   // already open: pressing it again used to pile up overlays
-  const WINDOWS = ['stats', 'about', 'emailSettings', 'coverArt', 'reshelve', 'checkUpdate'];
+  const WINDOWS = ['stats', 'about', 'emailSettings', 'coverArt', 'reshelve', 'checkUpdate', 'nameVersion'];
   if (WINDOWS.includes(msg.type) && document.querySelector('.modal-backdrop:not([hidden])')) {
     if (msg.type === 'checkUpdate' && updateDialog) updateDialog.focus();
     return;
@@ -15434,6 +15452,7 @@ window.neo.onMenu(async (msg) => {
   if (msg.type === 'slogExport') await slogExport(msg);
   if (msg.type === 'slogReport') await slogReport(msg);
   if (msg.type === 'slogArchive') await slogArchive(msg);
+  if (msg.type === 'nameVersion') await nameVersion(msg);
   if (msg.type === 'help') showHelp();
   if (msg.type === 'about') showAbout();
   if (msg.type === 'checkUpdate') checkForUpdate();

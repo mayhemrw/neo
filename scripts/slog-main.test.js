@@ -25,6 +25,7 @@ let offered = null; // the name the last save dialog offered
 function loadMain() {
   const handlers = new Map();
   const sent = [];
+  const menus = [];
   const electron = {
     app: {
       commandLine: { appendSwitch() {} },
@@ -37,7 +38,7 @@ function loadMain() {
     },
     ipcMain: { on() {}, handle: (name, fn) => handlers.set(name, fn) },
     BrowserWindow: { getFocusedWindow: () => null, getAllWindows: () => [] },
-    Menu: { buildFromTemplate: (items) => items, setApplicationMenu() {} },
+    Menu: { buildFromTemplate: (items) => items, setApplicationMenu: (m) => { menus.push(m); } },
     dialog: { showSaveDialog: async (_w, o) => { offered = path.basename(o.defaultPath); return saveAs ? { canceled: false, filePath: saveAs } : { canceled: true }; } },
     utilityProcess: { fork: () => ({ on() {}, postMessage() {} }) },
     screen: {}
@@ -53,6 +54,7 @@ function loadMain() {
   return {
     context,
     sent,
+    menus,
     call: (name, ...args) => handlers.get(name)(null, ...args),
     get: (expr) => vm.runInContext(expr, context),
     pointAt(dir) {
@@ -344,5 +346,87 @@ describe('Scribe\'s Log in main.js', { concurrency: 1 }, () => {
     assert.ok(fs.readdirSync(home).some((f) => f.endsWith('.json') && f !== 'device.json'));
     const inBook = fs.readdirSync(path.join(lib, book.id, slog.LOG_DIR));
     assert.ok(inBook.every((f) => f === slog.LOG_INFO || slog.isChunkName(f)), inBook.join());
+  });
+  test('File → Name This Version… with the log on: where the chain stands, renamed and removed', async () => {
+    const lib = tempLibrary();
+    const book = main.call('book:create', { title: 'Named' });
+    const dir = path.join(lib, book.id);
+    main.call('slog:open', book.id);
+    const file = main.menus[main.menus.length - 1].find((m) => m.label === 'File').submenu.find((m) => m.label === 'Name This Version…');
+    assert.equal(file.enabled, true);
+    main.call('slog:observe', book.id, 'chapter', 'ch-1', '<p>Draft one.</p>', { src: 'typed', dur: 500, ev: 10 });
+    main.call('chapter:write', book.id, 'ch-1', '<p>Draft one.</p>');
+    const v = await main.call('history:mark', book.id, '  Sent to Maria ');
+    assert.equal(v.name, 'Sent to Maria');
+    assert.ok(v.n > 0 && /^[0-9a-f]{64}$/.test(v.h) && !v.copy);
+    assert.match((await main.call('history:mark', book.id, ' ')).error, /needs a name/);
+    main.call('slog:observe', book.id, 'chapter', 'ch-1', '<p>Draft two.</p>', { src: 'typed', dur: 500, ev: 4 });
+    main.call('chapter:write', book.id, 'ch-1', '<p>Draft two.</p>', '<p>Draft one.</p>');
+    await main.call('slog:event', book.id, { type: 'close' });
+    const h = new (require('../slog-history.js').History)({ home: path.join(userData, 'history-test') });
+    assert.equal(h.versionText(dir, { named: v.file }, 'ch-1').text, '<p>Draft one.</p>');
+    let named = main.call('history:named', book.id);
+    assert.deepEqual(named.map((x) => [x.name, x.mine]), [['Sent to Maria', true]]);
+    assert.equal(main.call('history:rename', book.id, v.file, 'Sent to Maria (final)').name, 'Sent to Maria (final)');
+    assert.ok(main.call('history:rename', book.id, 'nope.json', 'x').error);
+    assert.equal(main.call('history:remove', book.id, 'book.json'), false);
+    assert.ok(fs.existsSync(path.join(dir, 'book.json')));
+    assert.equal(main.call('history:remove', book.id, v.file), true);
+    named = main.call('history:named', book.id);
+    assert.deepEqual(named, []);
+    // the log never hears of it
+    assert.ok(!entries(dir).some((e) => JSON.stringify(e).includes('Maria')));
+    assertChecks(dir);
+    assert.equal(errorLog(lib), '');
+    // (a name from the window is still checked)
+    assert.throws(() => main.call('history:remove', book.id, '../book.json'), /Invalid library name/);
+    assert.ok(fs.existsSync(path.join(dir, 'book.json')));
+  });
+
+  test('with the log off: each session leaves a copy of what it changed, and naming copies the book', async () => {
+    const lib = tempLibrary();
+    const book = main.call('book:create', { title: 'Unlogged' });
+    const dir = path.join(lib, book.id);
+    main.call('slog:open', book.id);
+    const meta = main.call('book:readMeta', book.id);
+    main.call('book:writeMeta', book.id, { ...meta, chapterOrder: ['ch-1', 'ch-2'], scribesLog: false });
+    main.call('chapter:write', book.id, 'ch-1', '<p>One.</p>');
+    main.call('chapter:write', book.id, 'ch-2', '<p>Two.</p>');
+    main.call('chapter:write', book.id, 'ch-1', '<p>One, again.</p>', '<p>One.</p>');
+    await main.call('slog:event', book.id, { type: 'close' });
+    const H = require('../slog-history.js');
+    let copies = H.listCopies(dir);
+    assert.equal(copies.length, 1);
+    assert.deepEqual(copies[0].chapters, { 'ch-1': '<p>One, again.</p>', 'ch-2': '<p>Two.</p>' });
+    assert.equal(copies[0].dev, main.get('slogRecorder').device());
+    // the next session: one chapter changed, one deleted
+    main.call('slog:open', book.id);
+    main.call('chapter:write', book.id, 'ch-2', '<p>Two, longer.</p>', '<p>Two.</p>');
+    main.call('chapter:delete', book.id, 'ch-1');
+    // named with the log off: a copy of every chapter as it stands
+    const v = await main.call('history:mark', book.id, 'Before the cut');
+    assert.ok(v.copy && !v.n);
+    assert.deepEqual(H.readCopy(dir, v.copy).chapters, { 'ch-2': '<p>Two, longer.</p>' });
+    await main.call('slog:event', book.id, { type: 'close' });
+    copies = H.listCopies(dir).filter((c) => !c.all);
+    assert.equal(copies.length, 2);
+    assert.deepEqual(copies[1].chapters, { 'ch-1': '<p>One, again.</p>', 'ch-2': '<p>Two, longer.</p>' });
+    assert.deepEqual(copies[1].gone, ['ch-1']);
+    // nothing in versions/ reaches a book's documents or the duplicate
+    assert.ok(!Object.keys(slog.readBookDocs(dir).docs).some((d) => /version/.test(d)));
+    const dup = await main.call('book:duplicate', book.id, 'Unlogged (copy)');
+    assert.equal(fs.existsSync(path.join(lib, dup.id, H.VERSIONS_DIR)), false);
+    assert.ok(fs.existsSync(path.join(lib, dup.id, 'chapters', 'ch-2.html')));
+    // switching the log back on ends a stretch with it off
+    main.call('slog:open', book.id);
+    main.call('chapter:write', book.id, 'ch-2', '<p>Two, longer still.</p>', '<p>Two, longer.</p>');
+    const m2 = main.call('book:readMeta', book.id);
+    delete m2.scribesLog;
+    main.call('book:writeMeta', book.id, m2);
+    assert.equal(H.listCopies(dir).filter((c) => !c.all).length, 3);
+    main.call('chapter:write', book.id, 'ch-2', '<p>Logged now.</p>', '<p>Two, longer still.</p>');
+    await main.call('slog:event', book.id, { type: 'close' });
+    assert.equal(H.listCopies(dir).filter((c) => !c.all).length, 3, 'a logged session makes no copy');
+    assert.equal(errorLog(lib), '');
   });
 });
