@@ -9409,7 +9409,9 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSelectedCards(); }
 });
 
-async function deleteSelectedCards() {
+// (their writing goes to Darlings: one label for all of it)
+function deleteSelectedCards(...args) { return slogWith({ src: 'move', cause: 'darling' }, () => deleteSelectedCardsNow(...args)); }
+async function deleteSelectedCardsNow() {
   const cells = selectableCells().filter((c) => cardSel.has(cardKey(c)));
   clearCardSelection();
   if (!cells.length || !book) return;
@@ -10002,7 +10004,9 @@ async function saveHeldCard(card) {
   return true;
 }
 
-async function chapterToLoose(chId) {
+// one label in the Scribe's Log for all of it, waits on the disk included
+function chapterToLoose(...args) { return slogWith({ src: 'move', cause: 'outline' }, () => chapterToLooseNow(...args)); }
+async function chapterToLooseNow(chId) {
   if (!canSetChapterAside(chId)) return;
   const body = chapterBodyEl(chId);
   if (body && body.querySelector('.ph-mark')) { toast(t('That chapter has a placeholder in it. Move the placeholder first.')); return; }
@@ -10050,7 +10054,8 @@ function looseToChapter(looseId, index) {
   updateCounters();
 }
 
-async function sceneToLoose(cell) {
+function sceneToLoose(...args) { return slogWith({ src: 'move', cause: 'outline' }, () => sceneToLooseNow(...args)); }
+async function sceneToLooseNow(cell) {
   const sc = sceneOfCell(cell);
   if (!sc || !sc.s.p.isConnected) return;
   const nodes = sceneNodes(sc.s);
@@ -10810,7 +10815,7 @@ function slogCauseOf(label) {
   if (l === 'chapter split') return { src: 'move', cause: 'split' };
   if (l === 'chapters merged' || l === 'chapter joined') return { src: 'move', cause: 'join' };
   if (l === 'replace' || l === 'replace all') return { src: 'typed', cause: 'replace' };
-  if (l === 'darling' || l === 'darling restore' || l === 'chapter delete' || l === 'section delete' || l === 'scene delete') return { src: 'move', cause: 'darling' };
+  if (l === 'darling' || l === 'darling restore' || l === 'chapter delete' || l === 'section delete' || l === 'scene delete' || l === 'cards delete') return { src: 'move', cause: 'darling' };
   if (l === 'darling delete') return { src: 'typed', cause: 'darling' };
   if (/^(card moved|card to chapter|card to loose|loose card placed|scene moved|chapter reorder|outline section to chapter)$/.test(l)) return { src: 'move', cause: 'outline' };
   if (/^(outline|card|scene|loose card) /.test(l)) return { src: 'typed', cause: 'outline' };

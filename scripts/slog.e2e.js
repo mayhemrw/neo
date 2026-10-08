@@ -300,6 +300,35 @@ async function main() {
     await js(`structuralUndo()`);
     await tick(800);
     await pause();
+    // a whole chapter onto a loose card, and back in at the end (NEO 1.4.4)
+    notes.heldWords = await js(`chapterText(book.chapterOrder[1]).trim().slice(0, 30)`);
+    await js(`chapterToLoose(book.chapterOrder[1])`);
+    await tick(800);
+    await pause();
+    const held = await js(`(book.looseCards || []).find((c) => c.held === 'chapter') || null`);
+    assert.ok(held, 'the chapter went onto a loose card');
+    await js(`looseToChapter(${JSON.stringify(held.id)}, book.chapterOrder.length)`);
+    await tick(800);
+    await pause();
+    assert.ok(!(await js(`(book.looseCards || []).some((c) => c.held === 'chapter')`)), 'the chapter went back in');
+    // several cards picked and deleted at once (NEO 1.4.5), then ⌘Z
+    await js(`switchTab('outline')`);
+    await tick(600);
+    notes.pickedWords = await js(`(() => {
+      const cell = selectableCells().find((c) => c.dataset.kind === 'section' && !c.dataset.virtual && (chapterSegments(c.dataset.ch)[Number(c.dataset.seg)] || {}).words);
+      if (!cell) return null;
+      cardSel.add(cardKey(cell));
+      return chapterSegments(cell.dataset.ch)[Number(cell.dataset.seg)].first;
+    })()`);
+    assert.ok(notes.pickedWords, 'a section card with words to pick');
+    await js(`deleteSelectedCards()`);
+    await tick(800);
+    await pause();
+    await js(`structuralUndo()`);
+    await tick(800);
+    await pause();
+    await js(`switchTab('manuscript')`);
+    await tick(300);
     // notes
     await js(`switchTab('notes')`);
     await tick(500);
@@ -470,6 +499,16 @@ async function main() {
         assert.ok(out && out.from, 'into book.json, from the chapter');
         const back = edits.find((e) => e.n > out.n && /^ch-/.test(e.doc) && e.src === 'move' && e.cause === 'outline' && e.x && e.x.ins.join('').includes(notes.looseWords.slice(0, 20)));
         assert.ok(back && back.from, 'back into the chapter, from the card');
+      }],
+      ['a chapter onto a loose card and back is a move both ways', () => {
+        const words = notes.heldWords.slice(0, 20);
+        const out = edits.find((e) => e.doc === 'book' && e.src === 'move' && e.cause === 'outline' && e.from && e.x && e.x.ins.join('').includes(words));
+        assert.ok(out, 'into book.json, from the chapter');
+        const back = edits.find((e) => e.n > out.n && /^ch-/.test(e.doc) && e.src === 'move' && e.cause === 'outline' && e.from && e.x && e.x.ins.join('').includes(words));
+        assert.ok(back, 'back into a chapter, from the card');
+      }],
+      ['cards picked and deleted together go to Darlings as a move', () => {
+        assert.ok(edits.some((e) => e.doc === 'darlings' && e.src === 'move' && e.cause === 'darling' && e.from && e.x.ins.join('').includes(notes.pickedWords.slice(0, 20))));
       }],
       ['a section deleted to Darlings is a move there', () => assert.ok(edits.some((e) => e.doc === 'darlings' && e.src === 'move' && e.cause === 'darling' && e.from && e.x.ins.join('').includes(notes.looseWords.slice(0, 20))))],
       ['the export screen says what a log can and can\'t show, and that times are exact', () => {
