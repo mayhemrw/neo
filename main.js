@@ -909,7 +909,10 @@ ipcMain.handle('slog:status', (_e, bookId) => slogTap((s) => s.status(bookDir(bo
 // so the verifier can match a .txt or .docx without the text.
 const SLOG_STAMP_WAIT = 30000;
 const slogFiles = require('./slog-files.js');
+// The authorities NEO trusts when it checks a log: the ones it stamps with
+// (FreeTSA's root, from certs/, unless NEO_SLOG_STAMPS points elsewhere)
 function slogTrust() {
+  if (slogStamper) return { anchors: slogStamper.anchors.slice(), certs: slogStamper.certs.slice() };
   const tsa = require('./stamp-tsa.js');
   const pem = (f) => tsa.pemToDer(fs.readFileSync(path.join(__dirname, 'certs', f), 'utf8'));
   return { anchors: [pem('freetsa-root.pem')], certs: [pem('freetsa-tsa.pem')] };
@@ -959,6 +962,23 @@ function slogVerifierPage() {
     '<h1>Scribe\'s Log verifier</h1><p>This copy of NEO was built without its verifier page, so this export doesn\'t carry one. ' +
     'The log itself is complete: any checker that follows SLOG-FORMAT.md can check it.</p>';
 }
+// The session's chunk closed and its end stamped, for an export or a
+// report: { head, settled } (settled: a promise of { tsa, ots }, waiting up
+// to SLOG_STAMP_WAIT for the receipt)
+async function slogWrapUp(dir, bookId) {
+  let head = null;
+  try { head = await scribe().finish(dir, bookId); } catch (err) { logError('scribe\'s log', err); }
+  const settled = head && head.head && slogStamper
+    ? slogStamper.settle(head, { wait: SLOG_STAMP_WAIT }).catch((err) => { logError('scribe\'s log', err); return { tsa: false, ots: false }; })
+    : Promise.resolve({ tsa: false, ots: false });
+  return { head, settled };
+}
+// The manuscript's chapters in order (ids only, no titles), for an export's
+// manifest: a log without its words can't read them from book.json
+function slogChapters(meta) {
+  const kinds = (meta && meta.chapterKinds) || {};
+  return Array.isArray(meta && meta.chapterOrder) ? meta.chapterOrder.filter((id) => typeof id === 'string' && kinds[id] !== 'contents') : [];
+}
 const slogFileName = (title) => [...String(title || t('Untitled'))].filter((c) => c >= ' ' && !'\\/:*?"<>|'.includes(c)).join('').replace(/\s+/g, ' ').trim().slice(0, 80) || t('Untitled');
 ipcMain.handle('slog:export', async (_e, bookId, opts = {}) => {
   const dir = bookDir(bookId);
@@ -966,11 +986,7 @@ ipcMain.handle('slog:export', async (_e, bookId, opts = {}) => {
   if (!fs.existsSync(path.join(dir, slog.LOG_DIR, slog.LOG_INFO))) return { error: t('This book has no Scribe\'s Log yet.') };
   const win = BrowserWindow.getFocusedWindow();
   // the session's chunk closes and its end is stamped, while the writer picks a place
-  let head = null;
-  try { head = await scribe().finish(dir, bookId); } catch (err) { logError('scribe\'s log export', err); }
-  const settled = head && head.head && slogStamper
-    ? slogStamper.settle(head, { wait: SLOG_STAMP_WAIT }).catch((err) => { logError('scribe\'s log export', err); return { tsa: false, ots: false }; })
-    : Promise.resolve({ tsa: false, ots: false });
+  const { head, settled } = await slogWrapUp(dir, bookId);
   const meta = readJSON(path.join(dir, 'book.json'), {}) || {};
   const name = slogFileName(meta.title) + ' - ' + (kind === 'full' ? t('Scribe\'s Log (with text)') : t('Scribe\'s Log (no text)'));
   const { canceled, filePath } = await dialog.showSaveDialog(win, {
@@ -987,6 +1003,7 @@ ipcMain.handle('slog:export', async (_e, bookId, opts = {}) => {
       exported, app: app.getVersion(), title: meta.title || '', author: meta.author || '',
       manuscript: head ? head.ms : null,
       added: Array.isArray(opts.added) ? opts.added.filter((h) => /^[0-9a-f]{64}$/.test(h)) : [],
+      chapters: slogChapters(meta),
       stamped: head && head.head ? { dev: head.dev, n: head.n, tsa: !!stamped.tsa, ots: !!stamped.ots } : null
     };
     m.readme = slogReadme(kind, m);
@@ -1019,6 +1036,68 @@ ipcMain.handle('slog:archive', async (_e, bookId) => {
     return { error: err.message };
   }
 });
+
+// File → Scribe's Log → Verification Report…: a summary of the log as one
+// self-contained web page (slog-report.js, the same report the verifier
+// makes), and a PDF of it if asked. privacy: 'exact', 'dates' or 'weeks'.
+// The session's chunk closes and its end is stamped first, as for an export.
+ipcMain.handle('slog:report', async (_e, bookId, opts = {}) => {
+  const dir = bookDir(bookId);
+  if (!fs.existsSync(path.join(dir, slog.LOG_DIR, slog.LOG_INFO))) return { error: t('This book has no Scribe\'s Log yet.') };
+  const privacy = ['exact', 'dates', 'weeks'].includes(opts.privacy) ? opts.privacy : 'dates';
+  const win = BrowserWindow.getFocusedWindow();
+  const { settled } = await slogWrapUp(dir, bookId);
+  const meta = readJSON(path.join(dir, 'book.json'), {}) || {};
+  const name = slogFileName(meta.title) + ' - ' + t('Scribe\'s Log report');
+  const { canceled, filePath } = await dialog.showSaveDialog(win, {
+    defaultPath: path.join(exportFolder(), name + '.html'),
+    filters: [{ name: t('Web page'), extensions: ['html'] }]
+  });
+  await settled;
+  if (canceled || !filePath) return null;
+  rememberExportFolder(filePath);
+  try {
+    const html = await slogReportHtml(dir, meta, privacy);
+    const file = /\.html?$/i.test(filePath) ? filePath : filePath + '.html';
+    fs.writeFileSync(file, html, 'utf8');
+    let pdf = null;
+    if (opts.pdf) {
+      pdf = file.replace(/\.html?$/i, '') + '.pdf';
+      fs.writeFileSync(pdf, await slogReportPdf(file));
+    }
+    return { path: file, pdf };
+  } catch (err) {
+    logError('scribe\'s log report', err);
+    return { error: t('Could not write the file ({why})', { why: (err && err.message) || String(err) }) };
+  }
+});
+// The report's page, from the book's log as it stands
+async function slogReportHtml(dir, meta, privacy) {
+  const V = require('./slog-verify.js');
+  const R = require('./slog-report.js');
+  const { anchors, certs } = slogTrust();
+  const res = await V.checkLog(slogFiles.loadLog(dir), { anchors, certs, inflateSync: (b) => require('zlib').inflateRawSync(b) });
+  const stats = R.reportStats(res, { meta: { title: meta.title || '', author: meta.author || '' } });
+  let tz = 'UTC';
+  try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { /* UTC */ }
+  return R.renderReport(stats, {
+    privacy, tz, locale: NeoI18n.getLocale(), t, canShow: slogCanShow(),
+    generator: 'NEO ' + app.getVersion(), generated: Date.now()
+  });
+}
+// A PDF of the report's page, on the paper this computer's region uses
+async function slogReportPdf(file) {
+  const pdfWin = new BrowserWindow({ show: false, webPreferences: { sandbox: true, javascript: false } });
+  try {
+    await pdfWin.loadFile(file);
+    return await pdfWin.webContents.printToPDF({
+      pageSize: paperSize(), margins: { top: 0.6, bottom: 0.6, left: 0.6, right: 0.6 },
+      printBackground: true, generateTaggedPDF: true, generateDocumentOutline: true
+    });
+  } finally {
+    pdfWin.destroy();
+  }
+}
 
 ipcMain.handle('book:delete', async (_e, bookId, title) => {
   const win = BrowserWindow.getFocusedWindow();
@@ -2596,6 +2675,7 @@ function buildMenu() {
             },
             ...(slogStampLabel() ? [{ label: slogStampLabel(), enabled: false }] : []),
             { type: 'separator' },
+            { label: t('Verification Report…'), enabled: !!slogMenu.bookId, click: () => sendToWindow({ type: 'slogReport', bookId: slogMenu.bookId }) },
             { label: t('Export for Verification…'), enabled: !!slogMenu.bookId, click: () => sendToWindow({ type: 'slogExport', bookId: slogMenu.bookId }) },
             { label: t('Merge Log into Archive'), enabled: !!slogMenu.bookId, click: () => sendToWindow({ type: 'slogArchive', bookId: slogMenu.bookId }) }
           ]

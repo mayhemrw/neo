@@ -10697,6 +10697,57 @@ async function slogExport(msg) {
     : t('Log exported. The last stretch of writing isn\'t timestamped yet (no network?): its times are as this computer reported them.'), 8000);
 }
 
+// File → Scribe's Log → Verification Report…: how exactly to show the
+// times (a session calendar says when someone writes), and whether to save
+// a PDF too; main.js closes the session, stamps its end and writes the page
+async function slogReport(msg) {
+  const b = slogBridge();
+  if (!book || msg.bookId !== book.id || !b || !b.report) return;
+  const choices = [
+    { value: 'exact', label: t('Exact times'), desc: t('Each session\'s date and time of day.') },
+    { value: 'dates', label: t('Dates only'), desc: t('Which days you wrote, not when in the day.') },
+    { value: 'weeks', label: t('Weeks only'), desc: t('Which weeks you wrote, nothing finer.') }
+  ];
+  const picked = await new Promise((resolve) => {
+    let privacy = 'dates';
+    const bd = document.createElement('div');
+    bd.className = 'modal-backdrop';
+    bd.innerHTML = `
+      <div class="modal print-modal" style="width:440px" role="dialog" aria-label="${escHtml(t('Verification Report'))}">
+        <h2 style="font-size:16px">${escHtml(t('Verification Report'))}</h2>
+        <p>${escHtml(t('A summary of this book\'s Scribe\'s Log to share: where the text came from, how it was revised, the writing sessions and the outside timestamps. It shows the book\'s title, author name and chapter titles, and none of the writing itself.'))}</p>
+        <p>${escHtml(t('How should it show the times?'))}</p>
+        ${choices.map((c) => `<button type="button" class="fr-choice${c.value === privacy ? ' sel' : ''}" data-v="${c.value}" aria-pressed="${c.value === privacy}" style="width:100%;margin-bottom:8px"><strong>${escHtml(c.label)}</strong><span>${escHtml(c.desc)}</span></button>`).join('')}
+        <label class="pm-check" style="margin:6px 0 4px"><input id="sr-pdf" type="checkbox"/> ${escHtml(t('Also save it as a PDF'))}</label>
+        <p class="muted" style="font-size:12px">${escHtml(t('The report is only a summary. To let someone check the log itself, use Export for Verification…, which always carries exact times.'))}</p>
+        <div style="text-align:right;margin-top:10px">
+          <button class="m-cancel btn-quiet">${t('Cancel')}</button>
+          <button class="m-ok btn-gold">${t('Save Report…')}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(bd);
+    const done = (val) => { bd.remove(); resolve(val); };
+    bd.querySelectorAll('.fr-choice').forEach((btn) => {
+      btn.onclick = () => {
+        privacy = btn.dataset.v;
+        bd.querySelectorAll('.fr-choice').forEach((x) => { x.classList.toggle('sel', x === btn); x.setAttribute('aria-pressed', String(x === btn)); });
+      };
+    });
+    bd.querySelector('.m-cancel').onclick = () => done(null);
+    bd.querySelector('.m-ok').onclick = () => done({ privacy, pdf: bd.querySelector('#sr-pdf').checked });
+    bd.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); done(null); } });
+    bd.querySelector('.m-ok').focus();
+  });
+  if (!picked) return;
+  await slogSaveAll();
+  toast(t('Getting the report ready…'), 30000);
+  let res;
+  try { res = await b.report(book.id, picked); } catch (err) { res = { error: (err && err.message) || String(err) }; }
+  if (!res) { $('#hint').hidden = true; return; }
+  if (res.error) { toast(res.error, 8000); return; }
+  toast(res.pdf ? t('Report saved, with a PDF beside it.') : t('Report saved.'), 6000);
+}
+
 // File → Scribe's Log → Merge Log into Archive
 async function slogArchive(msg) {
   const b = slogBridge();
@@ -14991,6 +15042,7 @@ window.neo.onMenu(async (msg) => {
   slogGesture(); // a menu command is the writer's own doing, like a key
   if (msg.type === 'scribesLog') await slogToggle(msg);
   if (msg.type === 'slogExport') await slogExport(msg);
+  if (msg.type === 'slogReport') await slogReport(msg);
   if (msg.type === 'slogArchive') await slogArchive(msg);
   if (msg.type === 'help') showHelp();
   if (msg.type === 'about') showAbout();

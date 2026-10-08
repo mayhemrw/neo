@@ -598,6 +598,39 @@
     return typeof e.src === 'string' ? e.src : 'unlogged';
   }
 
+  // Detailed origins (a Tracer made with `detail`, for the report): each
+  // unit's origin is "category|hour|paste|flags", the hour (UTC hours since
+  // 1970) the unit was first written in, a paste's own id ("dev8:n:op"),
+  // and flags: "m" moved within the book, "t" markup (inside a tag, as the
+  // op's markup list says, so it's known without the words).
+  const detailOrigin = (cat, hour, paste, moved, tag) => cat + '|' + hour + '|' + paste + '|' + (moved ? 'm' : '') + (tag ? 't' : '');
+  function parseOrigin(o) {
+    const [cat, hour, paste, flags = ''] = String(o).split('|');
+    return { cat, hour: hour === undefined || hour === '' ? null : +hour, paste: paste || null, moved: flags.includes('m'), tag: flags.includes('t') };
+  }
+  const originCat = (o) => { const i = o.indexOf('|'); return i < 0 ? o : o.slice(0, i); };
+  // the same runs as another category (another book's text), or moved
+  function recat(runs, cat, detail) {
+    if (!detail) return runs.length ? [[runs.reduce((a, r) => a + r[0], 0), cat]] : [];
+    return runsTidy(runs.map(([len, o]) => { const p = parseOrigin(o); return [len, detailOrigin(cat, p.hour, p.paste, p.moved, p.tag)]; }));
+  }
+  function asMoved(runs) {
+    return runs.map(([len, o]) => { const p = parseOrigin(o); return p.hour === null && !o.includes('|') ? [len, o] : [len, detailOrigin(p.cat, p.hour, p.paste, true, p.tag)]; });
+  }
+  // the origin of the nearest unit of prose (not markup) before pos (dir
+  // -1) or at or after it (dir 1), or null
+  function proseNear(runs, pos, dir) {
+    const starts = [];
+    let acc = 0;
+    for (const r of runs) { starts.push(acc); acc += r[0]; }
+    if (dir < 0) {
+      for (let i = runs.length - 1; i >= 0; i--) if (starts[i] < pos && !parseOrigin(runs[i][1]).tag) return runs[i][1];
+    } else {
+      for (let i = 0; i < runs.length; i++) if (starts[i] + runs[i][0] > pos && !parseOrigin(runs[i][1]).tag) return runs[i][1];
+    }
+    return null;
+  }
+
   const whole = (v) => Number.isSafeInteger(v) && v >= 0;
   const isDevSource = (s) => !!s && typeof s === 'object' && typeof s.dev === 'string';
   const isGraveSource = (s) => !!s && typeof s === 'object' && !isDevSource(s) && typeof s.log !== 'string' && Number.isSafeInteger(s.n);
@@ -608,8 +641,11 @@
   // (traceAll). `resolve(dev, n, doc)` gives another device's document as
   // it stood after its entry n: { state } or { error }.
   class Tracer {
-    constructor(entries, { dev = null, resolve = null, links = null } = {}) {
+    constructor(entries, { dev = null, resolve = null, links = null, detail = false, hooks = null } = {}) {
       this.dev = dev;
+      this.detail = detail;         // origins with time, paste ids and markup (detailOrigin)
+      this.hooks = hooks;           // detail only: { step(e, tracer), cut(e, gone), back(e, take, source, from) }
+      this.revised = new Set();     // detail only: pastes with words put in or taken out inside them
       this.entries = entries;
       this.resolve = resolve;
       this.links = links;           // n → { dev, n, doc }: text matched to another device's, not recorded
@@ -646,6 +682,7 @@
           this.pos++;
           this.step(e);
           if (Number.isSafeInteger(e.n)) this.lastN = e.n;
+          if (this.hooks && this.hooks.step) this.hooks.step(e, this);
           const docs = this.snapWant.get(e.n);
           if (docs) {
             for (const doc of docs) {
@@ -681,6 +718,27 @@
       return { error: 'from piece has no source' };
     }
 
+    // The units an op of this entry inserts, as its own: one run, or with
+    // detail, prose and markup apart, each stamped with the hour and paste
+    _own(e, i, len, cat) {
+      if (!len) return [];
+      if (!this.detail) return [[len, cat]];
+      const hour = Number.isSafeInteger(e.ts) ? Math.floor(e.ts / 3600e3) : '';
+      const paste = cat === 'paste' ? (this.dev ? this.dev.slice(0, 8) : '') + ':' + e.n + ':' + i : '';
+      const op = e.ops[i];
+      const marks = Array.isArray(op[3]) ? op[3] : [];
+      const out = [];
+      let pos = 0;
+      for (const m of marks) {
+        if (!Array.isArray(m) || !whole(m[0]) || !(m[1] > 0) || m[0] < pos || m[0] + m[1] > len) continue;
+        if (m[0] > pos) out.push([m[0] - pos, detailOrigin(cat, hour, paste, false, false)]);
+        out.push([m[1], detailOrigin(cat, hour, paste, false, true)]);
+        pos = m[0] + m[1];
+      }
+      if (pos < len) out.push([len - pos, detailOrigin(cat, hour, paste, false, false)]);
+      return runsTidy(out);
+    }
+
     // Pieces for a whole document matched to another device's (links)
     _linked(e, len) {
       const l = this.links && this.links.get(e.n);
@@ -700,7 +758,7 @@
           if (docs[e.doc] && docs[e.doc].len) throw new Error('base over a document that already has text');
           const len = e.ops.reduce((a, op) => a + op[2], 0);
           const text = e.x && Array.isArray(e.x.ins) ? e.x.ins.join('') : null;
-          const runs = len ? [[len, originOf(e)]] : [];
+          const runs = this.detail ? e.ops.flatMap((op, i) => this._own(e, i, op[2], originOf(e))) : (len ? [[len, originOf(e)]] : []);
           // a copy's base names the book it was copied from; text that
           // arrived from another device names that device's document
           let pieces = e.from;
@@ -717,8 +775,8 @@
               const source = p[3];
               if (source && typeof source.log === 'string') {
                 end = p[1] + p[2];
-                runsCut(runs, p[1], p[2]);
-                runsInsert(runs, p[1], [[p[2], 'other book']]);
+                const was = runsCut(runs, p[1], p[2]);
+                runsInsert(runs, p[1], recat(was, 'other book', this.detail));
                 continue;
               }
               if (!isDevSource(source)) { bad('a base\'s from can only name another book'); continue; }
@@ -753,11 +811,23 @@
           e.ops.forEach((op, i) => {
             const [at, del, len] = op;
             if (!(whole(at) && whole(del) && whole(len) && at + del <= d.len)) throw new Error('op out of range');
+            if (this.detail) {
+              // words put in or taken out inside a paste, with its prose on
+              // both sides: it's been revised
+              const before1 = proseNear(d.runs, at, -1);
+              const after1 = proseNear(d.runs, at + del, 1);
+              if ((del || len) && before1 && after1) {
+                const a = parseOrigin(before1);
+                const b = parseOrigin(after1);
+                if (a.paste && a.paste === b.paste) this.revised.add(a.paste);
+              }
+            }
             const gone = runsCut(d.runs, at, del);
             const key = e.n + ':' + i;
-            if (this.wanted.has(key)) graves.set(key, { text: d.text === null ? null : d.text.slice(at, at + del), len: del, runs: gone });
+            if (this.wanted.has(key)) graves.set(key, { text: d.text === null ? null : d.text.slice(at, at + del), len: del, runs: gone, doc: e.doc, ts: e.ts });
+            if (this.hooks && this.hooks.cut && gone.length) this.hooks.cut(e, gone);
             const put = words ? words[i] : null;
-            const add = len ? [[len, own]] : [];
+            const add = this._own(e, i, len, own);
             for (const p of pieces) {
               if (!Array.isArray(p) || p[0] !== i) continue;
               const [, pa, pl, source] = p;
@@ -767,17 +837,22 @@
               last = [i, pa + pl];
               if (!source || typeof source !== 'object') { bad('from piece has no source'); continue; }
               let take;
-              if (typeof source.log === 'string') take = [[pl, 'other book']];
+              if (typeof source.log === 'string') take = recat(runsSlice(add, pa, pl), 'other book', this.detail);
               else {
                 const src = this._source(e, source, i, before);
                 if (src.error) { bad(src.error); continue; }
                 take = this._take(p, put, source, src, null, own, bad);
                 if (!take) continue;
+                if (this.detail && !isDevSource(source)) {
+                  take = asMoved(take);
+                  if (this.hooks && this.hooks.back) this.hooks.back(e, take, source, src);
+                }
               }
               runsCut(add, pa, pl);
               runsInsert(add, pa, take);
             }
             runsInsert(d.runs, at, add);
+            if (this.detail) d.v = (d.v || 0) + 1;
             if (d.text !== null) d.text = put !== null ? d.text.slice(0, at) + put + d.text.slice(at + del) : (len ? null : d.text.slice(0, at) + d.text.slice(at + del));
             d.len += len - del;
           });
@@ -803,15 +878,16 @@
       const runs = runsSlice(src.runs, sa, sl);
       return sl === pl && (mine === null || theirs === null || mine === theirs)
         ? runs
-        : [[pl, runs.length ? runs[0][1] : own]];
+        : [[pl, runs.length ? runs[0][1] : (this.detail ? detailOrigin(own, '', '', false, false) : own)]];
     }
   }
 
   // Every device's chain traced together: text that arrived from another
   // device (a `from` naming it, or `links`) takes the origins it had there.
   // chains: [{ dev, entries }]. links: Map dev → Map n → { dev, n, doc }.
-  // Returns Map dev → { docs: { id: { text, len, runs } }, problems }.
-  function traceAll(chains, { links = null } = {}) {
+  // detail and hooks (dev → hooks) as for a Tracer (the report's).
+  // Returns Map dev → { docs: { id: { text, len, runs } }, problems, revised }.
+  function traceAll(chains, { links = null, detail = false, hooks = null } = {}) {
     const tracers = new Map();
     const resolve = (dev, n, doc) => {
       const t = tracers.get(dev);
@@ -825,7 +901,7 @@
       return { state };
     };
     for (const c of chains) {
-      tracers.set(c.dev, new Tracer(c.entries, { dev: c.dev, resolve, links: links && links.get(c.dev) }));
+      tracers.set(c.dev, new Tracer(c.entries, { dev: c.dev, resolve, links: links && links.get(c.dev), detail, hooks: hooks && hooks(c.dev) }));
     }
     // what each device's text is wanted at, by the others
     for (const c of chains) {
@@ -841,7 +917,7 @@
     }
     for (const t of tracers.values()) t.advance();
     const out = new Map();
-    for (const [dev, t] of tracers) out.set(dev, { docs: t.docs, problems: t.problems });
+    for (const [dev, t] of tracers) out.set(dev, { docs: t.docs, problems: t.problems, revised: t.revised });
     return out;
   }
 
@@ -1417,6 +1493,7 @@
     markupRanges, applyOps, applyLengths, insertOffsets, viewOf, sameChar,
     parseLines, parseChunk, readLog, logPaths, readExportFiles, EXPORT_EXTRAS, mergeArchives, expandArchivesSync, expandArchives, orderChunks, verifyChain, Replayer, replay,
     runsTidy, runsSlice, originOf, Tracer, trace, traceAll, matchArrivals,
+    detailOrigin, parseOrigin, originCat,
     AUX_DOCS, JSON_DOCS, chapterDoc, docChapter, decodeEntities, chapterLines, manuscriptText, proseMask, composition, originsAt,
     checkReceipts, matchStampEntries, coverage, clockCheck, deviceNames, checkChains, checkLog,
     SKEW, AHEAD, JUMP

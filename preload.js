@@ -70,7 +70,8 @@ contextBridge.exposeInMainWorld('neo', {
     event: (bookId, ev) => ipcRenderer.invoke('slog:event', bookId, ev),
     status: (bookId) => ipcRenderer.invoke('slog:status', bookId),
     exportLog: (bookId, opts) => ipcRenderer.invoke('slog:export', bookId, opts),
-    archive: (bookId) => ipcRenderer.invoke('slog:archive', bookId)
+    archive: (bookId) => ipcRenderer.invoke('slog:archive', bookId),
+    report: (bookId, opts) => ipcRenderer.invoke('slog:report', bookId, opts)
   },
 
   writingStyleState: (st) => ipcRenderer.send('style:state', st),

@@ -4,6 +4,9 @@
 //
 //   node scripts/slog-check.js "<book folder>" [--bitcoin]
 //   node scripts/slog-check.js "<export>.zip" [--bitcoin]
+//   … --report=<file.html> [--privacy=exact|dates|weeks]  also writes the
+//   verification report (slog-report.js), as File → Scribe's Log →
+//   Verification Report… does, in this computer's time zone
 //
 // A folder's archives (Merge Log into Archive) are read with its loose
 // chunks. An export (Export for Verification…) is checked against its
@@ -61,7 +64,7 @@ function withDisk(dir, files, res) {
   out.devices = res.devices.map((d) => {
     const docs = Object.fromEntries(Object.entries(d.docs).filter(([, t]) => t !== null));
     const differ = [...new Set([...Object.keys(docs), ...Object.keys(out.disk)])].filter((k) => docs[k] !== out.disk[k]).sort();
-    return { ...d, chainEntries: d.entries, docs, chunks: d.chunks.length, entries: d.entries.length, lastTs: d.last || 0, differ };
+    return { ...d, chainEntries: d.entries, chainChunks: d.chunks, docs, chunks: d.chunks.length, entries: d.entries.length, lastTs: d.last || 0, differ };
   });
   const newest = out.devices[out.devices.length - 1];
   out.ok = res.ok && !!newest && !newest.differ.length;
@@ -106,7 +109,7 @@ async function checkZip(file, { bitcoin = false, fetch = globalThis.fetch } = {}
   res.problems = [...ex.problems, ...res.problems];
   res.ok = res.ok && !ex.problems.length;
   res.manifest = ex.manifest;
-  res.devices = res.devices.map((d) => ({ ...d, chainEntries: d.entries, chunks: d.chunks.length, entries: d.entries.length, lastTs: d.last || 0, differ: null }));
+  res.devices = res.devices.map((d) => ({ ...d, chainEntries: d.entries, chainChunks: d.chunks, chunks: d.chunks.length, entries: d.entries.length, lastTs: d.last || 0, differ: null }));
   return res;
 }
 
@@ -181,18 +184,43 @@ function report(dir, res) {
   return lines.join('\n');
 }
 
+// The verification report's page, from a check's result
+function reportPage(dir, res, privacy = 'dates') {
+  const R = require('../slog-report.js');
+  const devices = res.devices.map((d) => ({ ...d, entries: d.chainEntries, chunks: d.chainChunks }));
+  const newest = res.newest && devices.find((d) => d.dev === res.newest.dev);
+  let meta = null;
+  if (dir) { try { const b = JSON.parse(fs.readFileSync(path.join(dir, 'book.json'), 'utf8')); meta = { title: b.title || '', author: b.author || '' }; } catch { /* no book.json */ } }
+  const stats = R.reportStats({ ...res, devices, newest }, { manifest: res.manifest || null, meta });
+  let version = '';
+  try { version = require('../package.json').version; } catch { /* unknown */ }
+  return R.renderReport(stats, {
+    privacy, tz: Intl.DateTimeFormat().resolvedOptions().timeZone, generator: 'slog-check from NEO ' + version,
+    canShow: [
+      'A Scribe\'s Log can show that it hasn\'t been altered since each outside timestamp, that the writing happened over the dates shown, which text was typed in NEO, moved within the book, pasted from outside or imported, and that it ends in exactly a given manuscript.',
+      'It can\'t show that a person pressed the keys, that the ideas weren\'t a machine\'s, or anything about writing done outside NEO. It\'s a record of the writing process, not proof of authorship.'
+    ]
+  });
+}
+
 if (require.main === module) {
   // (PowerShell's Tab completion ends a folder with \, and \" before the
   // closing quote reaches here as a quote of its own)
   const args = process.argv.slice(2);
   const dir = (args.find((a) => !a.startsWith('--')) || '').replace(/"+$/, '');
   if (!dir) {
-    console.error('usage: node scripts/slog-check.js "<book folder>" | "<export or archive .zip>" [--bitcoin]');
+    console.error('usage: node scripts/slog-check.js "<book folder>" | "<export or archive .zip>" [--bitcoin] [--report=<file.html> [--privacy=exact|dates|weeks]]');
     process.exit(2);
   }
   const zip = /\.zip$/i.test(dir) && fs.statSync(dir).isFile();
   (zip ? checkZip(path.resolve(dir), { bitcoin: args.includes('--bitcoin') }) : checkBookFull(path.resolve(dir), { bitcoin: args.includes('--bitcoin') })).then((res) => {
     console.log(report(dir, res));
+    const out = (args.find((a) => a.startsWith('--report=')) || '').slice(9);
+    if (out) {
+      const privacy = (args.find((a) => a.startsWith('--privacy=')) || '--privacy=dates').slice(10);
+      fs.writeFileSync(out, reportPage(zip ? null : path.resolve(dir), res, privacy), 'utf8');
+      console.log('report: ' + out);
+    }
     process.exit(res.ok ? 0 : 1);
   }, (err) => {
     console.error(err);
@@ -200,4 +228,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { checkBook, checkBookFull, checkZip, loadLog, report };
+module.exports = { checkBook, checkBookFull, checkZip, loadLog, report, reportPage };

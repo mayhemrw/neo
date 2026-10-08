@@ -280,7 +280,7 @@ function withoutWords(text) {
 // The files of an export. kind: 'clear' (no text) or 'full'. info: the
 // book's log.json; files: the folder's (loadLog, archives unpacked by the
 // checker's own rules); meta: { title, author, app, exported, manuscript,
-// added, stamped, readme, verifier }. Returns { entries: [{ name, data }],
+// added, chapters, stamped, readme, verifier }. Returns { entries: [{ name, data }],
 // manifest, result } with the log checked as it goes out.
 async function buildExport(bookDir, { kind, meta, anchors = [], certs = [] }) {
   const raw = loadLog(bookDir);
@@ -318,6 +318,7 @@ async function buildExport(bookDir, { kind, meta, anchors = [], certs = [] }) {
     logId: info.logId || null,
     devices: result.devices.length,
     manuscript: { hash: meta.manuscript || null, added: meta.added || [] },
+    chapters: Array.isArray(meta.chapters) ? meta.chapters : [],
     stamped: meta.stamped || null,
     intact: result.ok,
     files

@@ -221,6 +221,7 @@ stamps/certs/<sha256>.der
 | `logId` | The log's id |
 | `devices` | How many chains |
 | `manuscript` | `{ "hash": <the manuscript hash as the exporting device's chain has it>, "added": [<hex SHA-256>, …] }` (below) |
+| `chapters` | The manuscript's chapters in the book's order (ids only, no titles; contents pages left out), so a report on the log without its text counts the same chapters (`book.json` is among the words it doesn't have) |
 | `stamped` | `{ "dev", "n", "tsa", "ots" }`: the exporting device's last entry, and whether an RFC 3161 receipt and an OpenTimestamps proof for it were in hand; `null` if that device has no chain |
 | `intact` | Whether the log checked as it went out |
 | `files` | `[{ "path", "size", "sha256" }]` for every file but `README.txt`, `verifier.html` and `manifest.json` |
@@ -270,3 +271,16 @@ Each `stamp` entry must match a receipt whose SHA-256 is its `r` (for OpenTimest
 - an RFC 3161 receipt dated more than 2 minutes before the entry it covers (the computer's clock was ahead).
 
 Every time is UTC, so time zones and daylight saving never flag anything.
+
+## The report
+
+NEO's File → Scribe's Log → Verification Report… (and the verifier, from an export) summarizes a checked log as one web page. It's a summary for reading, not something to check: the log is. NEO's is `slog-report.js`; what it counts is set out here so another checker can count the same.
+
+- **Characters** are units of the manuscript's chapters counted as for Origins above. Without the words, a unit is counted as writing unless the `markup` list of the op that inserted it says it was a tag; that can't see scene breaks, unwritten outline sections, placeholder and Darlings marks, the part of a tag at the start of an inserted string, or a character reference as one character, so it counts a little more (on NEO's test book, 0.06%).
+- **Pasted, then revised:** units of a paste op (`src: "paste"`) whose paste later had text inserted or deleted with that paste's own prose (units outside tags) on both sides. The units stay pasted; what was typed into it is typed. A paste is one op of one entry; moved, it's still the same paste.
+- **Moved:** units that came to where they are through a `from` piece naming this book (`{n, op}` or `{doc}`), counted under their origin and also as moved.
+- **Deleted** (revision density): units outside tags (by the `markup` lists) cut from chapters by this device's own entries (not `arrived` ones, which are another device's), less units put into a chapter through a `from` piece whose source is a chapter or `darlings` (a move, or a passage restored). Text sent to Darlings counts as deleted until it's restored. Density is deleted units per unit in the manuscript; by month, units deleted that month per unit written that month that's still there, each unit dated by the entry that first inserted it.
+- **Sessions:** a chunk with at least one `edit` or `base` that isn't `arrived`. Writing time joins each such entry's `ts` to `ts + dur` into stretches, a gap over 10 minutes starting a new stretch, and adds the stretches up.
+- **The timeline** counts the manuscript, by origin, as each device had it at each `close` and at its chain's last entry.
+- **Times** are shown exactly, as dates, or as weeks (from Monday), in the time zone of whoever makes the report, which the page names. The setting applies to the report only; the log and its exports keep exact times.
+- **Devices** are Device 1, 2… as above. The report shows the book's title, its own author name and chapter titles (from the words; without them, "Chapter 1"…), and never the text.

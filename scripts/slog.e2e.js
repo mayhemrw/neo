@@ -32,6 +32,7 @@ fs.writeFileSync(path.join(LIB, 'library.json'), JSON.stringify({
   shelves: [{ id: 'shelf-1', name: 'Works in Progress', bookIds: [] }]
 }));
 const EXPORT_TO = path.join(tmp, 'export.zip');
+const REPORT_TO = path.join(tmp, 'report.html');
 const MANUSCRIPT = path.join(tmp, 'harbor.txt');
 fs.writeFileSync(MANUSCRIPT, [
   'The harbor was quiet before the storm.',
@@ -357,6 +358,15 @@ async function main() {
     for (let i = 0; i < 200 && !fs.existsSync(EXPORT_TO); i++) await tick(100);
     await tick(500);
     notes.exportToast = await js(`document.getElementById('hint').textContent`);
+    // File → Scribe's Log → Verification Report…: exact times, and a PDF
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath: REPORT_TO });
+    await js(`(() => { slogReport({ type: 'slogReport', bookId: book.id }); })()`);
+    for (let i = 0; i < 100 && !(await js(`!!(${screen} && ${screen}.querySelector('#sr-pdf'))`)); i++) await tick(50);
+    notes.reportScreen = await js(`${screen}.innerText`);
+    await js(`(() => { const s = ${screen}; s.querySelector('.fr-choice[data-v="exact"]').click(); s.querySelector('#sr-pdf').checked = true; s.querySelector('.m-ok').click(); })()`);
+    for (let i = 0; i < 300 && !fs.existsSync(REPORT_TO.replace(/html$/, 'pdf')); i++) await tick(100);
+    await tick(500);
+    notes.reportToast = await js(`document.getElementById('hint').textContent`);
     // …and File → Scribe's Log → Merge Log into Archive
     await js(`(() => { slogArchive({ type: 'slogArchive', bookId: book.id }); })()`);
     await tick(1500);
@@ -477,6 +487,24 @@ async function main() {
         const text = Object.entries(exportZip).filter(([n]) => n.startsWith('chunks/')).map(([, b]) => Buffer.from(b).toString()).join('');
         assert.ok(text.length > 0 && !text.includes('"x"') && !text.includes('The wind rose'));
         for (const n of ['README.txt', 'verifier.html', 'manifest.json', 'log.json']) assert.ok(exportZip[n], n);
+      }],
+      ['the export\'s manifest lists the chapters, without their titles', () => {
+        const order = JSON.parse(fs.readFileSync(path.join(bookDir, 'book.json'), 'utf8')).chapterOrder;
+        assert.deepEqual(exported.manifest.chapters, order);
+      }],
+      ['the report: a web page and a PDF, with what a log can and can\'t show and the writing sessions', () => {
+        assert.match(notes.reportScreen, /Exact times/);
+        assert.match(notes.reportToast, /Report saved, with a PDF/);
+        const html = fs.readFileSync(REPORT_TO, 'utf8');
+        assert.match(html, /can&#39;t show that a person pressed the keys/);
+        assert.match(html, /Where the text came from/);
+        assert.match(html, /Typed in NEO/);
+        assert.match(html, /Every chain in this log checks/);
+        assert.match(html, /FreeTSA: \d+ checked/);
+        assert.doesNotMatch(html, /<script src|<link /, 'self-contained');
+        const pdf = fs.readFileSync(REPORT_TO.replace(/html$/, 'pdf'));
+        assert.equal(pdf.subarray(0, 5).toString(), '%PDF-');
+        assert.ok(pdf.length > 10000, 'a real PDF');
       }],
       ['merging into an archive leaves a log that checks, and writing carries on', () => {
         assert.match(notes.archiveToast, /^Merged \d+ files into archive-/);
