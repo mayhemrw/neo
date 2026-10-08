@@ -33,7 +33,9 @@ V.useHash({
   hmac: (key, s) => crypto.createHmac('sha256', key).update(s).digest()
 });
 
-const CACHE_V = 1;
+// 2: the tail checkpoint is the documents at the tail itself (version 1's
+// could hold a later open session's text, so its caches are rebuilt)
+const CACHE_V = 2;
 const WRONG_ENTRY = 'this version doesn\'t match the book\'s log';
 const CHECKPOINT_EVERY = 25000;
 
@@ -320,7 +322,9 @@ class History {
           const file = this._saveCheckpoint(logId, dev, end.n, h, r.text);
           if (file) { out.checkpoints.push({ n: end.n, h, chunk: c.name, file }); lastCp = end.n; }
         }
-        newTail = { n: end.n, h, chunk: c.name, docs: r.text };
+        // (a copy: the replay goes on into any later chunk, the open one
+        // most of all, and the tail is the documents as they were here)
+        newTail = { n: end.n, h, chunk: c.name, docs: { ...r.text } };
         out.closedCount = out.chunks.length;
         out.factsAtTail = JSON.parse(JSON.stringify(facts));
         out.lastAtTail = end.ts;
@@ -470,6 +474,23 @@ class History {
       for (const v of ch.versions) {
         v.delta = v.words === null ? null : v.words - prev;
         if (v.words !== null) prev = v.gone ? 0 : v.words;
+      }
+    }
+    // which chapters each named version holds: a copy's, or with the log,
+    // every chapter that had a session begun by then and hadn't been
+    // deleted by then (a chapter begun in that same session after the
+    // naming is listed too, and says it didn't exist then when asked)
+    for (const v of named) {
+      if (v.copy) {
+        const c = copies.find((x) => x.file === v.copy);
+        v.ids = c ? Object.keys(c.chapters) : [];
+        continue;
+      }
+      v.ids = [];
+      for (const ch of Object.values(chapters)) {
+        const before = ch.versions.filter((x) => x.start <= v.at && x.kind !== 'saved');
+        const last = before[before.length - 1];
+        if (last && !(last.gone && last.ts <= v.at)) v.ids.push(ch.id);
       }
     }
     return { logId: ix.logId, devices, chapters, named, problems };

@@ -648,6 +648,56 @@ async function historyMark(bookId, name, auto = null) {
 // what later phases call (Replace All, Word export)
 const history = { mark: historyMark };
 
+// The History window reads a book's past through a helper process
+// (slog-history-worker.js), as spellcheck does: the first look at a long
+// book replays its whole log, seconds of work the window mustn't wait on.
+// One request at a time, in order (the helper's index cache is its own).
+// If the helper can't start, the same code runs here instead.
+let historyChild = null;
+let historyNoHelper = false; // it couldn't start: main reads instead, from then on
+let historySeq = 0;
+const historyWaiting = new Map();
+const HISTORY_HOME = () => path.join(app.getPath('userData'), 'slog', 'history');
+function historyHelper() {
+  if (historyChild || historyNoHelper) return historyChild;
+  try {
+    historyChild = utilityProcess.fork(path.join(__dirname, 'slog-history-worker.js'), [], { serviceName: 'NEO history' });
+    historyChild.on('message', (m) => {
+      const done = m && historyWaiting.get(m.id);
+      if (done) { historyWaiting.delete(m.id); done(m); }
+    });
+    historyChild.on('exit', () => {
+      historyChild = null;
+      for (const done of historyWaiting.values()) done({ ok: false, error: 'the history helper stopped' });
+      historyWaiting.clear();
+    });
+  } catch (err) {
+    logError('versions', err);
+    historyChild = null;
+    historyNoHelper = true;
+  }
+  return historyChild;
+}
+function historyAsk(msg) {
+  const full = { ...msg, home: HISTORY_HOME() };
+  const child = historyHelper();
+  let res;
+  if (!child) {
+    res = Promise.resolve(require('./slog-history-worker.js').reply(full));
+  } else {
+    res = new Promise((resolve) => {
+      const id = ++historySeq;
+      historyWaiting.set(id, resolve);
+      child.postMessage({ ...full, id });
+    });
+  }
+  return res.then((m) => {
+    for (const note of (m && m.notes) || []) logError('versions', new Error(note));
+    if (!m || !m.ok) throw new Error((m && m.error) || 'no answer');
+    return m.value;
+  });
+}
+
 // ---------------------------------------------------------------------------
 // IPC — the renderer's whole view of the disk
 // ---------------------------------------------------------------------------
@@ -981,6 +1031,37 @@ ipcMain.handle('history:remove', (_e, bookId, file) => {
   const dir = bookDir(bookId);
   libName(file);
   try { return slogHistory.deleteNamed(dir, file); } catch (err) { logError('versions', err); return false; }
+});
+// View → Chapter History…: every chapter's versions (History.list), once
+// what's been logged so far is on disk (the window has saved everything),
+// with which computer this is and the session it's writing now
+ipcMain.handle('history:list', async (_e, bookId) => {
+  const dir = bookDir(bookId);
+  try { await scribe().head(dir, bookId); } catch (err) { logError('scribe\'s log', err); }
+  try {
+    const list = await historyAsk({ type: 'list', dir });
+    return { ...list, me: slogTap((s) => s.device()) || null, current: slogTap((s) => s.activeChunk(bookId)) || null };
+  } catch (err) {
+    logError('versions', err);
+    return { error: t('The book\'s history can\'t be read: {why}', { why: err.message }) };
+  }
+});
+// One chapter's text in a version: ref is { dev, n }, { copy } or { named }
+// (as History.list gave them). { text } or { error }, the error in words.
+ipcMain.handle('history:text', async (_e, bookId, ref, chapterId) => {
+  const dir = bookDir(bookId);
+  libName(chapterId);
+  const clean = !ref || typeof ref !== 'object' ? null
+    : typeof ref.named === 'string' ? { named: libName(ref.named) }
+      : typeof ref.copy === 'string' ? { copy: libName(ref.copy) }
+        : typeof ref.dev === 'string' && Number.isSafeInteger(ref.n) ? { dev: ref.dev, n: ref.n } : null;
+  if (!clean) return { error: t('No such version.') };
+  try {
+    return await historyAsk({ type: 'text', dir, ref: clean, chapter: chapterId });
+  } catch (err) {
+    logError('versions', err);
+    return { error: err.message };
+  }
 });
 
 // File → Scribe's Log → Export for Verification…: the book's whole log in
@@ -2954,6 +3035,14 @@ function buildMenu() {
           accelerator: 'CmdOrCtrl+/',
           registerAccelerator: false, // the window answers / and ? itself (isHelpShortcut)
           click: () => sendToWindow({ type: 'help' })
+        },
+        { type: 'separator' },
+        // the open book's chapters as they were (slog-history.js)
+        {
+          label: t('Chapter History…'),
+          accelerator: 'CmdOrCtrl+Shift+H',
+          enabled: !!slogMenu.bookId,
+          click: () => sendToWindow({ type: 'history', bookId: slogMenu.bookId })
         },
         { type: 'separator' },
         {

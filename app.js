@@ -11169,6 +11169,386 @@ async function nameVersion(msg) {
 }
 
 /* ================================================================== */
+/*  CHAPTER HISTORY                                                    */
+/* ================================================================== */
+
+// View → Chapter History… (⌘⇧H): the open book's chapters as they were.
+// main.js lists every chapter's versions (slog-history.js: one for each
+// writing session, rebuilt from the Scribe's Log; with the log off, the
+// copies kept at each session's end; and the versions the writer named).
+// The window shows any of them as prose, or compared with the chapter now
+// or with another version (slog-diff.js: what went struck through, what
+// came underlined). Only named versions change here (renamed, deleted);
+// the chapters don't. Pocket has no history, so no window there.
+const historyState = { open: null };
+function historyDate(ms) {
+  const d = new Date(ms);
+  const thisYear = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleString(NeoI18n.getLocale(), { month: 'short', day: 'numeric', ...(thisYear ? {} : { year: 'numeric' }), hour: 'numeric', minute: '2-digit' });
+}
+const historyNumber = (n) => Number(n).toLocaleString(NeoI18n.getLocale());
+// a chapter's name in the picker: as the manuscript heads it
+function historyChapterLabel(id) {
+  try { return chapterHeading(id, book, ' — ') || chapterName(id); } catch { return t('Untitled'); }
+}
+// One chapter's versions, newest first: those from the log and the copies,
+// then the named versions that hold it, all as list entries
+function historyEntries(data, chId) {
+  const ch = Object.values(data.chapters).find((c) => c.id === chId);
+  const out = (ch ? ch.versions : []).map((v) => ({
+    key: v.file ? 'C:' + v.file : `L:${v.dev}:${v.n}`,
+    ref: v.file ? { copy: v.file } : { dev: v.dev, n: v.n },
+    at: v.ts, dev: v.dev, words: v.words, delta: v.delta, kind: v.kind, gone: v.gone, broken: v.broken,
+    current: !!(v.chunk && v.chunk === data.current && v.dev === data.me)
+  }));
+  for (const nv of data.named || []) {
+    if (!(nv.ids || []).includes(chId)) continue;
+    out.push({ key: 'N:' + nv.file, ref: { named: nv.file }, at: nv.at, dev: nv.dev, name: nv.name, auto: nv.auto, file: nv.file, copy: !!nv.copy, named: true });
+  }
+  return out.sort((a, b) => b.at - a.at || (a.named ? -1 : 0) - (b.named ? -1 : 0));
+}
+function historyDevice(data, dev) {
+  if (dev && dev === data.me) return t('This computer');
+  const d = (data.devices || []).find((x) => x.dev === dev);
+  const n = d && /(\d+)$/.exec(d.name || '');
+  return n ? t('Device {n}', { n: n[1] }) : t('Another computer');
+}
+function historyKindLabel(e) {
+  if (e.named) return e.auto ? t('Saved automatically') : t('Named version');
+  if (e.broken) return t('Can\'t be rebuilt');
+  if (e.gone) return t('Last version before it was deleted');
+  if (e.current) return t('This session, so far');
+  return {
+    import: t('Imported'),
+    baseline: t('When logging began'),
+    copy: t('Duplicated'),
+    saved: t('Copy kept with the log off')
+  }[e.kind] || '';
+}
+// how an entry is named in a sentence: its name, or when it was
+const historyEntryName = (e) => (e.named ? '“' + e.name + '”' : historyDate(e.at));
+
+async function showHistory(msg) {
+  const h = window.neo && window.neo.history;
+  const D = globalThis.SlogDiff;
+  if (!book || (msg && msg.bookId && msg.bookId !== book.id) || !h || !h.list || !D) return;
+  const existing = $('#chapter-history');
+  if (existing) { (existing.querySelector('.hv-item[aria-selected="true"]') || existing.querySelector('.hv-list')).focus(); return; }
+  const bookId = book.id;
+  const previousFocus = document.activeElement;
+  const selection = window.getSelection();
+  const previousRange = previousFocus && previousFocus.isContentEditable && selection.rangeCount
+    ? selection.getRangeAt(0).cloneRange() : null;
+  const bd = document.createElement('div');
+  bd.id = 'chapter-history';
+  bd.className = 'modal-backdrop';
+  bd.innerHTML = `
+    <div class="modal history-modal" role="dialog" aria-modal="true" aria-labelledby="hv-title">
+      <header class="hv-header">
+        <h2 id="hv-title">${escHtml(t('Chapter History'))}</h2>
+        <select class="hv-chapter" aria-label="${escHtml(t('Chapter'))}" disabled></select>
+      </header>
+      <div class="hv-body">
+        <div class="hv-list" role="listbox" tabindex="0" aria-label="${escHtml(t('Versions'))}"><p class="hv-wait">${escHtml(t('Reading this book’s history…'))}</p></div>
+        <section class="hv-detail" aria-live="polite">
+          <div class="hv-bar" hidden>
+            <div class="hv-what"><strong class="hv-name"></strong><span class="hv-sub"></span></div>
+            <div class="hv-modes" role="group" aria-label="${escHtml(t('Show'))}">
+              <button type="button" data-mode="view" aria-pressed="true">${escHtml(t('Read'))}</button>
+              <button type="button" data-mode="compare" aria-pressed="false">${escHtml(t('Compare'))}</button>
+            </div>
+            <span class="hv-named-tools" hidden>
+              <button type="button" class="btn-quiet hv-rename">${escHtml(t('Rename…'))}</button>
+              <button type="button" class="btn-quiet hv-delete">${escHtml(t('Delete…'))}</button>
+            </span>
+          </div>
+          <div class="hv-compare-row" hidden>
+            <label>${escHtml(t('Compare with'))} <select class="hv-against"></select></label>
+            <span class="hv-summary"></span>
+          </div>
+          <div class="hv-page" tabindex="0" aria-label="${escHtml(t('The version'))}"></div>
+        </section>
+      </div>
+      <footer class="hv-footer">
+        <span class="hv-problems"></span>
+        <button class="m-ok btn-gold">${escHtml(t('Done'))}</button>
+      </footer>
+    </div>`;
+  const list = bd.querySelector('.hv-list');
+  const picker = bd.querySelector('.hv-chapter');
+  const page = bd.querySelector('.hv-page');
+  const bar = bd.querySelector('.hv-bar');
+  const compareRow = bd.querySelector('.hv-compare-row');
+  const against = bd.querySelector('.hv-against');
+  const summary = bd.querySelector('.hv-summary');
+  const note = bd.querySelector('.hv-problems');
+  // what's shown: the chapter, its entries, the one selected, read or
+  // compared, and with what ('now' or another entry's key)
+  const st = { data: null, chId: null, entries: [], sel: null, mode: 'view', against: null, seq: 0, texts: new Map() };
+  historyState.open = st;
+
+  const close = () => {
+    document.removeEventListener('keydown', onKey, true);
+    historyState.open = null;
+    bd.remove();
+    if (previousFocus && previousFocus.isConnected) previousFocus.focus({ preventScroll: true });
+    if (previousRange && previousRange.startContainer.isConnected && previousRange.endContainer.isConnected) {
+      selection.removeAllRanges();
+      selection.addRange(previousRange);
+    }
+  };
+  bd.querySelector('.m-ok').onclick = close;
+  // the window owns the keyboard while it's the topmost dialog: the page
+  // underneath hears nothing (copying a passage still works, natively)
+  const onKey = (e) => {
+    const top = [...document.querySelectorAll('.modal-backdrop:not([hidden])')].pop();
+    if (top !== bd) return;
+    e.stopPropagation();
+    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+    if (e.key === 'Tab') {
+      const stops = [...bd.querySelectorAll('select, button, [tabindex="0"]')]
+        .filter((x) => !x.disabled && !x.closest('[hidden]') && x.offsetParent !== null && !x.closest('.hv-item'));
+      const i = stops.indexOf(document.activeElement.closest('.hv-item') ? list : document.activeElement);
+      e.preventDefault();
+      const next = stops[(i + (e.shiftKey ? stops.length - 1 : 1) + stops.length) % stops.length];
+      if (next === list) focusSelected(); else if (next) next.focus();
+      return;
+    }
+    if (list.contains(document.activeElement) && ['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) {
+      e.preventDefault();
+      const i = st.entries.findIndex((x) => x.key === st.sel);
+      const to = e.key === 'Home' ? 0 : e.key === 'End' ? st.entries.length - 1 : i + (e.key === 'ArrowDown' ? 1 : -1);
+      if (st.entries[to]) { select(st.entries[to].key); focusSelected(); }
+    }
+  };
+  document.addEventListener('keydown', onKey, true);
+  document.body.appendChild(bd);
+  list.focus();
+
+  const focusSelected = () => {
+    const el = list.querySelector('.hv-item[aria-selected="true"]');
+    (el || list).focus({ preventScroll: false });
+  };
+  const entry = (key) => st.entries.find((x) => x.key === key) || null;
+  // one version's text of the chapter, asked of main.js once
+  const textOf = (e) => {
+    const k = st.chId + '|' + e.key;
+    if (!st.texts.has(k)) {
+      st.texts.set(k, Promise.resolve(h.text(bookId, e.ref, st.chId)).catch((err) => ({ error: (err && err.message) || String(err) })));
+    }
+    return st.texts.get(k);
+  };
+  const inBook = () => (book.chapterOrder || []).includes(st.chId);
+  const nowText = () => (book && book.id === bookId ? chapterHTML[st.chId] || '' : '');
+
+  function fillPicker() {
+    const ids = (book.chapterOrder || []).filter((id) => chapterKind(id) !== 'contents');
+    const gone = Object.values(st.data.chapters).filter((c) => !ids.includes(c.id) && c.versions.length)
+      .sort((a, b) => b.versions[b.versions.length - 1].ts - a.versions[a.versions.length - 1].ts);
+    picker.innerHTML = `<optgroup label="${escHtml(t('In the book'))}">${ids.map((id) => `<option value="${escHtml(id)}">${escHtml(historyChapterLabel(id))}</option>`).join('')}</optgroup>` +
+      (gone.length ? `<optgroup label="${escHtml(t('Chapters no longer in the book'))}">${gone.map((c) => {
+        const last = c.versions[c.versions.length - 1];
+        const label = (c.title && c.title.trim()) || t('Untitled chapter');
+        return `<option value="${escHtml(c.id)}">${escHtml(t('{title} (last written {when})', { title: label, when: historyDate(last.ts) }))}</option>`;
+      }).join('')}</optgroup>` : '');
+    picker.disabled = false;
+  }
+
+  function fillList() {
+    if (!st.entries.length) {
+      list.innerHTML = `<p class="hv-wait">${escHtml(inBook() ? t('No versions of this chapter yet. One is kept each time a writing session ends.') : t('No versions of this chapter.'))}</p>`;
+      return;
+    }
+    list.innerHTML = st.entries.map((e) => {
+      const kind = historyKindLabel(e);
+      const words = e.words === null || e.words === undefined ? '' : t('{n} words', { n: historyNumber(e.words) });
+      const delta = !e.delta ? '' : `<span class="hv-delta ${e.delta > 0 ? 'up' : 'down'}">${e.delta > 0 ? '+' : '−'}${historyNumber(Math.abs(e.delta))}</span>`;
+      return `<div class="hv-item${e.named ? ' named' : ''}${e.broken ? ' broken' : ''}" role="option" tabindex="-1" aria-selected="${e.key === st.sel}" data-key="${escHtml(e.key)}">
+        <div class="hv-when">${escHtml(historyDate(e.at))}</div>
+        ${e.named ? `<div class="hv-vname">${escHtml(e.name)}</div>` : ''}
+        <div class="hv-meta">${[escHtml(historyDevice(st.data, e.dev)), words && escHtml(words) + (delta ? ' ' + delta : '')].filter(Boolean).join(' · ')}</div>
+        ${kind ? `<div class="hv-kind">${escHtml(kind)}</div>` : ''}
+      </div>`;
+    }).join('');
+    list.querySelectorAll('.hv-item').forEach((el) => {
+      el.onclick = () => { select(el.dataset.key); el.focus(); };
+    });
+  }
+
+  function fillAgainst() {
+    const sel = entry(st.sel);
+    const opts = [];
+    if (inBook()) opts.push({ value: 'now', label: t('The chapter now') });
+    for (const e of st.entries) {
+      if (e.key === st.sel || e.broken) continue;
+      opts.push({ value: e.key, label: e.named ? t('“{name}”, {when}', { name: e.name, when: historyDate(e.at) }) : historyDate(e.at) });
+    }
+    if (!opts.some((o) => o.value === st.against)) {
+      // the chapter now, or for a chapter that's gone, the version before
+      const i = st.entries.findIndex((x) => x.key === st.sel);
+      const before = st.entries.slice(i + 1).find((x) => !x.broken) || st.entries.slice(0, i).reverse().find((x) => !x.broken);
+      st.against = inBook() ? 'now' : before ? before.key : null;
+    }
+    against.innerHTML = opts.map((o) => `<option value="${escHtml(o.value)}"${o.value === st.against ? ' selected' : ''}>${escHtml(o.label)}</option>`).join('');
+    against.disabled = !opts.length;
+    bd.querySelector('[data-mode="compare"]').disabled = !opts.length || !sel || sel.broken;
+  }
+
+  function select(key) {
+    st.sel = key;
+    list.querySelectorAll('.hv-item').forEach((el) => el.setAttribute('aria-selected', String(el.dataset.key === key)));
+    const el = list.querySelector('.hv-item[aria-selected="true"]');
+    if (el) el.scrollIntoView({ block: 'nearest' });
+    show();
+  }
+
+  async function show() {
+    const seq = ++st.seq;
+    const e = entry(st.sel);
+    bar.hidden = !e;
+    if (!e) { compareRow.hidden = true; page.innerHTML = ''; return; }
+    bd.querySelector('.hv-name').textContent = e.named ? e.name : historyDate(e.at);
+    bd.querySelector('.hv-sub').textContent = [e.named ? historyDate(e.at) : '', historyDevice(st.data, e.dev), historyKindLabel(e)].filter(Boolean).join(' · ');
+    bd.querySelector('.hv-named-tools').hidden = !e.named;
+    fillAgainst();
+    if (st.mode === 'compare' && bd.querySelector('[data-mode="compare"]').disabled) st.mode = 'view';
+    bd.querySelectorAll('.hv-modes button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === st.mode)));
+    compareRow.hidden = st.mode !== 'compare';
+    summary.textContent = '';
+    if (e.broken) {
+      page.innerHTML = `<p class="hv-error">${escHtml(t('This version can’t be rebuilt: part of the Scribe’s Log from that computer doesn’t replay. Earlier versions are unaffected.'))}</p>`;
+      return;
+    }
+    page.classList.add('loading');
+    const mine = await textOf(e);
+    let other = null;
+    let otherEntry = null;
+    if (st.mode === 'compare' && st.against) {
+      otherEntry = st.against === 'now' ? null : entry(st.against);
+      other = st.against === 'now' ? { text: nowText() } : otherEntry ? await textOf(otherEntry) : null;
+    }
+    if (seq !== st.seq || !bd.isConnected) return;
+    page.classList.remove('loading');
+    if (mine.error) {
+      page.innerHTML = `<p class="hv-error">${escHtml(t('This version can’t be shown: {why}', { why: mine.error }))}</p>`;
+      return;
+    }
+    if (st.mode !== 'compare' || !other) {
+      page.innerHTML = D.viewHtml(mine.text) || `<p class="hv-wait">${escHtml(t('This version of the chapter is empty.'))}</p>`;
+      page.scrollTop = 0;
+      return;
+    }
+    if (other.error) {
+      page.innerHTML = `<p class="hv-error">${escHtml(t('That version can’t be shown: {why}', { why: other.error }))}</p>`;
+      return;
+    }
+    // older on the left of the arrow, whichever was picked first
+    const otherAt = otherEntry ? otherEntry.at : Infinity;
+    const selFirst = e.at <= otherAt;
+    const [from, to] = selFirst ? [mine.text, other.text] : [other.text, mine.text];
+    const fromName = selFirst ? historyEntryName(e) : historyEntryName(otherEntry);
+    const toName = selFirst ? (otherEntry ? historyEntryName(otherEntry) : t('now')) : historyEntryName(e);
+    const c = D.compare(from, to);
+    if (c.same) {
+      summary.textContent = t('The words are the same.');
+      page.innerHTML = D.viewHtml(to);
+    } else {
+      summary.textContent = t('From {from} to {to}: {added} words added, {removed} taken out.', {
+        from: fromName, to: toName, added: historyNumber(c.added), removed: historyNumber(c.removed)
+      });
+      page.innerHTML = D.toHtml(c.blocks, { foldLabel: (n) => (n === 1 ? t('1 unchanged paragraph') : t('{n} unchanged paragraphs', { n: historyNumber(n) })) });
+      page.querySelectorAll('.hv-fold').forEach((b) => {
+        b.onclick = () => {
+          const folded = b.nextElementSibling;
+          folded.hidden = false;
+          b.remove();
+          folded.setAttribute('tabindex', '-1');
+          folded.focus({ preventScroll: true });
+        };
+      });
+    }
+    page.scrollTop = 0;
+  }
+
+  function openChapter(id) {
+    st.chId = id;
+    picker.value = id;
+    st.entries = historyEntries(st.data, id);
+    const first = st.entries.find((x) => !x.broken) || st.entries[0];
+    st.sel = first ? first.key : null;
+    st.against = null;
+    fillList();
+    show();
+  }
+
+  bd.querySelectorAll('.hv-modes button').forEach((b) => {
+    b.onclick = () => { st.mode = b.dataset.mode; show(); };
+  });
+  against.onchange = () => { st.against = against.value; show(); };
+  picker.onchange = () => openChapter(picker.value);
+
+  bd.querySelector('.hv-rename').onclick = async () => {
+    const e = entry(st.sel);
+    if (!e || !e.named) return;
+    const name = await askInput(escHtml(t('Rename Version')), escHtml(t('For example: Sent to Maria')), e.name);
+    focusSelected();
+    if (!name || !bd.isConnected) return;
+    let res;
+    try { res = await h.rename(bookId, e.file, name); } catch (err) { res = { error: (err && err.message) || String(err) }; }
+    if (!res || res.error) { toast(t('The version wasn’t renamed: {why}', { why: (res && res.error) || '?' }), 6000); return; }
+    const nv = st.data.named.find((x) => x.file === e.file);
+    if (nv) nv.name = res.name;
+    st.entries = historyEntries(st.data, st.chId);
+    fillList();
+    select(e.key);
+    focusSelected();
+  };
+  bd.querySelector('.hv-delete').onclick = async () => {
+    const e = entry(st.sel);
+    if (!e || !e.named) return;
+    const why = e.copy
+      ? t('This removes the copy of the book it kept. The versions kept at the end of each writing session stay.')
+      : t('Its words stay in the Scribe’s Log, in the versions kept for each writing session; only the name goes.');
+    const ok = await optionModal(escHtml(t('Delete Version')), escHtml(why), [
+      { label: escHtml(t('Delete “{name}”', { name: e.name })), value: true, danger: true }
+    ]);
+    focusSelected();
+    if (!ok || !bd.isConnected) return;
+    let done = false;
+    try { done = await h.remove(bookId, e.file); } catch { done = false; }
+    if (!done) { toast(t('The version wasn’t deleted.'), 6000); return; }
+    st.data.named = st.data.named.filter((x) => x.file !== e.file);
+    const i = st.entries.findIndex((x) => x.key === e.key);
+    st.entries = historyEntries(st.data, st.chId);
+    const next = st.entries[Math.min(i, st.entries.length - 1)];
+    st.sel = next ? next.key : null;
+    fillList();
+    show();
+    focusSelected();
+    toast(t('Deleted the version “{name}”.', { name: e.name }), 4000);
+  };
+
+  // the list: read once the log is on disk (the window saves everything first)
+  await slogSaveAll();
+  let data;
+  try { data = await h.list(bookId); } catch (err) { data = { error: (err && err.message) || String(err) }; }
+  if (!bd.isConnected) return;
+  if (!data || data.error) {
+    list.innerHTML = `<p class="hv-error">${escHtml((data && data.error) || t('The book’s history can’t be read.'))}</p>`;
+    return;
+  }
+  st.data = data;
+  if (!Array.isArray(st.data.named)) st.data.named = [];
+  fillPicker();
+  if (data.problems && data.problems.length) note.textContent = t('Some versions can’t be rebuilt: {why}', { why: data.problems.join('; ') });
+  const start = (msg && msg.chapterId) || currentChapterId;
+  const ids = [...picker.options].map((o) => o.value);
+  if (!ids.length) return;
+  openChapter(ids.includes(start) ? start : ids[0]);
+  if (document.activeElement === list || !bd.contains(document.activeElement)) focusSelected();
+}
+
+/* ================================================================== */
 /*  SAVING                                                             */
 /* ================================================================== */
 
@@ -13516,7 +13896,9 @@ function bookShortcutSections() {
       [KHELP, tk('Keyboard shortcuts')],
       [K('⌘,', 'Ctrl+,'), tk('Goals and writing sprints')],
       [K('⌘⇧I', 'Ctrl+Shift+I'), tk('Import manuscripts')],
-      [K('⌘E', 'Ctrl+E'), tk('Email a draft to yourself')]
+      [K('⌘E', 'Ctrl+E'), tk('Email a draft to yourself')],
+      // a chapter's versions (desktop only: Pocket keeps no history)
+      ...(window.neo && window.neo.history && window.neo.history.list ? [[K('⌘⇧H', 'Ctrl+Shift+H'), tk('Chapter history'), tk('Every version of the chapter, read or compared with it now.')]] : [])
     ] },
     { title: tk('View & window'), rows: [
       [[K('⌘⇧F', 'Ctrl+Shift+F'), K('⌘Enter', 'Ctrl+Enter')], tk('Toggle full screen')],
@@ -15442,9 +15824,10 @@ window.neo.onMenu(async (msg) => {
   if ($('#keyboard-shortcuts') && msg.type !== 'help') return;
   // a window the menu opens (⌘, for Goals, say) never stacks on one that's
   // already open: pressing it again used to pile up overlays
-  const WINDOWS = ['stats', 'about', 'emailSettings', 'coverArt', 'reshelve', 'checkUpdate', 'nameVersion'];
+  const WINDOWS = ['stats', 'about', 'emailSettings', 'coverArt', 'reshelve', 'checkUpdate', 'nameVersion', 'history'];
   if (WINDOWS.includes(msg.type) && document.querySelector('.modal-backdrop:not([hidden])')) {
     if (msg.type === 'checkUpdate' && updateDialog) updateDialog.focus();
+    if (msg.type === 'history' && $('#chapter-history')) showHistory(msg); // already open: back to it
     return;
   }
   slogGesture(); // a menu command is the writer's own doing, like a key
@@ -15453,6 +15836,7 @@ window.neo.onMenu(async (msg) => {
   if (msg.type === 'slogReport') await slogReport(msg);
   if (msg.type === 'slogArchive') await slogArchive(msg);
   if (msg.type === 'nameVersion') await nameVersion(msg);
+  if (msg.type === 'history') await showHistory(msg);
   if (msg.type === 'help') showHelp();
   if (msg.type === 'about') showAbout();
   if (msg.type === 'checkUpdate') checkForUpdate();

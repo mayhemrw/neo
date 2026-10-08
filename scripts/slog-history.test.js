@@ -159,6 +159,30 @@ describe('History', { concurrency: 1 }, () => {
     assert.deepEqual(again.chapters, fresh.chapters, 'the same as building it from nothing');
   });
 
+  test('with a session still open (the book open in NEO), every earlier version rebuilds exactly', async () => {
+    const env = setup();
+    const rec = env.recorder();
+    await session(rec, env, [['ch-1', '<p>Draft one.</p>']]);
+    await session(rec, env, [['ch-1', '<p>Draft two.</p>']]);
+    rec.open(env.dir, 'book-a');
+    save(rec, env, 'ch-1', '<p>Draft three, still being written.</p>');
+    await rec.head(env.dir, 'book-a');
+    // the History window looks while the open session goes on, twice
+    for (let look = 0; look < 2; look++) {
+      const h = env.history();
+      const v = h.index(env.dir).chapters['ch-1'].versions;
+      assert.deepEqual(v.map((x) => h.text(env.dir, x.dev, x.n, 'ch-1').text),
+        ['<p>Draft one.</p>', '<p>Draft two.</p>', '<p>Draft three, still being written.</p>'], 'look ' + look);
+      save(rec, env, 'ch-1', '<p>Draft three, still being written.</p><p>More.</p>');
+      await rec.head(env.dir, 'book-a');
+      assert.equal(h.text(env.dir, v[1].dev, v[1].n, 'ch-1').text, '<p>Draft two.</p>');
+      save(rec, env, 'ch-1', '<p>Draft three, still being written.</p>');
+      await rec.head(env.dir, 'book-a');
+    }
+    await rec.close('book-a');
+    assert.deepEqual(env.errors, []);
+  });
+
   test('a missing or wrong checkpoint is rebuilt from the log', async () => {
     const env = setup();
     const rec = env.recorder();

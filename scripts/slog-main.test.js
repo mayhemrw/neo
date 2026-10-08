@@ -22,6 +22,8 @@ const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'neo-slog-user-'));
 
 let saveAs = null; // where a save dialog "chooses", or null to cancel
 let offered = null; // the name the last save dialog offered
+let forkFails = false; // the history helper can't start
+const forks = [];
 function loadMain() {
   const handlers = new Map();
   const sent = [];
@@ -40,7 +42,17 @@ function loadMain() {
     BrowserWindow: { getFocusedWindow: () => null, getAllWindows: () => [] },
     Menu: { buildFromTemplate: (items) => items, setApplicationMenu: (m) => { menus.push(m); } },
     dialog: { showSaveDialog: async (_w, o) => { offered = path.basename(o.defaultPath); return saveAs ? { canceled: false, filePath: saveAs } : { canceled: true }; } },
-    utilityProcess: { fork: () => ({ on() {}, postMessage() {} }) },
+    // the history helper runs its real code, in this process; the others do nothing
+    utilityProcess: {
+      fork: (file) => {
+        if (!file.endsWith('slog-history-worker.js')) return { on() {}, postMessage() {} };
+        if (forkFails) throw new Error('no helper processes here');
+        forks.push(file);
+        const worker = localRequire(file);
+        const on = {};
+        return { on: (ev, fn) => { on[ev] = fn; }, postMessage: (m) => setImmediate(() => on.message && on.message(worker.reply(m))) };
+      }
+    },
     screen: {}
   };
   const context = vm.createContext({
@@ -381,6 +393,60 @@ describe('Scribe\'s Log in main.js', { concurrency: 1 }, () => {
     // (a name from the window is still checked)
     assert.throws(() => main.call('history:remove', book.id, '../book.json'), /Invalid library name/);
     assert.ok(fs.existsSync(path.join(dir, 'book.json')));
+  });
+
+  test('View → Chapter History…: every version listed and rebuilt, through the helper process', async () => {
+    const lib = tempLibrary();
+    const book = main.call('book:create', { title: 'Looked Back' });
+    const dir = path.join(lib, book.id);
+    main.call('slog:open', book.id);
+    const item = main.menus[main.menus.length - 1].find((m) => m.label === 'View').submenu.find((m) => m.label === 'Chapter History…');
+    assert.equal(item.accelerator, 'CmdOrCtrl+Shift+H');
+    assert.equal(item.enabled, true);
+    const write = (html, was) => {
+      main.call('slog:observe', book.id, 'chapter', 'ch-x', html, { src: 'typed', dur: 500, ev: 6 });
+      main.call('chapter:write', book.id, 'ch-x', html, was);
+    };
+    write('<p>Draft one.</p>');
+    await main.call('slog:event', book.id, { type: 'close' });
+    main.call('slog:open', book.id);
+    write('<p>Draft two.</p>', '<p>Draft one.</p>');
+    const named = await main.call('history:mark', book.id, 'Midway');
+    write('<p>Draft three.</p>', '<p>Draft two.</p>');
+    // (the window saves everything, then asks; the log reaches the disk first)
+    const list = await main.call('history:list', book.id);
+    const rec = main.get('slogRecorder');
+    assert.equal(list.me, rec.device());
+    assert.equal(list.current, rec.activeChunk(book.id));
+    assert.deepEqual(list.problems, []);
+    const ch = Object.values(list.chapters).find((c) => c.id === 'ch-x');
+    assert.deepEqual(ch.versions.map((v) => [v.words, v.chunk === list.current]), [[2, false], [2, true]]);
+    assert.deepEqual(list.named.map((v) => [v.name, v.ids.includes('ch-x')]), [['Midway', true]]);
+    const text = (ref) => main.call('history:text', book.id, ref, 'ch-x');
+    assert.deepEqual(await text({ dev: ch.versions[0].dev, n: ch.versions[0].n }), { text: '<p>Draft one.</p>' });
+    assert.deepEqual(await text({ dev: ch.versions[1].dev, n: ch.versions[1].n }), { text: '<p>Draft three.</p>' });
+    assert.deepEqual(await text({ named: named.file }), { text: '<p>Draft two.</p>' });
+    assert.ok((await text(null)).error);
+    assert.ok((await text({ dev: rec.device(), n: 'x' })).error);
+    assert.ok((await main.call('history:text', book.id, { dev: rec.device(), n: 1 }, 'no-such')).error);
+    await assert.rejects(main.call('history:text', book.id, { named: '../book.json' }, 'ch-x'), /Invalid library name/);
+    // one helper, its checkpoints in userData, none in the library
+    assert.equal(forks.length, 1);
+    assert.ok(fs.readdirSync(path.join(userData, 'slog', 'history')).length);
+    assert.deepEqual(fs.readdirSync(dir).filter((f) => /history|\.gz$/.test(f)), []);
+    // a helper that can't start: the same answers, from main itself
+    main.get('historyChild = null');
+    forkFails = true;
+    try {
+      const again = await main.call('history:list', book.id);
+      assert.equal(Object.values(again.chapters).find((c) => c.id === 'ch-x').versions.length, 2);
+      assert.deepEqual(await text({ named: named.file }), { text: '<p>Draft two.</p>' });
+    } finally { forkFails = false; }
+    await main.call('slog:event', book.id, { type: 'close' });
+    assertChecks(dir);
+    // the name refused, and the helper that didn't start (said once)
+    const logged = errorLog(lib).split('\n').filter((l) => l.startsWith('['));
+    assert.deepEqual(logged.map((l) => l.replace(/^\[[^\]]*\] /, '')), ['[ipc history:text] Error: Invalid library name', '[versions] Error: no helper processes here']);
   });
 
   test('with the log off: each session leaves a copy of what it changed, and naming copies the book', async () => {

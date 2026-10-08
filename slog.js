@@ -55,113 +55,12 @@ function newLogInfo() {
 
 // Ops are [at, del, ins] in UTF-16 units of the document's saved HTML,
 // applied in order, each `at` measured after the ops before it. The
-// inserted strings travel separately (an entry's x.ins), one per op.
-
-const isHigh = (c) => c >= 0xd800 && c <= 0xdbff;
-const isLow = (c) => c >= 0xdc00 && c <= 0xdfff;
-
-// Tokens for the word-level pass: a tag, a word, or a run of spaces.
-const TOKEN_RE = /<[^>]*>|[^\s<]+|\s+|</g;
-const MAX_EDITS = 256;      // tokens; past this a burst is one replacement
-const SPLIT_FROM = 32;      // a middle shorter than this is one op anyway
-
-// Two edits far apart in one burst (typing here, then a click and a word
-// there) must not become one replacement of everything between them: that
-// would claim the untouched text was retyped. So past the shared start and
-// end, the middles are compared word by word (Myers' algorithm, capped).
-function diff(a, b) {
-  if (a === b) return { ops: [], ins: [] };
-  const max = Math.min(a.length, b.length);
-  let pre = 0;
-  while (pre < max && a.charCodeAt(pre) === b.charCodeAt(pre)) pre++;
-  if (pre > 0 && isHigh(a.charCodeAt(pre - 1))) pre--; // never split a surrogate pair
-  let suf = 0;
-  while (suf < max - pre && a.charCodeAt(a.length - 1 - suf) === b.charCodeAt(b.length - 1 - suf)) suf++;
-  if (suf > 0 && isLow(a.charCodeAt(a.length - suf))) suf--;
-  const am = a.slice(pre, a.length - suf);
-  const bm = b.slice(pre, b.length - suf);
-  let hunks = null;
-  if (Math.min(am.length, bm.length) >= SPLIT_FROM) hunks = tokenHunks(am, bm);
-  if (!hunks) hunks = [[0, am.length, 0, bm.length]];
-  const ops = [];
-  const ins = [];
-  let delta = pre;
-  for (const [a0, a1, b0, b1] of hunks) {
-    let gone = am.slice(a0, a1);
-    let put = bm.slice(b0, b1);
-    let at = a0;
-    // tighten to the letters that changed ("cat" → "cats" is one letter)
-    let p = 0;
-    while (p < gone.length && p < put.length && gone.charCodeAt(p) === put.charCodeAt(p)) p++;
-    if (p > 0 && isHigh(gone.charCodeAt(p - 1))) p--;
-    let s = 0;
-    while (s < gone.length - p && s < put.length - p && gone.charCodeAt(gone.length - 1 - s) === put.charCodeAt(put.length - 1 - s)) s++;
-    if (s > 0 && isLow(gone.charCodeAt(gone.length - s))) s--;
-    gone = gone.slice(p, gone.length - s);
-    put = put.slice(p, put.length - s);
-    at += p;
-    if (!gone.length && !put.length) continue;
-    ops.push([at + delta, gone.length, put.length]);
-    ins.push(put);
-    delta += put.length - gone.length;
-  }
-  return { ops, ins };
-}
-
-// Myers' O(ND) diff over tokens. Returns [aStart, aEnd, bStart, bEnd] char
-// ranges of each changed stretch, or null when the two differ in more than
-// MAX_EDITS tokens (then the caller treats the middle as one replacement).
-function tokenHunks(am, bm) {
-  const ta = am.match(TOKEN_RE) || [];
-  const tb = bm.match(TOKEN_RE) || [];
-  const N = ta.length;
-  const M = tb.length;
-  const off = MAX_EDITS + 1;
-  const v = new Int32Array(2 * off + 1);
-  const trace = [];
-  let found = -1;
-  for (let d = 0; d <= MAX_EDITS && found < 0; d++) {
-    trace.push(v.slice());
-    for (let k = -d; k <= d; k += 2) {
-      let x = (k === -d || (k !== d && v[off + k - 1] < v[off + k + 1])) ? v[off + k + 1] : v[off + k - 1] + 1;
-      let y = x - k;
-      while (x < N && y < M && ta[x] === tb[y]) { x++; y++; }
-      v[off + k] = x;
-      if (x >= N && y >= M) { found = d; break; }
-    }
-  }
-  if (found < 0) return null;
-  // walk back from the end, collecting the matched runs
-  const matches = []; // [x, y] of each token that is the same in both
-  let x = N;
-  let y = M;
-  for (let d = found; d > 0; d--) {
-    const vp = trace[d];
-    const k = x - y;
-    const prevK = (k === -d || (k !== d && vp[off + k - 1] < vp[off + k + 1])) ? k + 1 : k - 1;
-    const px = vp[off + prevK];
-    const py = px - prevK;
-    while (x > px && y > py) { x--; y--; matches.push([x, y]); }
-    x = px;
-    y = py;
-  }
-  while (x > 0 && y > 0) { x--; y--; matches.push([x, y]); }
-  matches.reverse();
-  // char offsets of every token boundary
-  const ca = [0];
-  for (const t of ta) ca.push(ca[ca.length - 1] + t.length);
-  const cb = [0];
-  for (const t of tb) cb.push(cb[cb.length - 1] + t.length);
-  const hunks = [];
-  let ia = 0;
-  let ib = 0;
-  for (const [mx, my] of [...matches, [N, M]]) {
-    if (mx > ia || my > ib) hunks.push([ca[ia], ca[mx], cb[ib], cb[my]]);
-    ia = mx + 1;
-    ib = my + 1;
-  }
-  return hunks;
-}
+// inserted strings travel separately (an entry's x.ins), one per op. The
+// diff itself is slog-diff.js's, shared with the History window: past the
+// shared start and end, two versions are compared word by word (Myers'
+// algorithm, capped), so two edits far apart in one burst never become one
+// replacement of everything between them.
+const { diff, tokenHunks } = require('./slog-diff.js');
 
 const { markupRanges, applyOps, applyLengths } = V;
 
@@ -1501,7 +1400,7 @@ module.exports = {
   FORMAT, CHUNK_FORMAT, LOG_DIR, LOG_INFO, KINDS, CHUNK_RE, writeWhole,
   canonical, sha256hex, clearPart, entryHash, saltFor, commitment, keyId,
   normalizeManuscript, manuscriptHash, newDeviceId, newLogInfo,
-  diff, markupRanges, recordOps, applyOps, applyLengths,
+  diff, tokenHunks, markupRanges, recordOps, applyOps, applyLengths,
   Chain, chunkName, isChunkName, ChunkWriter, parseChunk,
   orderChunks, verifyChain, replay,
   AUX_DOCS, JSON_DOCS, chapterDoc, docChapter, docOf, bookText, jsonText, bookKeys,
