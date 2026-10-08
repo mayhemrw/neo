@@ -1436,15 +1436,16 @@ body.bright #add-shelf-btn, body.bright #import-btn { color: #b4b4b4; border-col
   box-shadow: 0 3px 14px rgba(0,0,0,0.4);
 }
 
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-thumb { background: transparent; border-radius: 3px; }
+/* 11px to grab, the thumb drawn 7px inside it (the border is see-through) */
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-thumb { background: transparent; border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; min-height: 44px; }
 ::-webkit-scrollbar-track { background: transparent; }
 /* the thumb only paints while the pane is actively scrolling */
-.show-scrollbar::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.16); }
-.show-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.28); }
+.show-scrollbar::-webkit-scrollbar-thumb { background-color: rgba(255, 255, 255, 0.16); }
+.show-scrollbar::-webkit-scrollbar-thumb:hover { background-color: rgba(255, 255, 255, 0.28); }
 /* bright mode is still a dark theme — thumbs stay light, just more present */
-body.bright .show-scrollbar::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.26); }
-body.bright .show-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.4); }
+body.bright .show-scrollbar::-webkit-scrollbar-thumb { background-color: rgba(255, 255, 255, 0.26); }
+body.bright .show-scrollbar::-webkit-scrollbar-thumb:hover { background-color: rgba(255, 255, 255, 0.4); }
 
 /* pinned notes pane: the page column shifts left to clear the pane */
 #editor-view.side-pinned #paper-scroll { left: calc(50% - 125px); }
@@ -1709,8 +1710,8 @@ body.light .shortcut-row small, body.light .shortcut-or { color: #6f6a60; }
 body.light .shortcut-row kbd { color: #2b2926; background: #f4f2ee; border-color: #cfcac0; }
 body.light .shortcuts-footer span { color: #5a564e; }
 body.light .shortcuts-content::-webkit-scrollbar-thumb { background: #c4bfb5; }
-body.light .show-scrollbar::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.18); }
-body.light .show-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.3); }
+body.light .show-scrollbar::-webkit-scrollbar-thumb { background-color: rgba(0,0,0,0.18); }
+body.light .show-scrollbar::-webkit-scrollbar-thumb:hover { background-color: rgba(0,0,0,0.3); }
 
 body.light .nav-gap::before { border-top-color: #d3cec4; }
 body.light .nav-gap .ng-plus { border-color: #cfcac0; color: #8f8a80; }
@@ -1742,8 +1743,8 @@ body.light.bright .stats-legend { color: #5f5b53; }
 body.light.bright .ghost-page { border-color: rgba(0,0,0,0.4); color: rgba(0,0,0,0.62); }
 body.light.bright .nav-gap .ng-plus { color: #5f5b53; border-color: #8f897e; }
 body.light.bright .pop-menu button:disabled { color: #77726a; }
-body.light.bright .show-scrollbar::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.3); }
-body.light.bright .show-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.45); }
+body.light.bright .show-scrollbar::-webkit-scrollbar-thumb { background-color: rgba(0,0,0,0.3); }
+body.light.bright .show-scrollbar::-webkit-scrollbar-thumb:hover { background-color: rgba(0,0,0,0.45); }
 
 
 /* ===== Greek typography =====

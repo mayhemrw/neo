@@ -316,14 +316,52 @@ const KPH = K('⌘⇧X', 'Ctrl+Shift+X');
 const KDA = K('⌘⇧D', 'Ctrl+Shift+D');
 const KHELP = K('⌘/', 'Ctrl+/');
 
-// Scrollbars stay invisible until you scroll, then fade away again —
-// chrome only when needed.
+// Scrollbars stay out of sight until they're wanted, then wait for you:
+// they show while scrolling, whenever the pointer comes near the right edge
+// of anything that scrolls, and the whole time one is held; they fade a
+// moment after the pointer leaves (#341: one used to vanish on the way to
+// it). Touch screens scroll with a finger and never show them.
+function showScrollbar(el, ms = 1200) {
+  el.classList.add('show-scrollbar');
+  clearTimeout(el._neoSbHide);
+  if (ms) el._neoSbHide = setTimeout(() => { if (!el._neoSbHeld && !el._neoSbNear) el.classList.remove('show-scrollbar'); }, ms);
+}
 document.addEventListener('scroll', (e) => {
   const el = e.target;
   if (!el || !el.classList) return;
-  el.classList.add('show-scrollbar');
-  clearTimeout(el._neoSbHide);
-  el._neoSbHide = setTimeout(() => el.classList.remove('show-scrollbar'), 750);
+  showScrollbar(el);
+}, true);
+// what scrolls under the pointer, if the pointer is in its scrollbar's strip
+function scrollbarUnder(e) {
+  for (let el = e.target; el && el !== document.documentElement; el = el.parentElement) {
+    if (el.nodeType !== 1 || el.scrollHeight <= el.clientHeight + 1) continue;
+    const oy = getComputedStyle(el).overflowY;
+    if (oy !== 'auto' && oy !== 'scroll') continue;
+    const r = el.getBoundingClientRect();
+    return e.clientX >= r.right - 24 && e.clientX <= r.right ? el : null;
+  }
+  return null;
+}
+let sbNear = null;
+let sbFrame = 0;
+document.addEventListener('mousemove', (e) => {
+  if (sbFrame) return;
+  sbFrame = requestAnimationFrame(() => {
+    sbFrame = 0;
+    const el = scrollbarUnder(e);
+    if (el === sbNear) return;
+    if (sbNear) { sbNear._neoSbNear = false; showScrollbar(sbNear); }
+    sbNear = el;
+    if (el) { el._neoSbNear = true; showScrollbar(el, 0); }
+  });
+}, { passive: true });
+document.addEventListener('mousedown', (e) => {
+  const el = scrollbarUnder(e);
+  if (!el) return;
+  el._neoSbHeld = true;
+  showScrollbar(el, 0);
+  const up = () => { el._neoSbHeld = false; showScrollbar(el); window.removeEventListener('mouseup', up, true); };
+  window.addEventListener('mouseup', up, true);
 }, true);
 
 function askInput(title, placeholder, value = '') {
@@ -2929,27 +2967,74 @@ function wireChapterBody(body, chId) {
   // the moment writing hits a ghost, it becomes prose
   // (it keeps its data-sec-id so the outline knows it's been written)
   const ghostWas = {}; // each ghost's own words, from before it was written over
-  function writeOverGhost() {
+  // the ghost the caret is in, also when the caret sits between paragraphs
+  // (a click in the margin, the arrow keys) rather than in the ghost's text
+  function ghostAtCaret() {
     const sel = window.getSelection();
-    if (!sel.rangeCount) return;
-    let el = sel.anchorNode;
-    if (el && el.nodeType === Node.TEXT_NODE) el = el.parentElement;
-    const ghost = el && el.closest ? el.closest('p.ghost') : null;
-    if (ghost && body.contains(ghost)) {
-      const secId = ghost.dataset.secId;
-      if (secId && !(secId in ghostWas)) ghostWas[secId] = ghost.textContent;
-      ghost.classList.remove('ghost');
+    if (!sel.rangeCount) return null;
+    const r = sel.getRangeAt(0);
+    const c = r.startContainer;
+    const near = c.nodeType === Node.ELEMENT_NODE ? [c.childNodes[r.startOffset], c.childNodes[r.startOffset - 1], c] : [c];
+    for (const n of near) {
+      const el = n && (n.nodeType === Node.ELEMENT_NODE ? n : n.parentElement);
+      const g = el && el.closest ? el.closest('p.ghost') : null;
+      if (g && body.contains(g)) return g;
     }
+    return null;
+  }
+  // Writing on a ghost replaces it whole, however the caret got there: a
+  // click selects it, and so does any key that types (the arrow keys, Home,
+  // a click in the margin leave the caret inside the note's words, and the
+  // typing was added to them)
+  function selectGhost(ghost) {
+    const sel = window.getSelection();
+    if (sel.rangeCount && !sel.isCollapsed && sel.toString() === ghost.textContent) return;
+    const r = document.createRange();
+    r.selectNodeContents(ghost);
+    sel.removeAllRanges();
+    sel.addRange(r);
+  }
+  function writeOverGhost() {
+    const ghost = ghostAtCaret();
+    if (!ghost) return;
+    const secId = ghost.dataset.secId;
+    if (secId && !(secId in ghostWas)) ghostWas[secId] = ghost.textContent;
+    ghost.classList.remove('ghost');
   }
   body.addEventListener('beforeinput', (e) => {
     // undo and redo give words back; they don't write
     if (e.inputType && e.inputType.startsWith('history')) return;
+    const ghost = ghostAtCaret();
+    if (ghost && e.inputType === 'insertText' && e.cancelable && typeof e.data === 'string') {
+      const sel = window.getSelection();
+      if (!(sel.rangeCount && !sel.isCollapsed && sel.toString() === ghost.textContent)) {
+        // the typed letters take the ghost's place, the caret after them
+        e.preventDefault();
+        writeOverGhost();
+        ghost.textContent = e.data;
+        const r = document.createRange();
+        r.selectNodeContents(ghost);
+        r.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(r);
+        body.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: e.data }));
+        return;
+      }
+    }
+    if (ghost && e.inputType && e.inputType.startsWith('insert')) selectGhost(ghost);
     writeOverGhost();
   });
   // NEO's own typing aids (smart quotes, capitals) write without a
-  // beforeinput: a key that types a letter over a ghost makes it prose first
+  // beforeinput: a key that types a letter over a ghost selects it whole and
+  // makes it prose first (an input method's first key reads Process)
   body.addEventListener('keydown', (e) => {
-    if (e.key && e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.isComposing) writeOverGhost();
+    if (e.metaKey || e.ctrlKey || e.isComposing) return;
+    const types = (e.key && e.key.length === 1) || e.key === 'Process' || e.keyCode === 229;
+    if (!types) return;
+    const ghost = ghostAtCaret();
+    if (!ghost) return;
+    selectGhost(ghost);
+    writeOverGhost();
   }, true);
   // …and when undo brings a ghost's words back, the ghost comes back with
   // them: the class isn't part of the engine's undo, so it follows the text
