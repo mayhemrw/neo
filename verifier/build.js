@@ -11,7 +11,7 @@ const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
 // In the order they need each other
-const MODULES = ['slog-hash.js', 'slog-zip.js', 'stamp-tsa.js', 'stamp-ots.js', 'slog-verify.js', 'slog-report.js', 'verifier/manuscript.js', 'verifier/check.js', 'verifier/page.js'];
+const MODULES = ['slog-hash.js', 'slog-zip.js', 'stamp-tsa.js', 'stamp-ots.js', 'slog-verify.js', 'slog-report.js', 'slog-diff.js', 'slog-playback.js', 'verifier/manuscript.js', 'verifier/check.js', 'verifier/page.js'];
 
 // What a Scribe's Log can and can't show (NEO's own words, in main.js and app.js)
 const CAN_SHOW = [

@@ -71,6 +71,36 @@ details summary { cursor: pointer; font-weight: 600; }
 details p { margin-top: 8px; color: var(--text-2); font-size: 14px; }
 footer { margin-top: 36px; color: var(--muted); font-size: 13px; }
 .hash { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; }
+/* the player (slog-playback.js) */
+.pb { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); padding: 10px 12px; margin-top: 10px; }
+.pb:focus-within { border-color: var(--muted); }
+.pb-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.pb-bar button { min-width: 40px; padding: 5px 10px; }
+.pb-bar label { color: var(--text-2); font-size: 14px; }
+.pb-scrub { width: 100%; margin: 10px 0 4px; accent-color: var(--accent); }
+.pb-status { color: var(--text-2); font-size: 13px; font-variant-numeric: tabular-nums; }
+.pb-session { color: var(--muted); font-size: 13px; margin-top: 2px; transition: color .3s; }
+.pb-session:empty { display: none; }
+.pb-session.pb-fresh { color: var(--accent); font-weight: 600; }
+.pb-legend { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; font-size: 12px; }
+.pb-key { border-radius: 4px; padding: 1px 6px; }
+.pb-page { position: relative; margin-top: 10px; max-height: 60vh; min-height: 160px; overflow: auto; background: var(--bg); border-radius: 8px; padding: 14px 18px; font: 17px/1.6 Georgia, "Iowan Old Style", "Times New Roman", serif; }
+.pb-page p { margin: 0 0 0.6em; }
+.pb-page p.scene-break { text-align: center; width: fit-content; margin-left: auto; margin-right: auto; padding: 0 0.6em; }
+.pb-page p.poetry { white-space: pre-wrap; }
+.pb-page .pb-empty { font: 14px/1.5 system-ui, sans-serif; color: var(--muted); }
+.pb-page .hv-note { color: var(--muted); }
+.pb-new { background: color-mix(in srgb, var(--good) 28%, transparent); border-radius: 2px; animation: pb-glow 1.6s ease-out forwards; }
+.pb-gone { background: color-mix(in srgb, var(--bad) 30%, transparent); text-decoration: line-through; border-radius: 2px; }
+@keyframes pb-glow { from { background: color-mix(in srgb, var(--good) 55%, transparent); } to { background: transparent; } }
+.pb-colored .pb-new { animation: none; outline: 2px solid color-mix(in srgb, var(--good) 70%, transparent); outline-offset: 0; }
+.pb-o-typed { background: color-mix(in srgb, #2a78d6 16%, transparent); }
+.pb-o-pasted { background: color-mix(in srgb, #eb6834 26%, transparent); }
+.pb-o-moved { background: color-mix(in srgb, #1baf7a 22%, transparent); }
+.pb-o-imported { background: color-mix(in srgb, #eda100 26%, transparent); }
+.pb-o-other { background: color-mix(in srgb, #75736d 22%, transparent); }
+.pb-key.pb-o-typed, .pb-key.pb-o-pasted, .pb-key.pb-o-moved, .pb-key.pb-o-imported, .pb-key.pb-o-other { color: var(--text); }
+@media (prefers-reduced-motion: reduce) { .pb-new { animation: none; } .pb-session { transition: none; } }
 [hidden] { display: none !important; }
 @media (max-width: 560px) { body { padding: 20px 16px 40px; } .drop { padding: 20px 14px; } }
 </style>
@@ -112,6 +142,17 @@ footer { margin-top: 36px; color: var(--muted); font-size: 13px; }
   </div>
   <p class="muted small">The same report NEO makes (File → Scribe's Log → Verification Report…), made here from what you dropped. Dates only and weeks only leave the time of day out of the report; the export itself always has exact times.</p>
   <iframe id="report" class="report" title="Scribe's Log report"></iframe>
+
+  <section id="watch" hidden>
+    <h2>Watch a chapter being written</h2>
+    <p id="watch-note" class="muted small"></p>
+    <div id="watch-pick" class="reportbar">
+      <label for="watch-chapter">Chapter</label>
+      <select id="watch-chapter"></select>
+      <button type="button" class="primary" id="watch-start">Watch</button>
+    </div>
+    <div id="player"></div>
+  </section>
 </section>
 
 <details>

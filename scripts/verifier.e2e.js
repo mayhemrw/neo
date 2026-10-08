@@ -24,6 +24,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `neo-verifier-test-${process.p
 app.setPath('userData', path.join(tmp, 'app'));
 const enc = (s) => new TextEncoder().encode(s);
 const write = (name, bytes) => { const p = path.join(tmp, name); fs.writeFileSync(p, bytes); return p; };
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function main() {
   await app.whenReady();
@@ -58,6 +59,7 @@ async function main() {
     await new Promise((resolve) => setTimeout(resolve, 200));
     notes.refusal = v.errors.splice(0).join(' ');
     notes.noText = await v.choose([noText]);
+    notes.watchNoText = await v.js(`(() => ({ shown: !document.getElementById('watch').hidden, pick: !document.getElementById('watch-pick').hidden, note: document.getElementById('watch-note').textContent }))()`);
     notes.beforeBitcoin = v.requests.slice();
     notes.bitcoin = await v.click('check-bitcoin');
     notes.afterBitcoin = v.requests.slice();
@@ -75,6 +77,26 @@ async function main() {
     notes.manuscripts = await v.choose([txt, docx, changed]);
     // with the text: where the changed one first differs
     notes.full = await v.choose([full, changed]);
+    // …and a chapter watched being written
+    notes.watch = await v.js(`(() => ({ pick: !document.getElementById('watch-pick').hidden, chapters: [...document.getElementById('watch-chapter').options].map((o) => o.textContent) }))()`);
+    await v.js(`(() => { const s = document.getElementById('watch-chapter'); s.value = s.options[1].value; document.getElementById('watch-start').click(); })()`);
+    for (let i = 0; i < 50 && !(await v.js('!!window.verifierPlayer()')); i++) await sleep(100);
+    const pl = (body) => v.js(`(() => { const root = document.querySelector('#player .pb'); const page = root.querySelector('.pb-page'); const status = root.querySelector('.pb-status').textContent; ${body} })()`);
+    const key = (k, shift = false) => pl(`page.dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(k)}, shiftKey: ${shift}, bubbles: true, cancelable: true })); return root.dataset.pos;`);
+    notes.playStart = await pl(`return { pos: root.dataset.pos, status, page: page.innerText, focus: document.activeElement.className, back: root.querySelector('.pb-back').disabled }`);
+    await key('ArrowRight');
+    notes.step1 = await pl(`return { pos: root.dataset.pos, status, page: page.innerText, fresh: [...page.querySelectorAll('.pb-new')].map((e) => e.textContent).join('|'), session: root.querySelector('.pb-session').textContent }`);
+    await key('ArrowRight');
+    notes.step2 = await pl(`return { pos: root.dataset.pos, status, page: page.innerText, fresh: [...page.querySelectorAll('.pb-new')].map((e) => e.textContent).join('|') }`);
+    await pl(`root.querySelector('.pb-origins input').click(); return 1`);
+    notes.colored = await pl(`return { legend: !root.querySelector('.pb-legend').hidden, typed: [...page.querySelectorAll('.pb-o-typed')].map((e) => e.textContent).join('|'), imported: [...page.querySelectorAll('.pb-o-imported')].map((e) => e.textContent).join('|') }`);
+    await key('Home');
+    // played at 600×: every step, then it stops at the end
+    await pl(`const s = root.querySelector('.pb-speed'); s.value = '600'; s.dispatchEvent(new Event('change')); root.querySelector('.pb-play').click(); return 1`);
+    notes.playing = await pl(`return root.classList.contains('pb-playing')`);
+    for (let i = 0; i < 100 && (await pl('return root.classList.contains(\'pb-playing\')')); i++) await sleep(100);
+    notes.played = await pl(`return { pos: root.dataset.pos, playing: root.classList.contains('pb-playing'), page: page.innerText, play: root.querySelector('.pb-play').getAttribute('aria-label'), fwd: root.querySelector('.pb-fwd').disabled }`);
+    notes.watchRequests = v.requests.slice();
     // a byte changed in the export
     notes.tampered = await v.choose([tampered]);
     // a scribes-log folder from before NEO stamped, dropped whole
@@ -147,6 +169,33 @@ async function main() {
       assert.equal(it.status, 'bad');
       assert.match(it.text, /first differ at line 5: the file has "None was missing\.", the log "One was missing\."/);
       assert.match(notes.full.source, /an export with the text/);
+    }],
+    ['without the text there\'s nothing to watch, and the page says so', () => {
+      assert.equal(notes.watchNoText.shown, true);
+      assert.equal(notes.watchNoText.pick, false);
+      assert.match(notes.watchNoText.note, /doesn't have the text, so there are no words to play/);
+    }],
+    ['with the text, a chapter plays back: step by step, colored by origin, and through to the end', () => {
+      assert.equal(notes.watch.pick, true);
+      assert.deepEqual(notes.watch.chapters, ['1. The Quiet', '2. The Count']);
+      assert.equal(notes.playStart.pos, '0');
+      assert.match(notes.playStart.status, /^Start · 2 steps$/);
+      assert.match(notes.playStart.page, /hasn't been started yet/);
+      assert.equal(notes.playStart.focus, 'pb-play');
+      assert.equal(notes.playStart.back, true);
+      assert.equal(notes.step1.pos, '1');
+      assert.match(notes.step1.status, /Device 1 · Imported · 5 words · Step 1 of 2$/);
+      assert.equal(notes.step1.fresh, 'Mara counted the boats twice.|***');
+      assert.match(notes.step1.session, /^Session of .+, Device 1$/);
+      assert.equal(notes.step2.pos, '2');
+      assert.match(notes.step2.status, /Typed · 8 words · Step 2 of 2$/);
+      assert.equal(notes.step2.fresh, 'One was missing.');
+      assert.equal(notes.colored.legend, true);
+      assert.equal(notes.colored.typed, 'One was missing.');
+      assert.equal(notes.colored.imported, 'Mara counted the boats twice.|***');
+      assert.equal(notes.playing, true);
+      assert.deepEqual(notes.played, { pos: '2', playing: false, page: 'Mara counted the boats twice.\n\n***\n\nOne was missing.', play: 'Play', fwd: true });
+      assert.deepEqual(notes.watchRequests, notes.afterBitcoin, 'watching asked nothing of the network');
     }],
     ['a changed byte is caught', () => {
       assert.equal(notes.tampered.verdict, 'bad');

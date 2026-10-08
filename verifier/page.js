@@ -9,6 +9,7 @@
 (function () {
   const C = globalThis.SlogVerifier;
   const R = globalThis.SlogReport;
+  const PB = globalThis.SlogPlayback;
   const TSA = globalThis.StampTsa;
   const OTS = globalThis.StampOts;
   const CFG = globalThis.VERIFIER_CONFIG || { version: '?', anchors: [], certs: [], canShow: [] };
@@ -70,7 +71,7 @@
   const busy = (text) => {
     $('busy').hidden = !text;
     $('busy').textContent = text || '';
-    for (const b of document.querySelectorAll('button')) b.disabled = !!text;
+    for (const b of document.querySelectorAll('button')) if (!b.closest('.pb')) b.disabled = !!text; // (the player keeps its own)
   };
   const nextFrame = () => new Promise((resolve) => setTimeout(resolve, 30));
   const note = (text) => { $('note').hidden = !text; $('note').textContent = text || ''; };
@@ -99,6 +100,7 @@
       if (sorted.logs.length) {
         busy('Checking the log… (a long book can take a little while)');
         await nextFrame();
+        stopWatching();
         state.check = await C.checkInput(state.log, trust);
       }
       state.matches = [];
@@ -210,7 +212,69 @@
       list.append(li);
     }
     showReport();
+    showWatch();
     document.body.dataset.verdict = v;
+  }
+
+  /* ---------------- watching a chapter being written ---------------- */
+
+  // Offered once the log's checked, for a log with its words (an export
+  // with the text); a log without them has nothing to play, and says so
+  let player = null;
+  let watching = null; // the check the chapter list was made for
+  function stopWatching() {
+    if (player) { player.destroy(); player = null; }
+    $('player').textContent = '';
+  }
+  function showWatch() {
+    const ck = state.check;
+    if (watching === ck) return;
+    watching = ck;
+    stopWatching();
+    const sec = $('watch');
+    sec.hidden = false;
+    const chapters = (ck.stats.chapters || []).filter((c) => c.total > 0 || c.deleted > 0);
+    const noText = !ck.res.words;
+    $('watch-pick').hidden = noText || !chapters.length;
+    if (noText) {
+      $('watch-note').textContent = ck.kind === 'export'
+        ? 'This export doesn\'t have the text, so there are no words to play. An export made with the text (File → Scribe\'s Log → Export for Verification…, with the text) can be watched here.'
+        : 'This log doesn\'t have its words, so there\'s nothing to play.';
+      return;
+    }
+    if (!chapters.length) { $('watch-note').textContent = 'The log has no chapters to play.'; return; }
+    $('watch-note').textContent = 'Each change to the chapter, played back in order, on the computer that made it: what came in glows, what went flashes before it goes. ' +
+      (ck.res.ok ? '' : 'The log doesn\'t check (see above), so what plays may not be what was written. ') +
+      'Space plays and pauses; the arrow keys step.';
+    const sel = $('watch-chapter');
+    sel.textContent = '';
+    for (const c of chapters) {
+      const o = el('option', null, c.title ? `${c.index}. ${c.title}` : `Chapter ${c.index}`);
+      o.value = c.doc;
+      sel.append(o);
+    }
+  }
+  async function watch() {
+    const ck = state.check;
+    if (!ck || !ck.res.words) return;
+    stopWatching();
+    busy('Getting the chapter ready…');
+    await nextFrame();
+    try {
+      const names = new Map(ck.res.devices.map((d) => [d.dev, d.name]));
+      const pb = PB.build(ck.res.devices, $('watch-chapter').value, { links: ck.res.links, names });
+      const cal = R.calendar(tz, locale);
+      player = PB.mount($('player'), pb, {
+        when: (ms) => whenFn()(ms),
+        day: (ms) => cal.date(cal.dayKey(ms))
+      });
+      player.el.querySelector('.pb-play').focus();
+    } catch (err) {
+      note('Couldn\'t play that chapter: ' + (err && err.message ? err.message : String(err)));
+      console.error(err);
+    } finally {
+      busy('');
+    }
   }
 
   function reportHtml() {
@@ -272,6 +336,7 @@
   $('folder').addEventListener('change', async () => take(await fromInput($('folder'))));
   $('privacy').addEventListener('change', () => { if (state.check) show(); });
   $('save-report').addEventListener('click', saveReport);
+  $('watch-start').addEventListener('click', watch);
   window.addEventListener('resize', fitReport);
   // once something's checked, the drop zone steps back
   const observer = new MutationObserver(() => drop.classList.toggle('compact', !$('results').hidden));
@@ -285,5 +350,6 @@
   // for the tests: the same path as a drop
   globalThis.verifierTake = take;
   globalThis.verifierState = state;
+  globalThis.verifierPlayer = () => player;
   globalThis.verifierRuns = () => runs;
 })();

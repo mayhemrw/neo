@@ -643,7 +643,9 @@
   class Tracer {
     constructor(entries, { dev = null, resolve = null, links = null, detail = false, hooks = null } = {}) {
       this.dev = dev;
-      this.detail = detail;         // origins with time, paste ids and markup (detailOrigin)
+      this.detail = detail;         // origins with time, paste ids and markup (detailOrigin)…
+      this.full = detail === true;  // …or, with 'moved', only whether text was moved within the book (playback)
+      this.movedOnly = detail === 'moved';
       this.hooks = hooks;           // detail only: { step(e, tracer), cut(e, gone), back(e, take, source, from) }
       this.revised = new Set();     // detail only: pastes with words put in or taken out inside them
       this.entries = entries;
@@ -722,7 +724,7 @@
     // detail, prose and markup apart, each stamped with the hour and paste
     _own(e, i, len, cat) {
       if (!len) return [];
-      if (!this.detail) return [[len, cat]];
+      if (!this.full) return [[len, cat]];
       const hour = Number.isSafeInteger(e.ts) ? Math.floor(e.ts / 3600e3) : '';
       const paste = cat === 'paste' ? (this.dev ? this.dev.slice(0, 8) : '') + ':' + e.n + ':' + i : '';
       const op = e.ops[i];
@@ -758,7 +760,7 @@
           if (docs[e.doc] && docs[e.doc].len) throw new Error('base over a document that already has text');
           const len = e.ops.reduce((a, op) => a + op[2], 0);
           const text = e.x && Array.isArray(e.x.ins) ? e.x.ins.join('') : null;
-          const runs = this.detail ? e.ops.flatMap((op, i) => this._own(e, i, op[2], originOf(e))) : (len ? [[len, originOf(e)]] : []);
+          const runs = this.full ? e.ops.flatMap((op, i) => this._own(e, i, op[2], originOf(e))) : (len ? [[len, originOf(e)]] : []);
           // a copy's base names the book it was copied from; text that
           // arrived from another device names that device's document
           let pieces = e.from;
@@ -776,7 +778,7 @@
               if (source && typeof source.log === 'string') {
                 end = p[1] + p[2];
                 const was = runsCut(runs, p[1], p[2]);
-                runsInsert(runs, p[1], recat(was, 'other book', this.detail));
+                runsInsert(runs, p[1], recat(was, 'other book', this.full));
                 continue;
               }
               if (!isDevSource(source)) { bad('a base\'s from can only name another book'); continue; }
@@ -812,7 +814,7 @@
           e.ops.forEach((op, i) => {
             const [at, del, len] = op;
             if (!(whole(at) && whole(del) && whole(len) && at + del <= d.len)) throw new Error('op out of range');
-            if (this.detail) {
+            if (this.full) {
               // words put in or taken out inside a paste, with its prose on
               // both sides: it's been revised
               const before1 = proseNear(d.runs, at, -1);
@@ -838,16 +840,16 @@
               last = [i, pa + pl];
               if (!source || typeof source !== 'object') { bad('from piece has no source'); continue; }
               let take;
-              if (typeof source.log === 'string') take = recat(runsSlice(add, pa, pl), 'other book', this.detail);
+              if (typeof source.log === 'string') take = recat(runsSlice(add, pa, pl), 'other book', this.full);
               else {
                 const src = this._source(e, source, i, before);
                 if (src.error) { bad(src.error); continue; }
                 take = this._take(p, put, source, src, null, own, bad);
                 if (!take) continue;
-                if (this.detail && !isDevSource(source)) {
+                if (this.full && !isDevSource(source)) {
                   take = asMoved(take);
                   if (this.hooks && this.hooks.back) this.hooks.back(e, take, source, src);
-                }
+                } else if (this.movedOnly && !isDevSource(source)) take = take.map(([l, o]) => [l, detailOrigin(originCat(o), '', '', true, false)]);
               }
               runsCut(add, pa, pl);
               runsInsert(add, pa, take);
@@ -905,14 +907,15 @@
       const runs = runsSlice(src.runs, sa, sl);
       return sl === pl && (mine === null || theirs === null || mine === theirs)
         ? runs
-        : [[pl, runs.length ? runs[0][1] : (this.detail ? detailOrigin(own, '', '', false, false) : own)]];
+        : [[pl, runs.length ? runs[0][1] : (this.full ? detailOrigin(own, '', '', false, false) : own)]];
     }
   }
 
   // Every device's chain traced together: text that arrived from another
   // device (a `from` naming it, or `links`) takes the origins it had there.
   // chains: [{ dev, entries }]. links: Map dev → Map n → { dev, n, doc }.
-  // detail and hooks (dev → hooks) as for a Tracer (the report's).
+  // detail and hooks (dev → hooks) as for a Tracer (the report's; detail
+  // 'moved' keeps only the category and whether it was moved, playback's).
   // Returns Map dev → { docs: { id: { text, len, runs } }, problems, revised }.
   function traceAll(chains, { links = null, detail = false, hooks = null } = {}) {
     const tracers = new Map();

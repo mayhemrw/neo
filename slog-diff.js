@@ -199,7 +199,13 @@
   // manuscript leaves out of the writing stays out here too: unwritten
   // outline sections and the breaks planted for them, Darlings anchors, and
   // paragraphs with no words. Placeholder notes stay, marked NOTE.
-  function paragraphs(html) {
+  //
+  // mark, if given, is called with offsets into html, in rising order, and
+  // gives each unit of text a key (or null); runs then split where the key
+  // changes too and carry it as m (a scene break carries its <p>'s as m).
+  // A character reference takes its first unit's key. Playback uses it to
+  // show what an entry put in or took out, and where text came from.
+  function paragraphs(html, mark = null) {
     const src = String(html || '');
     const TAG = /<!--[\s\S]*?-->|<(\/?)([a-zA-Z][\w-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>|[^<]+|</g;
     const ghosts = new Set();
@@ -214,15 +220,32 @@
     let para = null;
     const style = () => { let f = 0; for (const e of stack) f |= e.f; return f; };
     const hidden = () => stack.some((e) => e.out);
-    const add = (t, f) => {
+    const add = (t, f, m) => {
       const last = para.runs[para.runs.length - 1];
-      if (last && last.f === f) last.t += t;
-      else para.runs.push({ t, f });
+      if (last && last.f === f && last.m === m) last.t += t;
+      else para.runs.push(mark ? { t, f, m } : { t, f });
+    };
+    // a text token's units, keyed: plain text unit by unit (grouped), a
+    // character reference as one character
+    const addMarked = (tok, at, f) => {
+      for (const piece of tok.matchAll(/&(?:#x[0-9a-f]+|#\d+|[a-z]+);|[^&]+|&/gi)) {
+        const base = at + piece.index;
+        const s = piece[0];
+        if (s[0] === '&' && s.length > 1) { add(decodeEntities(s), f, mark(base)); continue; }
+        let from = 0;
+        let key = mark(base);
+        for (let i = 1; i < s.length; i++) {
+          const k = mark(base + i);
+          if (k !== key) { add(s.slice(from, i), f, key); from = i; key = k; }
+        }
+        add(s.slice(from), f, key);
+      }
     };
     const endPara = () => {
       if (!para) return;
       if (!para.out && (para.brk || para.runs.some((r) => /\S/.test(r.t)))) {
         const p = { brk: para.brk, kind: para.kind, align: para.align, runs: para.brk ? [] : para.runs };
+        if (mark && para.brk) p.m = para.m;
         out.push(p);
       }
       para = null;
@@ -230,7 +253,10 @@
     for (const m of src.matchAll(TAG)) {
       const tok = m[0];
       if (tok.startsWith('<!--')) continue;
-      if (!m[2]) { if (para && !hidden()) add(decodeEntities(tok), style()); continue; }
+      if (!m[2]) {
+        if (para && !hidden()) { if (mark) addMarked(tok, m.index, style()); else add(decodeEntities(tok), style()); }
+        continue;
+      }
       const name = m[2].toLowerCase();
       if (!m[1]) {
         const cls = classesOf(m[3]);
@@ -243,13 +269,14 @@
             brk, runs: [],
             kind: cls.has('poetry') ? 'poetry' : cls.has('flush') ? 'flush' : '',
             align: ALIGNS.has(align) && !brk ? align : '',
-            out: (brk && ghosts.has(attrOf(m[3], 'data-sec-brk'))) || cls.has('ghost')
+            out: (brk && ghosts.has(attrOf(m[3], 'data-sec-brk'))) || cls.has('ghost'),
+            m: mark ? mark(m.index) : null
           };
           stack.push({ name, f: styleOf(name, m[3], cls), out: false });
           continue;
         }
         if (VOID_TAGS.has(name) || /\/\s*$/.test(m[3])) {
-          if (name === 'br' && para && !hidden()) add('\n', style());
+          if (name === 'br' && para && !hidden()) add('\n', style(), mark ? mark(m.index) : undefined);
           continue;
         }
         stack.push({ name, f: styleOf(name, m[3], cls), out: cls.has('darling-anchor') || cls.has('ghost') });
@@ -482,25 +509,30 @@
   /* ---------------------------------------------------------------- */
 
   const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  function runHtml(t, f) {
+  // a key from paragraphs()' mark, as class names (letters, digits, - and _)
+  const markClass = (m) => (typeof m === 'string' ? m.replace(/[^\w -]/g, '').trim() : '');
+  function runHtml(t, f, m) {
     let h = esc(t).replace(/\n/g, '<br>');
     if (f & S) h = '<s>' + h + '</s>';
     if (f & U) h = '<u>' + h + '</u>';
     if (f & I) h = '<i>' + h + '</i>';
     if (f & B) h = '<b>' + h + '</b>';
     if (f & NOTE) h = '<span class="hv-note">' + h + '</span>';
+    const cls = markClass(m);
+    if (cls) h = `<span class="${cls}">` + h + '</span>';
     return h;
   }
   function openP(p, extra) {
-    const cls = [p.brk ? 'scene-break' : p.kind, extra].filter(Boolean).join(' ');
+    const cls = [p.brk ? 'scene-break' : p.kind, extra, p.brk ? markClass(p.m) : ''].filter(Boolean).join(' ');
     return `<p${cls ? ` class="${cls}"` : ''}${p.align ? ` style="text-align:${p.align}"` : ''}>`;
   }
-  const runsHtml = (p) => (p.brk ? '***' : p.runs.map((r) => runHtml(r.t, r.f)).join(''));
+  const runsHtml = (p) => (p.brk ? '***' : p.runs.map((r) => runHtml(r.t, r.f, r.m)).join(''));
   const paraHtml = (p, extra = '', wrap = '') => openP(p, extra) + (wrap ? `<${wrap}>${runsHtml(p)}</${wrap}>` : runsHtml(p)) + '</p>';
 
-  // A chapter as clean prose (what View shows)
-  function viewHtml(html) {
-    return paragraphs(html).map((p) => paraHtml(p)).join('');
+  // A chapter as clean prose (what View shows; with mark, as paragraphs()
+  // takes it, each keyed stretch in a span of that class, for playback)
+  function viewHtml(html, mark = null) {
+    return paragraphs(html, mark).map((p) => paraHtml(p)).join('');
   }
 
   // compare()'s blocks as markup: deletions in <del>, insertions in <ins>,

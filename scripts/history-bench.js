@@ -118,4 +118,28 @@ const cpDir = path.join(root, 'history', ix2.logId);
 const cpFiles = fs.readdirSync(cpDir);
 const cpBytes = cpFiles.reduce((a, f) => a + fs.statSync(path.join(cpDir, f)).size, 0);
 console.log(`checkpoints: ${cpN.length} plus the tail, ${(cpBytes / 1e6).toFixed(2)} MB with the index (${cpFiles.length} files)`);
+// playback (slog-playback.js): the busiest chapter's steps from the whole
+// log, every frame in order as Play shows them, then seeks anywhere
+{
+  const V = require('../slog-verify.js');
+  const P = require('../slog-playback.js');
+  const F = require('../slog-files.js');
+  const [tRead, chains] = ms(() => V.readLog(F.loadLog(dir)).chains.map(({ dev: d, chunks }) => {
+    const order = V.orderChunks(chunks).ordered;
+    return { dev: d, entries: order.flatMap((c) => c.entries) };
+  }));
+  const busiest = Object.values(ix2.chapters).sort((a, b) => b.versions.length - a.versions.length)[0];
+  const doc = slog.chapterDoc(busiest.id || Object.keys(ix2.chapters).find((k) => ix2.chapters[k] === busiest));
+  // PB_PROFILE=1: the checker's own trace, plain and with the report's full detail, for comparison
+  if (process.env.PB_PROFILE) {
+    const [tPlain] = ms(() => V.traceAll(chains));
+    const [tDetail] = ms(() => V.traceAll(chains, { detail: true }));
+    console.log(`trace: plain ${tPlain.toFixed(0)} ms, detail ${tDetail.toFixed(0)} ms`);
+  }
+  const [tBuild, pb] = ms(() => P.build(chains, doc));
+  const [tPlay] = ms(() => { for (let i = 0; i <= pb.length; i++) pb.frame(i, { origins: true }); });
+  const [tSeek] = ms(() => { for (let i = 0; i < 200; i++) pb.frame(pick(pb.length + 1), { origins: true }); });
+  const ok = pb.frame(pb.length).text === docs[doc];
+  console.log(`playback, ${doc} (${pb.length} steps): log read ${tRead.toFixed(0)} ms, built ${tBuild.toFixed(0)} ms, every frame in order ${(tPlay / (pb.length + 1)).toFixed(2)} ms each, 200 seeks ${(tSeek / 200).toFixed(1)} ms each, ends as on disk: ${ok}`);
+}
 fs.rmSync(root, { recursive: true, force: true });
