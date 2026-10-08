@@ -94,6 +94,7 @@ async function checkBookFull(dir, { bitcoin = false, fetch = globalThis.fetch } 
 
 const when = (ms) => (ms == null ? '?' : new Date(ms).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z'));
 const span = (ms) => {
+  if (ms < 60000) return 'under a minute';
   const m = Math.round(ms / 60000);
   return m < 60 ? m + ' min' : Math.floor(m / 60) + ' h ' + (m % 60) + ' min';
 };
