@@ -111,6 +111,37 @@ describe('History', { concurrency: 1 }, () => {
     assert.deepEqual(env.errors, []);
   });
 
+  test('playback for the window: the chapter\'s changes on every computer, from a version or its start', async () => {
+    const env = setup();
+    const desk = env.recorder('desk');
+    await session(desk, env, [['ch-1', '<p>From the desk.</p>']]);
+    const laptop = env.recorder('laptop');
+    await session(laptop, env, [['ch-1', '<p>From the desk, then the laptop.</p>']]);
+    // the desk reads the laptop's words (NEO's refresh from disk), then writes on
+    desk.open(env.dir, 'book-a');
+    desk.read(env.dir, 'book-a', 'ch-1', fs.readFileSync(path.join(env.dir, 'chapters', 'ch-1.html'), 'utf8'));
+    save(desk, env, 'ch-1', '<p>From the desk, then the laptop, then the desk.</p>');
+    await desk.close('book-a');
+    const h = env.history();
+    const P = require('../slog-playback.js');
+    const all = P.Playback.fromData(h.playback(env.dir, 'ch-1'));
+    assert.deepEqual(all.problems, []);
+    assert.deepEqual(Array.from({ length: all.length }, (_, i) => all.frame(i + 1).text),
+      ['<p>Hello.</p>', '<p>From the desk.</p>', '<p>From the desk, then the laptop.</p>', '<p>From the desk, then the laptop, then the desk.</p>']);
+    assert.deepEqual(all.steps.map((s) => s.name), ['Device 1', 'Device 1', 'Device 2', 'Device 1']);
+    // from the laptop's version: only the desk's last change after it
+    const v = h.index(env.dir).chapters['ch-1'].versions;
+    const lap = v.find((x) => x.dev !== v[0].dev);
+    const later = P.Playback.fromData(h.playback(env.dir, 'ch-1', { from: { dev: lap.dev, n: lap.n } }));
+    assert.equal(later.length, 1);
+    assert.equal(later.frame(0).text, '<p>From the desk, then the laptop.</p>');
+    assert.match(later.frame(1).html, /<span class="pb-new">, then the desk<\/span>/);
+    // a book with no log has nothing to play
+    fs.rmSync(path.join(env.dir, 'scribes-log'), { recursive: true });
+    assert.match(h.playback(env.dir, 'ch-1').error, /no Scribe's Log/);
+    assert.deepEqual(env.errors, []);
+  });
+
   test('a deleted chapter keeps its versions, the last as it stood before it went', async () => {
     const env = setup({ chapters: { 'ch-1': '<p>Keep.</p>', 'ch-2': '<p>Going soon.</p>' }, titles: { 'ch-2': 'Doomed' } });
     const rec = env.recorder();

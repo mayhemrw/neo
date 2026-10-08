@@ -294,6 +294,58 @@ test('a named version renamed, then deleted, from the window', async () => {
   assert.equal((await items()).length, 3);
 });
 
+const pb = (sel) => hv('.hv-player ' + sel);
+test('Play: the chapter written again from a version, stepped, played through, colored by origin', async () => {
+  const list = await items();
+  await pick(list.findIndex((x) => x.kind === 'Imported'));
+  await js(`${hv('[data-mode="play"]')}.click()`);
+  await until('the player', `!!${pb('.pb')} && !!${pb('.pb-status')}.textContent`);
+  assert.equal(await js(`${hv('.hv-page')}.hidden`), true, 'Read\'s page steps aside');
+  assert.equal(await js(`${hv('.hv-restore')}.hidden && ${hv('.hv-copy')}.hidden`), true);
+  assert.match(await js(`${hv('.hv-play-note')}.textContent`), /^From .+ to now: each change as the computer that made it had the chapter/);
+  const total = Number(await js(`${pb('.pb')}.querySelectorAll('.pb-scrub').length && /(\\d+) steps/.exec(${pb('.pb-status')}.textContent)[1]`));
+  assert.ok(total >= 3, 'the later sessions\' changes: ' + total);
+  // where it starts is the version itself
+  assert.equal((await js(`${pb('.pb-page')}.innerText`)).replace(/\s+/g, ' ').trim(), PARAS.join(' '));
+  // the keys are the player's while it has the focus (and never reach the page underneath)
+  const chapter = await js(`chapterHTML[${JSON.stringify(ids[0])}]`);
+  await js(`${pb('.pb-play')}.focus()`);
+  await key('Right');
+  assert.equal(await js(`${pb('.pb')}.dataset.pos`), '1');
+  assert.match(await js(`${pb('.pb-status')}.textContent`), new RegExp(`This computer · Typed · \\d+ words · Step 1 of ${total}$`));
+  assert.ok(await js(`!!${pb('.pb-new')}`), 'what came in is marked');
+  await key('End');
+  assert.equal(await js(`${pb('.pb')}.dataset.pos`), String(total));
+  const end = await js(`${pb('.pb-page')}.innerText`);
+  assert.ok(end.includes('three times') && end.includes('Later still.'), end);
+  await key('Left');
+  assert.equal(await js(`${pb('.pb')}.dataset.pos`), String(total - 1));
+  await type('zz');
+  assert.equal(await js(`chapterHTML[${JSON.stringify(ids[0])}]`), chapter);
+  // colored by origin: the import, and what was typed since
+  await js(`${pb('.pb-origins input')}.click()`);
+  await tick(150);
+  assert.equal(await js(`${pb('.pb-legend')}.hidden`), false);
+  assert.ok(await js(`!!${pb('.pb-o-imported')} && !!${pb('.pb-o-typed')}`));
+  await shot('play-colored');
+  // played through at 600×, from the start, to the end, where it stops
+  await key('Home');
+  await js(`(() => { const s = ${pb('.pb-speed')}; s.value = '600'; s.dispatchEvent(new Event('change')); })()`);
+  await js(`${pb('.pb-play')}.click()`);
+  assert.equal(await js(`${pb('.pb')}.classList.contains('pb-playing')`), true);
+  await until('played to the end', `!${pb('.pb')}.classList.contains('pb-playing')`, 30000);
+  assert.equal(await js(`${pb('.pb')}.dataset.pos`), String(total));
+  // the newest version plays the chapter from its start
+  await pick(0);
+  await until('the player', `!!${pb('.pb-status')} && /steps/.test(${pb('.pb-status')}.textContent)`);
+  assert.match(await js(`${hv('.hv-play-note')}.textContent`), /^From the chapter’s start to now/);
+  assert.equal(await js(`${pb('.pb-page')}.innerText`).then((x) => /hasn't been started yet/.test(x)), true);
+  // back to Read: the player's gone, the page is back
+  await mode('view');
+  assert.equal(await js(`!!document.querySelector('#chapter-history .pb')`), false);
+  assert.equal(await js(`${hv('.hv-page')}.hidden`), false);
+});
+
 test('Esc closes it and the caret goes back where it was', async () => {
   await key('Escape');
   await tick(200);

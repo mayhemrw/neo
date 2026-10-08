@@ -10,6 +10,7 @@
 //   { id, type: 'text', home, dir, ref, chapter }  versionText
 //   { id, type: 'restore', home, dir, ref, chapter, me, at, logged }
 //                                              restoreSource
+//   { id, type: 'playback', home, dir, chapter, from }  playback (data)
 //
 // and gets back { id, ok: true, value } or { id, ok: false, error }, with
 // any trouble the reading reported along the way in `notes`. Nothing here
@@ -29,6 +30,7 @@ function reply(msg) {
     if (msg.type === 'list') value = history.list(msg.dir);
     else if (msg.type === 'text') value = history.versionText(msg.dir, msg.ref, msg.chapter);
     else if (msg.type === 'restore') value = history.restoreSource(msg.dir, msg.ref, msg.chapter, { me: msg.me, at: msg.at, logged: msg.logged });
+    else if (msg.type === 'playback') value = history.playback(msg.dir, msg.chapter, { from: msg.from });
     else throw new Error('unknown request: ' + msg.type);
     return { id: msg.id, ok: true, value, notes };
   } catch (err) {

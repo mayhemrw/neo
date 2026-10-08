@@ -11185,8 +11185,11 @@ async function nameVersion(msg) {
 // version of the book as it stood; ⌘Z undoes it), a chapter no longer in
 // the book can come back (Restore as New Chapter), and a passage can be
 // copied out of one. Restored words keep the origin they had in the
-// Scribe's Log (main.js finds them where they were deleted). Pocket has
-// no history, so no window there.
+// Scribe's Log (main.js finds them where they were deleted). Play shows
+// the chapter being written, from a version (or its start) to now, each
+// change as the computer that made it had the chapter (slog-playback.js;
+// the helper builds it, the window plays it). Pocket has no history, so
+// no window there.
 const historyState = { open: null };
 function historyDate(ms) {
   const d = new Date(ms);
@@ -11194,6 +11197,20 @@ function historyDate(ms) {
   return d.toLocaleString(NeoI18n.getLocale(), { month: 'short', day: 'numeric', ...(thisYear ? {} : { year: 'numeric' }), hour: 'numeric', minute: '2-digit' });
 }
 const historyNumber = (n) => Number(n).toLocaleString(NeoI18n.getLocale());
+function historyDay(ms) {
+  const d = new Date(ms);
+  return d.toLocaleDateString(NeoI18n.getLocale(), { weekday: 'short', month: 'short', day: 'numeric', ...(d.getFullYear() === new Date().getFullYear() ? {} : { year: 'numeric' }) });
+}
+// where Play starts for an entry: the version itself, on the chain that
+// wrote it ({ dev, n }), or null (the chapter's start) for the newest
+// version (nothing comes after it) and for a copy kept with the log off
+function historyPlayFrom(entries, e) {
+  if (!e || e.broken) return null;
+  const at = e.ref && e.ref.dev ? { dev: e.ref.dev, n: e.ref.n } : e.named && Number.isSafeInteger(e.n) ? { dev: e.dev, n: e.n } : null;
+  const newest = entries.find((x) => x.ref && x.ref.dev && !x.broken);
+  if (!at || (newest && (newest.key === e.key || (newest.dev === at.dev && newest.ref.n <= at.n)))) return null;
+  return at;
+}
 // a chapter's name in the picker: as the manuscript heads it
 function historyChapterLabel(id) {
   try { return chapterHeading(id, book, ' — ') || chapterName(id); } catch { return t('Untitled'); }
@@ -11210,7 +11227,7 @@ function historyEntries(data, chId) {
   }));
   for (const nv of data.named || []) {
     if (!(nv.ids || []).includes(chId)) continue;
-    out.push({ key: 'N:' + nv.file, ref: { named: nv.file }, at: nv.at, dev: nv.dev, name: nv.name, auto: nv.auto, file: nv.file, copy: !!nv.copy, named: true });
+    out.push({ key: 'N:' + nv.file, ref: { named: nv.file }, at: nv.at, dev: nv.dev, n: nv.n, name: nv.name, auto: nv.auto, file: nv.file, copy: !!nv.copy, named: true });
   }
   return out.sort((a, b) => b.at - a.at || (a.named ? -1 : 0) - (b.named ? -1 : 0));
 }
@@ -11326,6 +11343,7 @@ async function showHistory(msg) {
             <div class="hv-modes" role="group" aria-label="${escHtml(t('Show'))}">
               <button type="button" data-mode="view" aria-pressed="true">${escHtml(t('Read'))}</button>
               <button type="button" data-mode="compare" aria-pressed="false">${escHtml(t('Compare'))}</button>
+              <button type="button" data-mode="play" aria-pressed="false" title="${escHtml(t('Watch the chapter being written, change by change'))}">${escHtml(t('Play'))}</button>
             </div>
             <span class="hv-named-tools" hidden>
               <button type="button" class="btn-quiet hv-rename">${escHtml(t('Rename…'))}</button>
@@ -11341,6 +11359,10 @@ async function showHistory(msg) {
             <span class="hv-summary"></span>
           </div>
           <div class="hv-page" tabindex="0" aria-label="${escHtml(t('The version'))}"></div>
+          <div class="hv-play" hidden>
+            <p class="hv-play-note"></p>
+            <div class="hv-player"></div>
+          </div>
         </section>
       </div>
       <footer class="hv-footer">
@@ -11358,12 +11380,18 @@ async function showHistory(msg) {
   const note = bd.querySelector('.hv-problems');
   const restoreBtn = bd.querySelector('.hv-restore');
   const copyBtn = bd.querySelector('.hv-copy');
+  const playBox = bd.querySelector('.hv-play');
+  const playNote = bd.querySelector('.hv-play-note');
+  const playerEl = bd.querySelector('.hv-player');
+  const P = globalThis.SlogPlayback;
   // what's shown: the chapter, its entries, the one selected, read or
   // compared, and with what ('now' or another entry's key)
-  const st = { data: null, chId: null, entries: [], sel: null, mode: 'view', against: null, seq: 0, texts: new Map() };
+  const st = { data: null, chId: null, entries: [], sel: null, mode: 'view', against: null, seq: 0, texts: new Map(), player: null, play: null };
+  const stopPlayer = () => { if (st.player) { st.player.destroy(); st.player = null; } };
   historyState.open = st;
 
   const close = () => {
+    stopPlayer();
     document.removeEventListener('keydown', onKey, true);
     historyState.open = null;
     bd.remove();
@@ -11381,8 +11409,10 @@ async function showHistory(msg) {
     if (top !== bd) return;
     e.stopPropagation();
     if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+    // the player's own keys (Space, ← →, Home, End) while it has the focus
+    if (st.player && st.player.el.contains(e.target) && e.key !== 'Tab' && st.player.key(e)) return;
     if (e.key === 'Tab') {
-      const stops = [...bd.querySelectorAll('select, button, [tabindex="0"]')]
+      const stops = [...bd.querySelectorAll('select, button, input, [tabindex="0"]')]
         .filter((x) => !x.disabled && !x.closest('[hidden]') && x.offsetParent !== null && !x.closest('.hv-item'));
       const i = stops.indexOf(document.activeElement.closest('.hv-item') ? list : document.activeElement);
       e.preventDefault();
@@ -11481,8 +11511,9 @@ async function showHistory(msg) {
   async function show() {
     const seq = ++st.seq;
     const e = entry(st.sel);
+    stopPlayer();
     bar.hidden = !e;
-    if (!e) { compareRow.hidden = true; page.innerHTML = ''; return; }
+    if (!e) { compareRow.hidden = true; playBox.hidden = true; page.hidden = false; page.innerHTML = ''; return; }
     bd.querySelector('.hv-name').textContent = e.named ? e.name : historyDate(e.at);
     bd.querySelector('.hv-sub').textContent = [e.named ? historyDate(e.at) : '', historyDevice(st.data, e.dev), historyKindLabel(e)].filter(Boolean).join(' · ');
     bd.querySelector('.hv-named-tools').hidden = !e.named;
@@ -11492,10 +11523,16 @@ async function showHistory(msg) {
     restoreBtn.title = '';
     copyBtn.hidden = !!e.broken;
     fillAgainst();
+    // Play needs the log: a chapter with versions only from copies kept with it off has none
+    bd.querySelector('[data-mode="play"]').disabled = !h.playback || !P || !st.entries.some((x) => (x.ref && x.ref.dev) || (x.named && Number.isSafeInteger(x.n)));
     if (st.mode === 'compare' && bd.querySelector('[data-mode="compare"]').disabled) st.mode = 'view';
+    if (st.mode === 'play' && bd.querySelector('[data-mode="play"]').disabled) st.mode = 'view';
     bd.querySelectorAll('.hv-modes button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === st.mode)));
     compareRow.hidden = st.mode !== 'compare';
+    playBox.hidden = st.mode !== 'play';
+    page.hidden = st.mode === 'play';
     summary.textContent = '';
+    if (st.mode === 'play') { await showPlay(e, seq); return; }
     if (e.broken) {
       page.innerHTML = `<p class="hv-error">${escHtml(t('This version can’t be rebuilt: part of the Scribe’s Log from that computer doesn’t replay. Earlier versions are unaffected.'))}</p>`;
       return;
@@ -11552,6 +11589,36 @@ async function showHistory(msg) {
       });
     }
     page.scrollTop = 0;
+  }
+
+  // Play: the chapter's changes from this version (or its start) to now,
+  // built by the helper from the whole log, played here. The last one
+  // asked for is kept, so going back to Play doesn't build it again.
+  async function showPlay(e, seq) {
+    copyBtn.hidden = true;
+    restoreBtn.hidden = true; // (Read or Compare for that)
+    const from = historyPlayFrom(st.entries, e);
+    playNote.textContent = from
+      ? t('From {when} to now: each change as the computer that made it had the chapter. What came in glows; what went shows going.', { when: historyEntryName(e) })
+      : t('From the chapter’s start to now: each change as the computer that made it had the chapter. What came in glows; what went shows going.');
+    playerEl.innerHTML = `<p class="hv-wait">${escHtml(t('Getting the playback ready…'))}</p>`;
+    const key = st.chId + '|' + (from ? from.dev + ':' + from.n : 'start');
+    if (!st.play || st.play.key !== key) {
+      let data;
+      try { data = await h.playback(bookId, st.chId, from); } catch (err) { data = { error: (err && err.message) || String(err) }; }
+      if (seq !== st.seq || !bd.isConnected) return;
+      st.play = { key, data };
+    }
+    const data = st.play.data;
+    let pb = null;
+    let why = data && data.error;
+    if (!why) { try { pb = P.Playback.fromData(data); } catch (err) { why = err.message; } }
+    if (why) { playerEl.innerHTML = `<p class="hv-error">${escHtml(t('The chapter can’t be played: {why}', { why }))}</p>`; return; }
+    if (!pb.length) { playerEl.innerHTML = `<p class="hv-wait">${escHtml(t('Nothing to play: the chapter hasn’t changed since this version.'))}</p>`; return; }
+    for (const s of pb.steps) s.name = historyDevice(st.data, s.dev);
+    playerEl.innerHTML = '';
+    st.player = P.mount(playerEl, pb, { t, when: historyDate, day: historyDay });
+    st.player.el.querySelector('.pb-page').classList.add('hv-page');
   }
 
   function openChapter(id) {

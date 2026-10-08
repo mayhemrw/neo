@@ -553,6 +553,24 @@ class History {
     return { text: got.text, dels: this.deletionsSince(dir, me, from, got.text) };
   }
 
+  // One chapter's writing played back (slog-playback.js), as data for the
+  // window: every computer's chain read whole and traced, text that arrived
+  // without a recorded source matched by its words, and the chapter's steps
+  // from `from` ({ dev, n }: a version; the chapter's start otherwise) to
+  // the end of the log. Returns the playback's data (Playback.fromData
+  // reads it) or { error }.
+  playback(dir, id, { from = null } = {}) {
+    const listing = F.listLog(dir);
+    if (!this._logId(listing)) return { error: 'this book has no Scribe\'s Log' };
+    const read = readChains(dir);
+    for (const p of read.problems) this.onError('playback', new Error(p));
+    const chains = read.chains.map((c) => ({ dev: c.dev, entries: c.chunks.flatMap((k) => k.entries) }));
+    const links = chains.length > 1 ? V.matchArrivals(chains) : null;
+    const P = require('./slog-playback.js');
+    const ok = from && typeof from.dev === 'string' && Number.isSafeInteger(from.n);
+    return P.build(chains, V.chapterDoc(id), { links, from: ok ? { dev: from.dev, n: from.n } : null }).toData();
+  }
+
   // Text deleted on one chain after entry `from`, oldest first, as
   // [{ n, op, text, json }]: those with a stretch of DEL_GRAM characters in
   // common with `near`, or at least DEL_MIN found whole in it. A damaged

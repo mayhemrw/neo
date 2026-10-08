@@ -1095,6 +1095,22 @@ async function historyRestore(bookId, ref, chapterId, { at = null, name = null }
   }
 }
 ipcMain.handle('history:restore', (_e, bookId, ref, chapterId, opts) => historyRestore(bookId, ref, chapterId, opts && typeof opts === 'object' ? opts : {}));
+// One chapter's writing to play back, from a version ({ dev, n } on a
+// chain) or from its start, to the log's end: the log flushed first (the
+// window has saved everything), the playback built in the helper and
+// handed over as data (slog-playback.js's Playback.fromData), or { error }
+ipcMain.handle('history:playback', async (_e, bookId, chapterId, from) => {
+  const dir = bookDir(bookId);
+  libName(chapterId);
+  const clean = from && typeof from === 'object' ? historyRef({ dev: from.dev, n: from.n }) : null;
+  try { await scribe().head(dir, bookId); } catch (err) { logError('scribe\'s log', err); }
+  try {
+    return await historyAsk({ type: 'playback', dir, chapter: chapterId, from: clean });
+  } catch (err) {
+    logError('versions', err);
+    return { error: err.message };
+  }
+});
 
 // File → Scribe's Log → Export for Verification…: the book's whole log in
 // one .zip, with its own copy of the verifier, for someone else to check.

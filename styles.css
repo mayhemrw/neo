@@ -1492,6 +1492,44 @@ body.night .hv-page ins { color: #8fd19e; }
 .hv-footer { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 12px 26px; border-top: 1px solid #373737; }
 .hv-footer .hv-problems { font-size: 12px; color: #c99a8f; }
 .history-modal button:focus-visible, .history-modal select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Play (slog-playback.js's player, inside the History window) */
+.hv-play { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.hv-play-note { margin: 0; padding: 0 22px 8px; font-size: 12px; color: #9a9a9a; line-height: 1.5; }
+.hv-player { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.hv-player .pb { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.pb-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 0 22px; font-size: 13px; color: #bbb; }
+.pb-bar button { background: none; border: 1px solid #444; border-radius: 6px; color: #ddd; min-width: 38px; padding: 4px 10px; font-size: 13px; line-height: 1.3; }
+.pb-bar button:hover:not(:disabled) { border-color: var(--accent); }
+.pb-bar button:disabled { opacity: 0.4; cursor: default; }
+.pb-bar .pb-play { border-color: var(--accent); color: var(--accent); }
+.pb-bar select { padding: 4px 8px; background: var(--bg); border: 1px solid #3a3a3a; border-radius: 6px; color: #eee; font: inherit; font-size: 13px; }
+.pb-bar label { display: inline-flex; align-items: center; gap: 4px; width: auto; margin: 0 0 0 6px; white-space: nowrap; font-size: 13px; color: inherit; }
+.pb-bar input[type="checkbox"] { width: auto; margin: 0; accent-color: var(--accent); }
+.hv-player .pb-scrub { width: auto; align-self: stretch; min-width: 0; margin: 10px 22px 4px; padding: 0; accent-color: var(--accent); }
+.pb-status, .pb-session { padding: 0 22px; font-size: 12px; color: #9a9a9a; font-variant-numeric: tabular-nums; }
+.pb-session { transition: color .3s; }
+.pb-session:empty { display: none; }
+.pb-session.pb-fresh { color: var(--accent); }
+.pb-legend { display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 22px 0; font-size: 12px; }
+.pb-key { border-radius: 4px; padding: 1px 7px; color: #1c1c1c; }
+.hv-player .pb-page { margin-top: 10px; position: relative; }
+.hv-player .pb-page p.scene-break { width: fit-content; margin-left: auto; margin-right: auto; padding: 0 0.3em 0 calc(0.3em + 8px); }
+.pb-page .pb-empty { text-indent: 0; font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; color: #8a857a; }
+.pb-new { background: rgba(70, 170, 100, 0.32); border-radius: 2px; animation: pb-glow 1.6s ease-out forwards; }
+.pb-gone { background: rgba(200, 70, 60, 0.3); text-decoration: line-through; border-radius: 2px; }
+@keyframes pb-glow { from { background: rgba(70, 170, 100, 0.6); } to { background: rgba(70, 170, 100, 0); } }
+.pb-colored .pb-new { animation: none; outline: 2px solid rgba(70, 170, 100, 0.8); }
+.pb-o-typed { background: rgba(42, 120, 214, 0.18); }
+.pb-o-pasted { background: rgba(235, 104, 52, 0.3); }
+.pb-o-moved { background: rgba(27, 175, 122, 0.26); }
+.pb-o-imported { background: rgba(237, 161, 0, 0.3); }
+.pb-o-other { background: rgba(128, 128, 128, 0.28); }
+.pb-key.pb-o-typed { background: #9cc0ec; }
+.pb-key.pb-o-pasted { background: #f3b293; }
+.pb-key.pb-o-moved { background: #93d6bc; }
+.pb-key.pb-o-imported { background: #f2cf7f; }
+.pb-key.pb-o-other { background: #c4c2bc; }
+@media (prefers-reduced-motion: reduce) { .pb-new { animation: none; } .pb-session { transition: none; } }
 @media (max-width: 760px) {
   .hv-body { flex-direction: column; }
   .hv-list { flex: 0 0 34%; border-right: none; border-bottom: 1px solid #373737; }
@@ -1809,6 +1847,11 @@ body.light .hv-delta.down { color: #a3352c; }
 body.light .hv-modes, body.light .hv-modes button + button { border-color: #cfcac0; }
 body.light .hv-modes button { color: #4a463f; }
 body.light .hv-page { box-shadow: 0 0 0 1px #e0dcd4; }
+body.light .hv-play-note, body.light .pb-status, body.light .pb-session:not(.pb-fresh) { color: #6f6a60; }
+body.light .pb-bar { color: #4a463f; }
+body.light .pb-bar button { border-color: #cfcac0; color: #2b2926; }
+body.light .pb-bar .pb-play { border-color: var(--accent); color: #8a6a2c; }
+body.light .pb-bar select { background: #fff; border-color: #cfcac0; color: #1c1a17; }
 body.light .hv-footer .hv-problems { color: #a3352c; }
 body.light .show-scrollbar::-webkit-scrollbar-thumb { background-color: rgba(0,0,0,0.18); }
 body.light .show-scrollbar::-webkit-scrollbar-thumb:hover { background-color: rgba(0,0,0,0.3); }

@@ -362,6 +362,21 @@ describe('playback: two computers', () => {
     assert.match(pb.frame(pb.length, { origins: true }).html, /^<p><span class="pb-new pb-o-pasted">Pasted from somewhere else entirely\.<\/span><\/p>/);
   });
 
+  test('a playback handed over as data plays the same (NEO\'s helper builds it, the window plays it)', () => {
+    const { a, b } = twoComputers();
+    const pb = P.build(chains(a, b), 'ch-1', { from: { dev: DEV_A, n: 4 } });
+    const back = P.Playback.fromData(JSON.parse(JSON.stringify(pb.toData())));
+    assert.equal(back.length, pb.length);
+    assert.deepEqual(back.steps, pb.steps);
+    for (let pos = 0; pos <= pb.length; pos++) {
+      for (const origins of [false, true]) assert.deepEqual(back.frame(pos, { origins }), pb.frame(pos, { origins }), `frame ${pos}`);
+    }
+    // a chapter not yet there, kept as data, is still not there
+    const fromStart = P.Playback.fromData(JSON.parse(JSON.stringify(P.build(chains(a, b), 'ch-1').toData())));
+    assert.equal(fromStart.frame(0).absent, true);
+    assert.throws(() => P.Playback.fromData({ v: 2 }), /not a playback/);
+  });
+
   test('from a version to a version: only the steps between, starting from that version', () => {
     const { a, b } = twoComputers();
     const list = chains(a, b);

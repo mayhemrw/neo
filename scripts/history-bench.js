@@ -140,6 +140,11 @@ console.log(`checkpoints: ${cpN.length} plus the tail, ${(cpBytes / 1e6).toFixed
   const [tPlay] = ms(() => { for (let i = 0; i <= pb.length; i++) pb.frame(i, { origins: true }); });
   const [tSeek] = ms(() => { for (let i = 0; i < 200; i++) pb.frame(pick(pb.length + 1), { origins: true }); });
   const ok = pb.frame(pb.length).text === docs[doc];
+  // as NEO's window gets it: handed over as data
+  const [tData, json] = ms(() => JSON.stringify(pb.toData()));
+  const [tBack, back] = ms(() => P.Playback.fromData(JSON.parse(json)));
+  const same = back.frame(back.length).text === docs[doc];
   console.log(`playback, ${doc} (${pb.length} steps): log read ${tRead.toFixed(0)} ms, built ${tBuild.toFixed(0)} ms, every frame in order ${(tPlay / (pb.length + 1)).toFixed(2)} ms each, 200 seeks ${(tSeek / 200).toFixed(1)} ms each, ends as on disk: ${ok}`);
+  console.log(`playback as data: ${(json.length / 1e6).toFixed(1)} MB, ${tData.toFixed(0)} ms out, ${tBack.toFixed(0)} ms back, ends as on disk: ${same}`);
 }
 fs.rmSync(root, { recursive: true, force: true });

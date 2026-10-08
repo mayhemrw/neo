@@ -493,6 +493,38 @@ describe('Scribe\'s Log in main.js', { concurrency: 1 }, () => {
     await main.call('slog:event', book.id, { type: 'close' });
   });
 
+  test('history:playback: the chapter\'s changes, from a version or its start, the open session included', async () => {
+    const lib = tempLibrary();
+    const book = main.call('book:create', { title: 'Played' });
+    const write = (html, was, how = { src: 'typed' }) => {
+      main.call('slog:observe', book.id, 'chapter', 'ch-x', html, how);
+      main.call('chapter:write', book.id, 'ch-x', html, was);
+    };
+    main.call('slog:open', book.id);
+    write('<p>One.</p>');
+    write('<p>One. Two.</p>', '<p>One.</p>');
+    await main.call('slog:event', book.id, { type: 'close' });
+    main.call('slog:open', book.id);
+    write('<p>One. Two.</p><p>Pasted in.</p>', '<p>One. Two.</p>', { src: 'paste' });
+    const P = require('../slog-playback.js');
+    // still open: the log's flushed first, so the session being written plays too
+    const all = P.Playback.fromData(await main.call('history:playback', book.id, 'ch-x', null));
+    assert.deepEqual(all.problems, []);
+    const last = all.frame(all.length, { origins: true });
+    assert.equal(last.text, '<p>One. Two.</p><p>Pasted in.</p>');
+    assert.match(last.html, /<span class="pb-new pb-o-pasted">Pasted in\.<\/span>/);
+    const list = await main.call('history:list', book.id);
+    const v = Object.values(list.chapters).find((c) => c.id === 'ch-x').versions[0];
+    const later = P.Playback.fromData(await main.call('history:playback', book.id, 'ch-x', { dev: v.dev, n: v.n }));
+    assert.equal(later.frame(0).text, '<p>One. Two.</p>');
+    assert.equal(later.length, 1);
+    // a ref that isn't a chain's is ignored (from the start); a bad chapter name is refused
+    assert.equal(P.Playback.fromData(await main.call('history:playback', book.id, 'ch-x', { dev: '../x', n: 1 })).length, all.length);
+    await assert.rejects(main.call('history:playback', book.id, '../book', null), /Invalid library name/);
+    await main.call('slog:event', book.id, { type: 'close' });
+    assert.ok(fs.existsSync(path.join(lib, book.id)));
+  });
+
   test('with the log off: each session leaves a copy of what it changed, and naming copies the book', async () => {
     const lib = tempLibrary();
     const book = main.call('book:create', { title: 'Unlogged' });

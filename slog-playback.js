@@ -24,6 +24,8 @@
 
 (function (api) {
   const hasRequire = typeof require === 'function';
+  // (the checker is needed only to build a playback; NEO's window gets one
+  // built in its history helper, as data, and needs only SlogDiff)
   const V = hasRequire ? require('./slog-verify.js') : globalThis.SlogVerify;
   const D = hasRequire ? require('./slog-diff.js') : globalThis.SlogDiff;
 
@@ -168,13 +170,24 @@
   // A computer's changes to the chapter, in its chain's order (its own and
   // what arrived from others): { n, ts, kind, ops, ins, reset, runs }, the
   // text kept whole every EVERY changes
+  // ops applied to a text, as the checker applies them (throws on one that doesn't fit)
+  function applyOps(text, ops, ins) {
+    let s = text;
+    ops.forEach((op, i) => {
+      const [at, del, len] = op;
+      const put = ins ? ins[i] : '';
+      if (!(at >= 0 && del >= 0 && at + del <= s.length) || typeof put !== 'string' || put.length !== len) throw new Error('op out of range');
+      s = s.slice(0, at) + put + s.slice(at + del);
+    });
+    return s;
+  }
   function applyTo(text, le) {
     if (le.reset === 'new') return '';
     if (le.reset === 'del') return ABSENT;
-    if (le.kind === 'base') return le.ins ? V.applyOps('', le.ops, le.ins) : null;
+    if (le.kind === 'base') return le.ins ? applyOps('', le.ops, le.ins) : null;
     if (text === ABSENT) return ABSENT;
-    if (le.ins && text !== null) return V.applyOps(text, le.ops, le.ins);
-    if (text !== null && le.ops.every((op) => op[2] === 0)) return V.applyOps(text, le.ops, le.ops.map(() => ''));
+    if (le.ins && text !== null) return applyOps(text, le.ops, le.ins);
+    if (text !== null && le.ops.every((op) => op[2] === 0)) return applyOps(text, le.ops, le.ops.map(() => ''));
     return null;
   }
 
@@ -279,7 +292,11 @@
       });
     }
     steps.sort((a, b) => before(a.key, b.key));
-    steps.forEach((s, i) => { s.newSession = i === 0 || s.session !== steps[i - 1].session; delete s.key; });
+    steps.forEach((s, i) => {
+      s.newSession = i === 0 || s.session !== steps[i - 1].session;
+      delete s.key;
+      for (const k of ['cause', 'dur']) if (s[k] === undefined) delete s[k]; // (plain data, the same once copied)
+    });
 
     // where it starts: the version it plays from, or before the chapter was
     let start = { lane: null, li: -1 };
@@ -291,6 +308,32 @@
   }
 
   class Playback {
+    // As plain data (structured-clone and JSON safe), for a playback built
+    // in one process and played in another (NEO's history helper → window)
+    toData() {
+      const lanes = [...this.lanes.values()].map((l) => ({
+        dev: l.dev,
+        list: l.list.map((le) => ({ n: le.n, ts: le.ts, kind: le.kind, ops: le.ops, ins: le.ins, reset: le.reset, runs: le.runs })),
+        whole: [...l.whole.entries()].map(([i, text]) => [i, text === ABSENT ? { absent: true } : text])
+      }));
+      return {
+        v: 1, doc: this.doc, steps: this.steps, lanes, problems: this.problems,
+        start: { dev: this.start.lane ? this.start.lane.dev : null, li: this.start.li }
+      };
+    }
+    static fromData(data) {
+      if (!data || data.v !== 1 || !Array.isArray(data.steps) || !Array.isArray(data.lanes)) throw new Error('not a playback');
+      const lanes = new Map();
+      for (const d of data.lanes) {
+        const lane = new Lane(d.dev);
+        lane.list = d.list;
+        for (const [i, text] of d.whole) lane.whole.set(i, text && typeof text === 'object' ? ABSENT : text);
+        lanes.set(d.dev, lane);
+      }
+      const start = { lane: data.start && data.start.dev ? lanes.get(data.start.dev) || null : null, li: data.start ? data.start.li : -1 };
+      return new Playback(data.doc, data.steps, lanes, start, data.problems || []);
+    }
+
     constructor(doc, steps, lanes, start, problems) {
       this.doc = doc;
       this.steps = steps;
@@ -401,7 +444,7 @@
   // placeholders), when(ms) and day(ms) (how to show a time and a date),
   // speed, skip, origins (to start with), start (position), onKey
   // (handed every key the player doesn't use) }. Returns { el, play,
-  // pause, seek(pos), step(by), playing, pos, destroy }.
+  // pause, seek(pos), step(by), key(event), playing, pos, destroy }.
   function mount(host, pb, opts = {}) {
     const t = opts.t || plainT;
     const when = opts.when || ((ms) => new Date(ms).toLocaleString());
@@ -565,24 +608,28 @@
     scrub.addEventListener('input', () => seek(pb.positionAt(Number(scrub.value), { speed, skip }, times)));
     // Space or K plays and pauses, ← → step (Shift: ten at a time), Home
     // and End go to either end. A control keeps its own keys (Space on a
-    // button presses it, arrows move the scrubber or the speed).
-    root.addEventListener('keydown', (e) => {
+    // button presses it, arrows move the scrubber or the speed). Returns
+    // whether the key was the player's (a host that owns the keyboard,
+    // like NEO's History window, hands keys in through `key`).
+    const key = (e) => {
       const tag = e.target && e.target.tagName;
       const own = tag === 'SELECT' || tag === 'INPUT' || (tag === 'BUTTON' && (e.key === ' ' || e.key === 'Enter'));
-      let used = false;
-      if (!own && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        used = true;
-        if (e.key === ' ' || e.key === 'k') { if (playing) pause(); else play(); } else if (e.key === 'ArrowRight' || e.key === '.') stepBy(e.shiftKey ? 10 : 1);
-        else if (e.key === 'ArrowLeft' || e.key === ',') stepBy(e.shiftKey ? -10 : -1);
-        else if (e.key === 'Home') { pause(); show(0); } else if (e.key === 'End') { pause(); show(pb.length); } else used = false;
-      }
-      if (used) { e.preventDefault(); e.stopPropagation(); } else if (opts.onKey) opts.onKey(e);
+      if (own || e.metaKey || e.ctrlKey || e.altKey) return false;
+      if (e.key === ' ' || e.key === 'k') { if (playing) pause(); else play(); } else if (e.key === 'ArrowRight' || e.key === '.') stepBy(e.shiftKey ? 10 : 1);
+      else if (e.key === 'ArrowLeft' || e.key === ',') stepBy(e.shiftKey ? -10 : -1);
+      else if (e.key === 'Home') { pause(); show(0); } else if (e.key === 'End') { pause(); show(pb.length); } else return false;
+      e.preventDefault();
+      return true;
+    };
+    root.addEventListener('keydown', (e) => {
+      if (key(e)) e.stopPropagation();
+      else if (opts.onKey) opts.onKey(e);
     });
 
     setScrub();
     show(Number.isSafeInteger(opts.start) ? opts.start : 0);
     return {
-      el: root, play, pause, seek, step: stepBy,
+      el: root, play, pause, seek, step: stepBy, key,
       get playing() { return playing; },
       get pos() { return pos; },
       destroy() { clearTimeout(timer); clearTimeout(flashTimer); playing = false; root.remove(); }
