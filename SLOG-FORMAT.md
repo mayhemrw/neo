@@ -104,7 +104,7 @@ Ops apply in order, and each `at` refers to the text as it stands after the ops 
 
 An edit that only deletes uses `src` for how the change was made: `typed` for the writer's own editing (the leaving half of a move included; `cause` says which tool), `arrived` for a change found on disk, `unlogged` when NEO can't say.
 
-`cause` optionally names what in NEO made the change (`undo`, `redo`, `replace`, `outline`, `split`, `join`, `spell`, `darling`, `placeholder`, `off`).
+`cause` optionally names what in NEO made the change (`undo`, `redo`, `replace`, `outline`, `split`, `join`, `spell`, `darling`, `placeholder`, `restore`, `off`). `restore` is a past version of a chapter put back (the whole chapter, a chapter no longer in the book, or a passage copied out of a version and pasted in); its `src` is `move` (`typed` when putting it back only deletes), and its `from` points at the deletions that took those words out. A checker that doesn't know a `cause` ignores it: chunks stay `v: 2`.
 
 ### Where moved text came from
 
@@ -123,7 +123,7 @@ A `base` can carry `from` too, with `{log}` or `{dev}` sources only: a book made
 
 Pieces are in order of `op`, then `at`, and don't overlap. Units no piece covers take the entry's `src`; in a `move` entry, that's text moved within NEO whose place wasn't recorded.
 
-NEO records a piece for an exact match of at least 20 units of text outside tags, so a common phrase typed again isn't mistaken for a move. (An HTML string that starts partway into a tag, as an edit's inserted string can, counts everything up to its first `>` as tag.) When the window says text was moved (a paste of NEO's own clipboard, an undo or redo, one of NEO's tools), a shorter insertion found whole counts too, and so does one of the last few deletions found whole inside it. NEO keeps the deleted text it matches against for the session only; a checker keeps whatever a `from` points at.
+NEO records a piece for an exact match of at least 20 units of text outside tags, so a common phrase typed again isn't mistaken for a move. (An HTML string that starts partway into a tag, as an edit's inserted string can, counts everything up to its first `>` as tag.) When the window says text was moved (a paste of NEO's own clipboard, an undo or redo, one of NEO's tools), a shorter insertion found whole counts too, and so does one of the last few deletions found whole inside it. NEO keeps the deleted text it matches against for the session only; a checker keeps whatever a `from` points at. For a `restore`, NEO also reads back what this device's chain deleted since the version being restored (from the version's own entry, or for another device's version, from this chain's last session to change a chapter and end by the version's time) and matches against that too, so restored words point at the entries that deleted them, however long ago, and keep their origin: a pasted passage restored is still pasted. Stretches of a restore too short for the rule above (a word revised before the whole passage was deleted) are matched against those deletions on their own, down to 4 units of text, the oldest deletion first.
 
 `keys`, for edits to `book`, lists which top-level fields changed (such as `["author"]`), so a change of author name shows without the name.
 
@@ -240,6 +240,8 @@ For each device:
 4. With the key and words present, each `c` must match, each inserted string must have its recorded length, and each `markup` list must match the tags in its string.
 5. Replay the ops from empty documents. Every op must fit the text it applies to. With words, this rebuilds every document exactly; without them, it still checks every length.
 6. Follow every `from`: each piece must point at text that exists (a deletion earlier in the chain, or at or before its own op; a document as it stood before the entry; another device's document as it stood after the entry named, on that device's chain) and fit inside it. With words, the two stretches must be the same text, or one character written two ways (which takes the origin of the source's first unit, as above). A `{dev}` piece naming a device whose chunks aren't there, or an entry or document that chain doesn't have, is damage.
+
+A restore needs nothing more: its pieces are ordinary `{n, op}` sources, deletions earlier in the same chain, however many chunks back.
 
 The replayed documents of a device are the book as that device last saw it. A `close` entry's `ms` can be compared with a manuscript's hash.
 

@@ -81,7 +81,8 @@ contextBridge.exposeInMainWorld('neo', {
     rename: (bookId, file, name) => ipcRenderer.invoke('history:rename', bookId, file, name),
     remove: (bookId, file) => ipcRenderer.invoke('history:remove', bookId, file),
     list: (bookId) => ipcRenderer.invoke('history:list', bookId),
-    text: (bookId, ref, chapterId) => ipcRenderer.invoke('history:text', bookId, ref, chapterId)
+    text: (bookId, ref, chapterId) => ipcRenderer.invoke('history:text', bookId, ref, chapterId),
+    restore: (bookId, ref, chapterId, opts) => ipcRenderer.invoke('history:restore', bookId, ref, chapterId, opts)
   },
 
   writingStyleState: (st) => ipcRenderer.send('style:state', st),

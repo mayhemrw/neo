@@ -335,16 +335,68 @@ function findRecent(view, found, pool) {
   return out.sort((a, b) => a.at - b.at);
 }
 
+// A restore's words that nothing above placed (a word revised and then
+// the whole passage deleted leaves stretches too short to be taken for a
+// move on their own): each gap is filled, left to right, with the longest
+// stretch from its start that one of the restore's earlier deletions holds
+// (the oldest such deletion first, as nearest the version), down to
+// RECENT_MIN units of text. A gap too long, or nothing found, stays
+// unplaced.
+const PAST_GAP = 2000;   // units in a gap looked at, at most
+const PAST_LOOK = 256;   // deletions looked in, oldest first
+const PAST_WORK = 100000; // searches per insertion, at most
+function fillFromPast(view, found, pool) {
+  const t = view.text;
+  const vis = textBefore(t, !view.json);
+  const recs = [];
+  for (const rec of pool.src.records()) { if (recs.length >= PAST_LOOK) break; recs.push(rec); }
+  if (!recs.length) return found;
+  const out = found.slice();
+  const gaps = [];
+  let p = 0;
+  for (const m of found) { if (m.at > p) gaps.push([p, m.at]); p = Math.max(p, m.at + m.len); }
+  if (p < t.length) gaps.push([p, t.length]);
+  let work = 0;
+  for (const [a, b] of gaps) {
+    if (work > PAST_WORK) break;
+    if (b - a > PAST_GAP || vis[b] - vis[a] < RECENT_MIN) continue;
+    let q = a;
+    while (q < b && vis[b] - vis[q] >= RECENT_MIN && work <= PAST_WORK) {
+      let best = null;
+      for (const rec of recs) {
+        const s = rec.view.text;
+        // the longest stretch from q this deletion holds (a shorter one is
+        // held whenever a longer one is)
+        let lo = 0;
+        let hi = b - q;
+        let at = -1;
+        while (lo < hi) {
+          const mid = (lo + hi + 1) >> 1;
+          work++;
+          const i = s.indexOf(t.slice(q, q + mid));
+          if (i >= 0) { lo = mid; at = i; } else hi = mid - 1;
+        }
+        if (lo && (!best || lo > best.len)) best = { at: q, len: lo, rec, src: at >= 0 ? at : s.indexOf(t.slice(q, q + lo)), pool };
+        if (best && best.len === b - q) break;
+      }
+      if (best && vis[q + best.len] - vis[q] >= RECENT_MIN) { out.push(best); q += best.len; } else q++;
+    }
+  }
+  return out.sort((x, y) => x.at - y.at);
+}
+
 // The `from` pieces for one op's inserted string, looking in `pools` in
 // order. `moved`: the window says these words were moved, so shorter ones
 // count (above); `recent`: the graveyard whose last deletions those are
-// (none for a copy, which deleted nothing).
-function movedPieces(op, ins, json, pools, { moved = false, recent = null } = {}) {
+// (none for a copy, which deleted nothing); `past`: a restore's earlier
+// deletions (fillFromPast).
+function movedPieces(op, ins, json, pools, { moved = false, recent = null, past = null } = {}) {
   const tv = viewOf(ins, json);
   const out = [];
   let found = findMoved(tv, pools);
   if (!found.length && moved && tv.text.length < MOVE_MIN * 4) found = findWhole(tv, pools);
   if (moved && recent) found = findRecent(tv, found, recent);
+  if (moved && past) found = fillFromPast(tv, found, past);
   for (const m of found) {
     if (m.pool.as) {
       // another book: where in it isn't recorded, only that it came from it
@@ -661,7 +713,8 @@ const IMPORT_MS = 2 * 60 * 1000;   // how long a new imported book's first write
 const RETRY_MS = 30 * 1000;        // after a write fails, how long before the log tries the disk again
 const OBSERVED_KEEP = 16;          // described-but-unsaved versions kept per document, for saves landing late
 const WINDOW_SRC = new Set(['typed', 'paste', 'drop', 'move', 'import', 'arrived']);
-const CAUSES = new Set(['undo', 'redo', 'replace', 'outline', 'split', 'join', 'spell', 'darling', 'placeholder']);
+const CAUSES = new Set(['undo', 'redo', 'replace', 'outline', 'split', 'join', 'spell', 'darling', 'placeholder', 'restore']);
+const PAST_MAX = 16 * 1024 * 1024; // units of a restore's earlier deletions kept to match against, per book
 
 const wholeAtLeast = (v, min) => Number.isSafeInteger(v) && v >= min;
 // A label from the window, cut down to what the format allows. Where moved
@@ -831,6 +884,31 @@ class Recorder {
     return true;
   }
 
+  // A version of a chapter is going back into the book (slog-history.js's
+  // restoreSource): what this device's chain deleted since that version,
+  // as [{ n, op, text, json }] oldest first. A restore's words (an edit
+  // labeled { src: 'move', cause: 'restore' }) are looked for there too,
+  // so they point at the deletions that took them out, as an undo's do,
+  // and keep their origin. Kept while the book is open; the oldest
+  // deletions are preferred, being the version's own words.
+  restoring(dir, bookId, dels) {
+    const s = this.sessions.get(bookId);
+    if (!s || s.dir !== dir || !s.on || !s.info || !Array.isArray(dels)) return 0;
+    if (!s.past) { s.past = new Graveyard(PAST_MAX); s.pastKeys = new Set(); }
+    let added = 0;
+    for (let i = dels.length - 1; i >= 0; i--) {
+      const d = dels[i];
+      if (!d || !wholeAtLeast(d.n, 1) || !wholeAtLeast(d.op, 0) || typeof d.text !== 'string' || !d.text) continue;
+      if (s.chain && d.n > s.chain.n) continue;
+      const key = d.n + ':' + d.op;
+      if (s.pastKeys.has(key)) continue;
+      s.pastKeys.add(key);
+      s.past.bury({ view: viewOf(d.text, !!d.json), ref: { n: d.n, op: d.op } });
+      added++;
+    }
+    return added;
+  }
+
   // The window says how a book.json it's about to save got that way. Like
   // the save itself (beforeMeta), a change to the caret's place or a cover
   // in a book with no log doesn't start one.
@@ -985,7 +1063,7 @@ class Recorder {
         info: null, key: null, unreadable: false, chain: null, docs: {}, disk: {},
         chunk: null, last: null, count: 0, failed: 0, idle: null, closing: null, saved: 0,
         imported: null, importUntil: 0, observed: {}, others: null,
-        graves: new Graveyard(), live: new LiveDocs()
+        graves: new Graveyard(), live: new LiveDocs(), past: null, pastKeys: null
       };
       this.sessions.set(bookId, s);
       const raw = readQuiet(path.join(dir, LOG_DIR, LOG_INFO));
@@ -1186,9 +1264,12 @@ class Recorder {
     const graves = { src: s.graves };
     const pools = [graves];
     const moved = how.src === 'move';
+    let past = null;
     if (moved && ins.some((t) => t.length)) {
       s.live.refresh(s.docs);
       // a copy is looked for in the book first; anything else in what was deleted
+      // a restore: in what was deleted since the version, before the book
+      if (how.cause === 'restore' && s.past) pools.push(past = { src: s.past });
       if (how.copy) pools.unshift({ src: s.live });
       else pools.push({ src: s.live });
       const o = how.book && how.book !== s.bookId ? this.sessions.get(how.book) : null;
@@ -1201,7 +1282,7 @@ class Recorder {
     let cur = before;
     ops.forEach(([at, del, len], i) => {
       if (del) s.graves.bury({ view: viewOf(cur.slice(at, at + del), json), ref: { n, op: i } });
-      if (len) from.push(...movedPieces(i, ins[i], json, pools, { moved, recent: how.copy ? null : graves }));
+      if (len) from.push(...movedPieces(i, ins[i], json, pools, { moved, recent: how.copy ? null : graves, past }));
       cur = cur.slice(0, at) + ins[i] + cur.slice(at + del);
     });
     return from;

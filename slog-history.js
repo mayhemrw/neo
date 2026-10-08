@@ -523,7 +523,88 @@ class History {
     if (typeof t !== 'string') return { error: doc in r.docs ? 'the words for this version aren\'t in the log' : 'that chapter didn\'t exist then' };
     return { text: t };
   }
+
+  // A version's chapter on its way back into the book (restored whole, or
+  // a passage copied out of it): its text, and the text this computer's
+  // chain (`me`) has deleted since that version, where the Recorder looks
+  // for the restored words so they keep the origin they had (slog.js). A
+  // pasted passage restored is still pasted. Since when: the version's own
+  // entry when it's this computer's; otherwise this chain's last session
+  // to end by the version's time (`at`), or the chain's start. Only
+  // deletions that could hold some of the version's words are kept.
+  // Returns { text, dels: [{ n, op, text, json }] } or { error }.
+  restoreSource(dir, ref, id, { me = null, at = null, logged = true } = {}) {
+    const got = this.versionText(dir, ref, id);
+    if (got.error || !logged || typeof me !== 'string') return got.error ? got : { text: got.text, dels: [] };
+    let from = null;
+    if (ref.named) {
+      const v = readNamedFile(dir, ref.named);
+      if (v && !v.copy && v.dev === me) from = v.n;
+      else if (v) at = v.at;
+    } else if (!ref.copy && ref.dev === me) from = ref.n;
+    if (from === null) {
+      from = 0;
+      if (Number.isFinite(at)) {
+        for (const ch of Object.values(this.index(dir).chapters)) {
+          for (const v of ch.versions) if (v.dev === me && v.ts <= at && v.n > from && !v.gone) from = v.n;
+        }
+      }
+    }
+    return { text: got.text, dels: this.deletionsSince(dir, me, from, got.text) };
+  }
+
+  // Text deleted on one chain after entry `from`, oldest first, as
+  // [{ n, op, text, json }]: those with a stretch of DEL_GRAM characters in
+  // common with `near`, or at least DEL_MIN found whole in it. A damaged
+  // stretch of the chain is passed over (its deletions can't be known).
+  deletionsSince(dir, dev, from, near) {
+    const start = from > 0 ? this.rebuild(dir, dev, from) : { docs: {} };
+    if (start.error) { this.onError('restore', new Error(start.error)); return []; }
+    const nv = V.viewOf(String(near || ''), false).text;
+    const grams = new Set();
+    for (let i = 0; i + DEL_GRAM <= nv.length; i++) grams.add(nv.slice(i, i + DEL_GRAM));
+    const wanted = (t) => {
+      if (t.length < DEL_GRAM) return t.trim().length >= DEL_MIN && nv.includes(t);
+      for (let i = 0; i + DEL_GRAM <= t.length; i++) if (grams.has(t.slice(i, i + DEL_GRAM))) return true;
+      return false;
+    };
+    const listing = F.listLog(dir);
+    const logId = this._logId(listing);
+    const had = logId ? this._usable(this._readCache(logId), listing)[dev] : null;
+    const skip = had ? new Set(had.chunks.filter((k) => k.last <= from).map((k) => k.name)) : null;
+    const chain = readChains(dir, { skip }).chains.find((c) => c.dev === dev);
+    const out = [];
+    if (!chain) return out;
+    const r = new V.Replayer(start.docs);
+    let size = 0;
+    for (const c of chain.chunks) {
+      for (const e of c.entries) {
+        if (!(e.n > from)) continue;
+        const cur = r.text[e.doc];
+        if (e.kind === 'edit' && e.doc !== 'book' && typeof cur === 'string' && Array.isArray(e.ops) && size < DEL_MAX) {
+          const json = e.doc === 'darlings' || e.doc === 'stickies';
+          const ins = e.x && Array.isArray(e.x.ins) ? e.x.ins : null;
+          let t = cur;
+          e.ops.forEach((op, i) => {
+            const [at, del, len] = op;
+            if (del && t !== null) {
+              const raw = t.slice(at, at + del);
+              if (wanted(V.viewOf(raw, json).text)) { out.push({ n: e.n, op: i, text: raw, json }); size += raw.length; }
+            }
+            t = t === null || (len && !ins) ? null : t.slice(0, at) + (ins ? ins[i] : '') + t.slice(at + del);
+          });
+        }
+        r.step(e);
+      }
+    }
+    return out;
+  }
 }
+
+// What deletionsSince keeps for a restore to look in
+const DEL_GRAM = 12;              // a stretch this long in common with the version…
+const DEL_MIN = 4;                // …or a short deletion this long found whole in it
+const DEL_MAX = 32 * 1024 * 1024; // and no more than this much text in all
 
 /* ------------------------------------------------------------------ */
 /*  Versions kept in the book: named versions and the log-off copies    */

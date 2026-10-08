@@ -1048,13 +1048,16 @@ ipcMain.handle('history:list', async (_e, bookId) => {
 });
 // One chapter's text in a version: ref is { dev, n }, { copy } or { named }
 // (as History.list gave them). { text } or { error }, the error in words.
+function historyRef(ref) {
+  return !ref || typeof ref !== 'object' ? null
+    : typeof ref.named === 'string' ? { named: libName(ref.named) }
+      : typeof ref.copy === 'string' ? { copy: libName(ref.copy) }
+        : typeof ref.dev === 'string' && /^[0-9a-f]{32}$/.test(ref.dev) && Number.isSafeInteger(ref.n) ? { dev: ref.dev, n: ref.n } : null;
+}
 ipcMain.handle('history:text', async (_e, bookId, ref, chapterId) => {
   const dir = bookDir(bookId);
   libName(chapterId);
-  const clean = !ref || typeof ref !== 'object' ? null
-    : typeof ref.named === 'string' ? { named: libName(ref.named) }
-      : typeof ref.copy === 'string' ? { copy: libName(ref.copy) }
-        : typeof ref.dev === 'string' && Number.isSafeInteger(ref.n) ? { dev: ref.dev, n: ref.n } : null;
+  const clean = historyRef(ref);
   if (!clean) return { error: t('No such version.') };
   try {
     return await historyAsk({ type: 'text', dir, ref: clean, chapter: chapterId });
@@ -1063,6 +1066,35 @@ ipcMain.handle('history:text', async (_e, bookId, ref, chapterId) => {
     return { error: err.message };
   }
 });
+// A version's chapter going back into the book: its text, with the log
+// made ready for it. What this computer's chain deleted since that version
+// is handed to the Recorder, so restored words point at the deletions that
+// took them out and keep their origin (a paste restored is still a paste).
+// at: the version's time (for a version from another computer); name: the
+// version to save first, of the whole book as it stands ("Before
+// restoring Chapter 3"), for a restore that replaces a chapter. The window
+// has saved everything first. Returns { text, version } or { error }.
+async function historyRestore(bookId, ref, chapterId, { at = null, name = null } = {}) {
+  const dir = bookDir(bookId);
+  libName(chapterId);
+  const clean = historyRef(ref);
+  if (!clean) return { error: t('No such version.') };
+  const logged = !historyFromCopies(bookId);
+  const me = slogTap((s) => s.device()) || null;
+  try {
+    if (logged) await scribe().head(dir, bookId);
+    const got = await historyAsk({ type: 'restore', dir, ref: clean, chapter: chapterId, me, at: Number.isFinite(at) ? at : null, logged });
+    if (got.error) return { error: got.error };
+    if (logged) slogTap((s) => s.restoring(dir, bookId, got.dels));
+    const clean2 = name ? slogHistory.cleanName(name) : null;
+    const version = clean2 ? await history.mark(bookId, clean2, 'restore') : null;
+    return { text: got.text, version: version ? { file: version.file, name: version.name } : null };
+  } catch (err) {
+    logError('versions', err);
+    return { error: err.message };
+  }
+}
+ipcMain.handle('history:restore', (_e, bookId, ref, chapterId, opts) => historyRestore(bookId, ref, chapterId, opts && typeof opts === 'object' ? opts : {}));
 
 // File → Scribe's Log → Export for Verification…: the book's whole log in
 // one .zip, with its own copy of the verifier, for someone else to check.

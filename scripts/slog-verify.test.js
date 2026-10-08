@@ -338,3 +338,208 @@ describe('slog-verify: receipts, coverage and the clock', () => {
     assert.deepEqual(online.coverage.get(DEV_A).stamps.map((s) => [s.n, s.time]), [[third.n, blockTime]]);
   });
 });
+
+// Phase 3's rule: a version restored (the whole chapter, or a passage copied
+// out of it) keeps the origins its words had. Written the way NEO does it:
+// main.js hands the Recorder what this computer's chain deleted since the
+// version (slog-history.js's restoreSource), and the window describes the
+// chapter as a restore. Each restore runs in a fresh Recorder, as after a
+// restart, so only the log itself can say where the words were. Then the
+// log is checked as slog-check does, with its words and without them: the
+// same origins either way.
+describe('Restored text keeps its origin', { concurrency: 1 }, () => {
+  const os = require('node:os');
+  const zlib = require('node:zlib');
+  const F = require('../slog-files.js');
+  const { History } = require('../slog-history.js');
+  const { checkBook, loadLog } = require('./slog-check.js');
+  const OWN = 'The writer typed this opening line in the book herself.';
+  const PASTED = 'A sentence the writer found somewhere else entirely, and pasted.';
+  const REVISED = PASTED.replace('somewhere', 'anywhere');
+  const TYPED = 'Then a line she typed at the desk, slowly, and kept for a while.';
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'neo-restore-'));
+  let made = 0;
+
+  function setup(chapters) {
+    const root = path.join(tmpRoot, String(++made));
+    const dir = path.join(root, 'book-a');
+    fs.mkdirSync(path.join(dir, 'chapters'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'book.json'), JSON.stringify({ id: 'book-a', title: 'A Book', author: 'Ada', chapterOrder: Object.keys(chapters) }, null, 2));
+    for (const [id, html] of Object.entries(chapters)) fs.writeFileSync(path.join(dir, 'chapters', id + '.html'), html);
+    const env = { root, dir, clock: T0, errors: [] };
+    env.recorder = (home = 'desk') => new slog.Recorder({
+      home: path.join(root, home), app: 'test', now: () => (env.clock += 1000),
+      onError: (where, err) => env.errors.push(where + ': ' + err.message)
+    });
+    env.history = (home = 'desk') => new History({ home: path.join(root, home, 'history'), onError: (w, err) => env.errors.push(w + ': ' + err.message) });
+    return env;
+  }
+  // the window describes a chapter, then main.js saves it
+  function put(rec, env, id, html, how) {
+    rec.observe(env.dir, 'book-a', slog.chapterDoc(id), html, how);
+    rec.touch(env.dir, 'book-a');
+    fs.writeFileSync(path.join(env.dir, 'chapters', id + '.html'), html);
+    rec.wrote(env.dir, 'book-a', slog.chapterDoc(id), html);
+  }
+  async function session(rec, env, edits) {
+    rec.open(env.dir, 'book-a');
+    for (const [id, html, how] of edits) put(rec, env, id, html, how);
+    await rec.close('book-a');
+  }
+  // one chapter's session versions on one computer's chain
+  const versionsOf = (env, id, home = 'desk') => env.history(home).index(env.dir).chapters[slog.chapterDoc(id)].versions;
+  // what the History window does: main gets the log ready (history:restore),
+  // then the chapter is described as a restore and saved
+  async function restore(env, ref, id, { home = 'desk', at = null, html = null } = {}) {
+    const rec = env.recorder(home);
+    rec.open(env.dir, 'book-a');
+    await rec.head(env.dir, 'book-a');
+    const got = env.history(home).restoreSource(env.dir, ref, id, { me: rec.device(), at });
+    assert.equal(got.error, undefined);
+    rec.restoring(env.dir, 'book-a', got.dels);
+    put(rec, env, id, html === null ? got.text : html(got.text), { src: 'move', cause: 'restore' });
+    await rec.close('book-a');
+    return { rec, got };
+  }
+  // the log checked with its words (where each passage came from) and
+  // without them (the same runs of origins, from lengths alone)
+  function checked(env) {
+    const full = checkBook(env.dir);
+    assert.deepEqual(full.problems, []);
+    for (const d of full.devices) assert.deepEqual(d.problems, [], 'chain ' + d.dev);
+    const raw = loadLog(env.dir);
+    const bare = {};
+    for (const [name, v] of Object.entries(raw)) {
+      if (V.isChunkName(name)) bare[name] = F.withoutWords(v);
+      else if (name === 'log.json') { const info = JSON.parse(v); delete info.key; bare[name] = JSON.stringify(info); } else bare[name] = v;
+    }
+    const clear = V.checkChains(V.readLog(bare, { inflateSync: zlib.inflateSync }));
+    assert.deepEqual(clear.problems, []);
+    for (const d of full.devices) {
+      const c = clear.devices.find((x) => x.dev === d.dev);
+      assert.deepEqual(c.problems, [], 'chain ' + d.dev + ' without the words');
+      for (const doc of Object.keys(d.traced)) assert.deepEqual(c.traced[doc].runs, d.traced[doc].runs, doc + ' without the words');
+    }
+    return full;
+  }
+  const whereFrom = (d, doc, needle) => {
+    const t = d.traced[slog.chapterDoc(doc)];
+    const at = t.text.indexOf(needle);
+    assert.ok(at >= 0, `"${needle}" is in ${doc}`);
+    return [...new Set(V.originsAt(t, at, needle.length).map(([, o]) => o))];
+  };
+  const restores = (env) => {
+    const logDir = path.join(env.dir, slog.LOG_DIR);
+    return fs.readdirSync(logDir).filter(slog.isChunkName).flatMap((n) => slog.parseChunk(fs.readFileSync(path.join(logDir, n), 'utf8')).entries)
+      .filter((e) => e.kind === 'edit' && e.cause === 'restore');
+  };
+
+  test('pasted, revised, deleted, restored: still pasted', async () => {
+    const env = setup({ 'ch-1': `<p>${OWN}</p>` });
+    await session(env.recorder(), env, []);
+    await session(env.recorder(), env, [['ch-1', `<p>${OWN}</p><p>${PASTED}</p>`, { src: 'paste' }]]);
+    await session(env.recorder(), env, [['ch-1', `<p>${OWN}</p><p>${REVISED}</p>`, { src: 'typed' }]]);
+    await session(env.recorder(), env, [['ch-1', `<p>${OWN}</p>`, { src: 'typed' }]]);
+    const v = versionsOf(env, 'ch-1')[1];
+    const { got } = await restore(env, { dev: v.dev, n: v.n }, 'ch-1');
+    assert.equal(got.text, `<p>${OWN}</p><p>${PASTED}</p>`);
+    // the restore points at the deletions in earlier sessions
+    const [r] = restores(env);
+    assert.equal(r.src, 'move');
+    assert.ok(r.from.length >= 2 && r.from.every((p) => p[3].n < r.n && p[3].n > v.n));
+    const d = checked(env).devices[0];
+    assert.deepEqual(whereFrom(d, 'ch-1', PASTED), ['paste']);
+    assert.deepEqual(whereFrom(d, 'ch-1', OWN), ['baseline']);
+    assert.equal(d.made.move, undefined, 'nothing restored is left without its origin');
+    assert.equal(d.made.typed, undefined, 'and none of it counts as typed');
+    assert.deepEqual(env.errors, []);
+  });
+
+  test('typed, revised, deleted, restored: still typed, not pasted', async () => {
+    const env = setup({ 'ch-1': `<p>${OWN}</p>` });
+    await session(env.recorder(), env, []);
+    await session(env.recorder(), env, [['ch-1', `<p>${OWN}</p><p>${TYPED}</p>`, { src: 'typed' }]]);
+    await session(env.recorder(), env, [['ch-1', `<p>${OWN}</p><p>${TYPED.replace('slowly', 'quickly')}</p>`, { src: 'typed' }]]);
+    await session(env.recorder(), env, [['ch-1', `<p>${OWN}</p>`, { src: 'typed' }]]);
+    const v = versionsOf(env, 'ch-1')[1];
+    await restore(env, { dev: v.dev, n: v.n }, 'ch-1');
+    const d = checked(env).devices[0];
+    assert.deepEqual(whereFrom(d, 'ch-1', TYPED), ['typed']);
+    assert.equal(d.made.move, undefined);
+    assert.equal(d.made.paste, undefined);
+  });
+
+  test('moved from another chapter, then deleted: restored, it keeps the origin it moved with', async () => {
+    const env = setup({ 'ch-1': `<p>${OWN}</p>`, 'ch-2': '<p>Second.</p>' });
+    await session(env.recorder(), env, []);
+    await session(env.recorder(), env, [['ch-2', `<p>Second.</p><p>${PASTED}</p>`, { src: 'paste' }]]);
+    // cut from chapter 2, pasted into chapter 1
+    await session(env.recorder(), env, [
+      ['ch-2', '<p>Second.</p>', { src: 'typed' }],
+      ['ch-1', `<p>${OWN}</p><p>${PASTED}</p>`, { src: 'move' }]
+    ]);
+    await session(env.recorder(), env, [['ch-1', `<p>${OWN}</p><p>${REVISED}</p>`, { src: 'typed' }]]);
+    await session(env.recorder(), env, [['ch-1', `<p>${OWN}</p>`, { src: 'typed' }]]);
+    const v = versionsOf(env, 'ch-1').find((x) => x.words > 10 && x.kind === 'session');
+    await restore(env, { dev: v.dev, n: v.n }, 'ch-1');
+    const d = checked(env).devices[0];
+    assert.deepEqual(whereFrom(d, 'ch-1', PASTED), ['paste']);
+    assert.equal(d.made.move, undefined);
+  });
+
+  test('a passage copied out of a version and pasted in: the same as a restore', async () => {
+    const env = setup({ 'ch-1': `<p>${OWN}</p>` });
+    await session(env.recorder(), env, []);
+    await session(env.recorder(), env, [['ch-1', `<p>${OWN}</p><p>${PASTED}</p><p>${TYPED}</p>`, { src: 'paste' }]]);
+    await session(env.recorder(), env, [['ch-1', `<p>${OWN}</p>`, { src: 'typed' }]]);
+    const v = versionsOf(env, 'ch-1')[1];
+    // only the pasted paragraph, put in after the first
+    await restore(env, { dev: v.dev, n: v.n }, 'ch-1', { html: () => `<p>${OWN}</p><p>${PASTED}</p>` });
+    const d = checked(env).devices[0];
+    assert.deepEqual(whereFrom(d, 'ch-1', PASTED), ['paste']);
+    assert.equal(d.made.move, undefined);
+  });
+
+  test('text from another computer, deleted there, restored here: the other computer\'s origins', async () => {
+    const env = setup({ 'ch-1': `<p>${OWN}</p>` });
+    // the desktop types and pastes; the laptop sees it arrive
+    await session(env.recorder('desk'), env, [
+      ['ch-1', `<p>${OWN}</p><p>${TYPED}</p>`, { src: 'typed' }],
+      ['ch-1', `<p>${OWN}</p><p>${TYPED}</p><p>${PASTED}</p>`, { src: 'paste' }]
+    ]);
+    await session(env.recorder('laptop'), env, []);
+    // the desktop revises and then deletes both; the deletions arrive on the laptop
+    await session(env.recorder('desk'), env, [['ch-1', `<p>${OWN}</p><p>${TYPED}</p><p>${REVISED}</p>`, { src: 'typed' }]]);
+    await session(env.recorder('laptop'), env, []);
+    await session(env.recorder('desk'), env, [['ch-1', `<p>${OWN}</p>`, { src: 'typed' }]]);
+    await session(env.recorder('laptop'), env, []);
+    // the laptop restores the desktop's version: found by its time
+    const desk = env.recorder('desk').device();
+    // (the desktop's first session began its log, so its version is that one)
+    const v = versionsOf(env, 'ch-1', 'laptop').find((x) => x.dev === desk);
+    assert.equal(env.history('laptop').versionText(env.dir, { dev: v.dev, n: v.n }, 'ch-1').text, `<p>${OWN}</p><p>${TYPED}</p><p>${PASTED}</p>`);
+    env.clock += 60000;
+    const { rec } = await restore(env, { dev: v.dev, n: v.n }, 'ch-1', { home: 'laptop', at: v.ts });
+    const res = checked(env);
+    const lap = res.devices.find((d) => d.dev === rec.device());
+    assert.deepEqual(whereFrom(lap, 'ch-1', PASTED), ['paste']);
+    assert.deepEqual(whereFrom(lap, 'ch-1', TYPED), ['typed']);
+    assert.equal(lap.made.move, undefined);
+    assert.deepEqual(res.devices[res.devices.length - 1].differ, [], 'the newest chain replays to the disk');
+  });
+
+  test('without the deletions handed over, a restore says it was moved and claims no origin', async () => {
+    const env = setup({ 'ch-1': `<p>${OWN}</p>` });
+    await session(env.recorder(), env, []);
+    await session(env.recorder(), env, [['ch-1', `<p>${OWN}</p><p>${PASTED}</p>`, { src: 'paste' }]]);
+    await session(env.recorder(), env, [['ch-1', `<p>${OWN}</p>`, { src: 'typed' }]]);
+    const rec = env.recorder();
+    rec.open(env.dir, 'book-a');
+    put(rec, env, 'ch-1', `<p>${OWN}</p><p>${PASTED}</p>`, { src: 'move', cause: 'restore' });
+    await rec.close('book-a');
+    const d = checked(env).devices[0];
+    // (never typed: the label is the window's, and the log owns up to not knowing)
+    assert.deepEqual(whereFrom(d, 'ch-1', PASTED), ['move']);
+    assert.equal(d.made.typed, undefined);
+  });
+});

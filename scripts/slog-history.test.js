@@ -451,4 +451,67 @@ describe('Versions in the book', { concurrency: 1 }, () => {
     assert.ok(v.every((x, i) => !i || v[i - 1].ts <= x.ts));
     assert.deepEqual(env.errors, []);
   });
+
+  test('a restore\'s source: the version\'s text, and what this computer deleted since it', async () => {
+    const LONG = 'A paragraph long enough to be found again, word for word.';
+    const OTHER = 'Something else entirely, never in that version at all.';
+    const env = setup({ chapters: { 'ch-1': `<p>${LONG}</p>`, 'ch-2': `<p>${OTHER}</p>` } });
+    const rec = env.recorder();
+    await session(rec, env, []);
+    await session(rec, env, [['ch-1', `<p>${LONG}</p><p>Two.</p>`]]);
+    rec.open(env.dir, 'book-a');
+    const head = await rec.head(env.dir, 'book-a');
+    const named = H.writeNamed(env.dir, { name: 'Midway', at: env.clock, dev: rec.device(), head });
+    save(rec, env, 'ch-1', '<p>Two.</p>');
+    save(rec, env, 'ch-2', '<p>Gone.</p>');
+    await rec.close('book-a');
+    const h = env.history();
+    const v = h.index(env.dir).chapters['ch-1'].versions;
+    const me = rec.device();
+    // this computer's version: deletions after its own entry, oldest first;
+    // the other chapter's (no words in common) and the version's own are left out
+    const got = h.restoreSource(env.dir, { dev: me, n: v[1].n }, 'ch-1', { me });
+    assert.equal(got.text, `<p>${LONG}</p><p>Two.</p>`);
+    assert.ok(got.dels.length >= 1 && got.dels.every((d) => d.n > v[1].n && typeof d.op === 'number' && d.json === false));
+    assert.ok(got.dels.some((d) => d.text.includes(LONG)));
+    assert.ok(!got.dels.some((d) => d.text.includes('else entirely')));
+    assert.ok(got.dels.every((d, i) => !i || got.dels[i - 1].n <= d.n));
+    // from the start of the chain, the baseline's own text is in what was deleted too
+    assert.equal(h.restoreSource(env.dir, { dev: me, n: v[0].n }, 'ch-1', { me }).dels.length, got.dels.length);
+    // a named version: from its entry
+    const byName = h.restoreSource(env.dir, { named: named.file }, 'ch-1', { me });
+    assert.equal(byName.text, `<p>${LONG}</p><p>Two.</p>`);
+    assert.ok(byName.dels.length && byName.dels.every((d) => d.n > head.n));
+    // another computer's version: this chain's sessions ended by its time
+    const other = h.restoreSource(env.dir, { dev: me, n: v[1].n }, 'ch-1', { me: 'f'.repeat(32), at: v[1].ts });
+    assert.deepEqual(other.dels, [], 'a chain this log doesn\'t have deleted nothing');
+    // with the log off, the text alone
+    assert.deepEqual(h.restoreSource(env.dir, { dev: me, n: v[1].n }, 'ch-1', { me, logged: false }), { text: got.text, dels: [] });
+    assert.ok(h.restoreSource(env.dir, { dev: me, n: v[1].n }, 'no-such', { me }).error);
+    assert.deepEqual(env.errors, []);
+  });
+
+  test('a recorder handed a restore\'s deletions points the restored words at them', async () => {
+    const LONG = 'A paragraph long enough to be found again, word for word.';
+    const env = setup({ chapters: { 'ch-1': `<p>${LONG}</p>` } });
+    await session(env.recorder(), env, []);
+    await session(env.recorder(), env, [['ch-1', '<p>Short now.</p>']]);
+    const v = env.history().index(env.dir).chapters['ch-1'].versions[0];
+    const rec = env.recorder();
+    rec.open(env.dir, 'book-a');
+    await rec.head(env.dir, 'book-a');
+    const got = env.history().restoreSource(env.dir, { dev: v.dev, n: v.n }, 'ch-1', { me: rec.device() });
+    assert.equal(rec.restoring(env.dir, 'book-a', got.dels), got.dels.length);
+    assert.equal(rec.restoring(env.dir, 'book-a', got.dels), 0, 'each deletion once');
+    assert.equal(rec.restoring(env.dir, 'book-b', got.dels), 0, 'only the book it\'s for');
+    rec.observe(env.dir, 'book-a', 'ch-1', got.text, { src: 'move', cause: 'restore' });
+    save(rec, env, 'ch-1', got.text);
+    await rec.close('book-a');
+    const logDir = path.join(env.dir, slog.LOG_DIR);
+    const all = F.chunkNames(F.listLog(env.dir)).flatMap((n) => slog.parseChunk(fs.readFileSync(path.join(logDir, n), 'utf8')).entries);
+    const r = all.find((e) => e.kind === 'edit' && e.cause === 'restore');
+    assert.equal(r.src, 'move');
+    assert.ok(r.from.some((p) => p[3].n === got.dels[0].n && p[3].op === got.dels[0].op));
+    assert.deepEqual(env.errors, []);
+  });
 });

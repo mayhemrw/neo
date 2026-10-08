@@ -449,6 +449,50 @@ describe('Scribe\'s Log in main.js', { concurrency: 1 }, () => {
     assert.deepEqual(logged.map((l) => l.replace(/^\[[^\]]*\] /, '')), ['[ipc history:text] Error: Invalid library name', '[versions] Error: no helper processes here']);
   });
 
+  test('history:restore: the version\'s text, a version named first, and the log ready to trace it', async () => {
+    const lib = tempLibrary();
+    const book = main.call('book:create', { title: 'Put Back' });
+    const dir = path.join(lib, book.id);
+    const LONG = 'A paragraph long enough to be found again, word for word.';
+    const write = (html, was, how = { src: 'typed' }) => {
+      main.call('slog:observe', book.id, 'chapter', 'ch-x', html, how);
+      main.call('chapter:write', book.id, 'ch-x', html, was);
+    };
+    main.call('slog:open', book.id);
+    write(`<p>${LONG}</p>`, undefined, { src: 'paste' });
+    await main.call('slog:event', book.id, { type: 'close' });
+    main.call('slog:open', book.id);
+    write('<p>Short.</p>', `<p>${LONG}</p>`);
+    await main.call('slog:event', book.id, { type: 'close' });
+    main.call('slog:open', book.id);
+    const list = await main.call('history:list', book.id);
+    const v = Object.values(list.chapters).find((c) => c.id === 'ch-x').versions[0];
+    const res = await main.call('history:restore', book.id, { dev: v.dev, n: v.n }, 'ch-x', { at: v.ts, name: 'Before restoring Chapter 1 (Oct 8)' });
+    assert.equal(res.text, `<p>${LONG}</p>`);
+    assert.equal(res.version.name, 'Before restoring Chapter 1 (Oct 8)');
+    const H = require('../slog-history.js');
+    const named = H.listNamed(dir);
+    assert.deepEqual(named.map((x) => [x.name, x.auto]), [['Before restoring Chapter 1 (Oct 8)', 'restore']]);
+    // the version named is the chapter as it was before the restore
+    assert.deepEqual(await main.call('history:text', book.id, { named: named[0].file }, 'ch-x'), { text: '<p>Short.</p>' });
+    // the window puts it back, labeled as a restore: the words point at the
+    // earlier session's deletion, and they're still pasted
+    write(res.text, '<p>Short.</p>', { src: 'move', cause: 'restore' });
+    await main.call('slog:event', book.id, { type: 'close' });
+    const res2 = assertChecks(dir);
+    const d = res2.devices[0];
+    assert.equal(d.made.paste, LONG.length);
+    assert.equal(d.made.move, undefined);
+    // a copied passage asks the same, without naming anything
+    main.call('slog:open', book.id);
+    const copy = await main.call('history:restore', book.id, { dev: v.dev, n: v.n }, 'ch-x', { at: v.ts });
+    assert.equal(copy.version, null);
+    assert.equal(H.listNamed(dir).length, 1);
+    assert.ok((await main.call('history:restore', book.id, { dev: 'nope', n: 1 }, 'ch-x')).error);
+    await assert.rejects(main.call('history:restore', book.id, { named: '../book.json' }, 'ch-x'), /Invalid library name/);
+    await main.call('slog:event', book.id, { type: 'close' });
+  });
+
   test('with the log off: each session leaves a copy of what it changed, and naming copies the book', async () => {
     const lib = tempLibrary();
     const book = main.call('book:create', { title: 'Unlogged' });

@@ -4,7 +4,10 @@
 // opened from the menu. Its list, Read, Compare (with the chapter now and
 // with another version, folds and all), the chapters no longer in the
 // book, renaming and deleting a named version, the keyboard and the
-// shortcuts sheet are checked, and the book's log still checks after.
+// shortcuts sheet are checked; then a chapter is restored (and ⌘Z undoes
+// it), a passage is copied out of a version and pasted in, and the deleted
+// chapter is put back. The book's log still checks after, and the restored
+// words keep the origins they had.
 // Run with `npm run test:history` (under xvfb-run without a display).
 
 'use strict';
@@ -308,6 +311,137 @@ test('the shortcuts sheet lists ⌘⇧H', async () => {
   await key('Escape');
 });
 
+// the History window opened from the menu, on chapter `id`, its versions listed
+async function openHistory(id) {
+  menuItem('View', 'Chapter History…').click();
+  await until('the History window', `!!document.querySelector('#chapter-history .hv-item')`);
+  if (id && (await js(`${hv('.hv-chapter')}.value`)) !== id) {
+    await js(`(() => { const s = ${hv('.hv-chapter')}; s.value = ${JSON.stringify(id)}; s.dispatchEvent(new Event('change')); })()`);
+    await until('its versions', `document.querySelectorAll('#chapter-history .hv-item').length > 0`);
+  }
+  await tick(300);
+}
+const restoreReady = () => until('Restore enabled', `!${hv('.hv-restore')}.hidden && !${hv('.hv-restore')}.disabled`);
+const MOD = process.platform === 'darwin' ? 'meta' : 'control';
+
+test('Restore This Version: the chapter goes back, a version of it named first', async () => {
+  await caretEnd(0, 0);
+  notes.before = await js(`chapterHTML[${JSON.stringify(ids[0])}]`);
+  await openHistory(ids[0]);
+  const list = await items();
+  await pick(list.length - 1); // the import
+  await restoreReady();
+  assert.equal(await js(`${hv('.hv-restore')}.textContent`), 'Restore This Version');
+  await shot('restore-button');
+  await js(`${hv('.hv-restore')}.click()`);
+  await until('the window closed', `!document.querySelector('#chapter-history')`);
+  await until('the chapter put back', `!chapterHTML[${JSON.stringify(ids[0])}].includes('three times')`);
+  const now = await js(`chapterHTML[${JSON.stringify(ids[0])}]`);
+  assert.ok(now.includes('counted the boats twice') && !now.includes('The wind rose.') && !now.includes('Later still.'), now);
+  assert.match(await js(`document.querySelector('#hint').textContent`), /is back to .*The text it replaced is the version “Before restoring Chapter 1/);
+  const named = H.listNamed(path.join(LIB, bookId));
+  assert.deepEqual(named.map((v) => v.auto), ['restore']);
+  assert.match(named[0].name, /^Before restoring Chapter 1/);
+  // the version named is the chapter as it was
+  const was = await js(`window.neo.history.text(book.id, { named: ${JSON.stringify(named[0].file)} }, ${JSON.stringify(ids[0])})`);
+  assert.equal(was.text, notes.before);
+  await until('saved', `!Object.keys(chapterChain).length`);
+  assert.equal(fs.readFileSync(path.join(LIB, bookId, 'chapters', ids[0] + '.html'), 'utf8'), now);
+  assert.equal(await js(`!!document.activeElement.closest('.chapter-body')`), true, 'the caret is back in the chapter');
+});
+
+test('⌘Z, from inside the text, puts the chapter back as it was', async () => {
+  await key('Z', [MOD]);
+  await until('undone', `chapterHTML[${JSON.stringify(ids[0])}].includes('three times')`);
+  assert.equal(await js(`chapterHTML[${JSON.stringify(ids[0])}]`), notes.before);
+  // …and restored again, for the log to check below
+  await openHistory(ids[0]);
+  await pick((await items()).length - 1);
+  await restoreReady();
+  await js(`${hv('.hv-restore')}.click()`);
+  await until('put back again', `!chapterHTML[${JSON.stringify(ids[0])}].includes('three times')`);
+  await openHistory(ids[0]);
+  // the chapter now is that version: nothing to restore
+  await pick((await items()).findIndex((x) => x.kind === 'Imported'));
+  assert.equal(await js(`${hv('.hv-restore')}.disabled`), true);
+  await key('Escape');
+});
+
+test('a passage copied out of a version and pasted into the book: a restore', async () => {
+  await openHistory(ids[0]);
+  const list = await items();
+  await pick(list.findIndex((x) => x.kind === 'Imported'));
+  await js(`(() => {
+    const page = ${hv('.hv-page')};
+    const walk = document.createTreeWalker(page, NodeFilter.SHOW_TEXT);
+    for (let t; (t = walk.nextNode());) {
+      const i = t.data.indexOf('Gulls wheeled');
+      if (i < 0) continue;
+      const r = document.createRange();
+      r.setStart(t, i);
+      r.setEnd(t, t.data.length);
+      getSelection().removeAllRanges();
+      getSelection().addRange(r);
+      return;
+    }
+  })()`);
+  await js(`${hv('.hv-copy')}.click()`);
+  await tick(200);
+  assert.equal(await js(`!!(slogState.clip && slogState.clip.history)`), true);
+  assert.match(await js(`document.querySelector('#hint').textContent`), /Copied/);
+  await key('Escape');
+  await caretEnd(1, 0);
+  await type(' ');
+  wc.paste();
+  await until('pasted', `chapterHTML[${JSON.stringify(ids[1])}].includes('Gulls wheeled over the empty slips.')`);
+  await pause();
+  await js(`slogSaveAll()`);
+});
+
+test('Restore as New Chapter: a deleted chapter back in its old place', async () => {
+  await openHistory(ids[2]);
+  await pick(0); // its last version before it was deleted
+  await restoreReady();
+  assert.equal(await js(`${hv('.hv-restore')}.textContent`), 'Restore as New Chapter');
+  await js(`${hv('.hv-restore')}.click()`);
+  await until('back in the book', `book.chapterOrder.includes(${JSON.stringify(ids[2])})`);
+  assert.deepEqual(await js(`book.chapterOrder.slice()`), ids, 'after the chapter it followed');
+  assert.ok((await js(`chapterHTML[${JSON.stringify(ids[2])}]`)).includes('The lighthouse kept its watch, and more'));
+  assert.match(await js(`document.querySelector('#hint').textContent`), /is back in the book/);
+  await until('saved', `!Object.keys(chapterChain).length`);
+  assert.ok(fs.readFileSync(path.join(LIB, bookId, 'chapters', ids[2] + '.html'), 'utf8').includes('and more'));
+  // and its history carries on: it's a chapter of the book again
+  await openHistory(ids[2]);
+  const groups = await js(`[...${hv('.hv-chapter')}.querySelectorAll('optgroup')].map((g) => g.label)`);
+  assert.deepEqual(groups, ['In the book']);
+  await key('Escape');
+});
+
+test('the log: every restore is one, and the words keep their origins', async () => {
+  await js(`slogSaveAll()`);
+  await tick(500);
+  const dir = path.join(LIB, bookId);
+  const res = checkBook(dir);
+  assert.deepEqual(res.problems, []);
+  const d = res.devices[res.devices.length - 1];
+  assert.deepEqual(d.problems, []);
+  assert.equal(d.sources.unlogged || 0, 0, 'nothing unlogged');
+  const restores = d.chainEntries.filter((e) => e.kind === 'edit' && e.cause === 'restore');
+  assert.ok(restores.length >= 4, 'two restores, the paste, the chapter put back: ' + restores.length);
+  assert.ok(restores.every((e) => e.src === 'move' || e.src === 'typed'));
+  const slog = require('../slog.js');
+  const origin = (doc, needle) => {
+    const t = d.traced[doc];
+    const at = t.text.indexOf(needle);
+    assert.ok(at >= 0, needle);
+    return [...new Set(slog.originsAt(t, at, needle.length).map(([, o]) => o))];
+  };
+  assert.deepEqual(origin(slog.chapterDoc(ids[0]), 'Mara counted the boats twice.'), ['import']);
+  assert.deepEqual(origin(slog.chapterDoc(ids[1]), 'Gulls wheeled over the empty slips.'), ['import']);
+  assert.deepEqual(origin(slog.chapterDoc(ids[2]), 'The lighthouse kept its watch'), ['import']);
+  assert.deepEqual(origin(slog.chapterDoc(ids[2]), ', and more'), ['typed']);
+});
+
 test('the log still checks, and the window wrote nothing into the book but the names', async () => {
   await js(`backToShelf()`);
   await tick(1000);
@@ -318,6 +452,7 @@ test('the log still checks, and the window wrote nothing into the book but the n
   assert.equal(res.ok, true);
   assert.ok(fs.existsSync(path.join(tmp, 'app', 'slog', 'history')), 'checkpoints in userData');
   assert.deepEqual(fs.readdirSync(dir).filter((f) => /history|\.gz$/.test(f)), []);
+  assert.deepEqual(H.listNamed(dir).map((v) => v.auto), ['restore', 'restore'], 'the only versions written: before each restore');
   let errors = '';
   try { errors = fs.readFileSync(path.join(LIB, 'neo-errors.log'), 'utf8'); } catch { /* none */ }
   assert.equal(errors, '');

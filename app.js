@@ -10922,6 +10922,7 @@ function slogCauseOf(label) {
   if (l === 'replace' || l === 'replace all') return { src: 'typed', cause: 'replace' };
   if (l === 'darling' || l === 'darling restore' || l === 'chapter delete' || l === 'section delete' || l === 'scene delete' || l === 'cards delete') return { src: 'move', cause: 'darling' };
   if (l === 'darling delete') return { src: 'typed', cause: 'darling' };
+  if (l === 'restore' || l === 'restore chapter') return { src: 'move', cause: 'restore' };
   if (/^(card moved|card to chapter|card to loose|loose card placed|scene moved|chapter reorder|outline section to chapter)$/.test(l)) return { src: 'move', cause: 'outline' };
   if (/^(outline|card|scene|loose card) /.test(l)) return { src: 'typed', cause: 'outline' };
   return { src: 'typed' };
@@ -10950,7 +10951,8 @@ document.addEventListener('paste', (e) => {
   const text = slogClipText(e.clipboardData && e.clipboardData.getData('text/plain'));
   const clip = slogState.clip;
   if (!clip || !text || text !== clip.text) { slogTask({ src: 'paste' }); return; }
-  const how = clip.cut ? { src: 'move' } : { src: 'move', copy: true };
+  // (a passage copied out of a version: a restore, found where it was deleted)
+  const how = clip.history ? { src: 'move', cause: 'restore' } : clip.cut ? { src: 'move' } : { src: 'move', copy: true };
   if (clip.bookId !== book.id) how.book = clip.bookId;
   slogTask(how);
 }, true);
@@ -11178,8 +11180,13 @@ async function nameVersion(msg) {
 // copies kept at each session's end; and the versions the writer named).
 // The window shows any of them as prose, or compared with the chapter now
 // or with another version (slog-diff.js: what went struck through, what
-// came underlined). Only named versions change here (renamed, deleted);
-// the chapters don't. Pocket has no history, so no window there.
+// came underlined). Named versions are renamed and deleted here. A version
+// can go back into the book whole (Restore This Version, after a named
+// version of the book as it stood; ⌘Z undoes it), a chapter no longer in
+// the book can come back (Restore as New Chapter), and a passage can be
+// copied out of one. Restored words keep the origin they had in the
+// Scribe's Log (main.js finds them where they were deleted). Pocket has
+// no history, so no window there.
 const historyState = { open: null };
 function historyDate(ms) {
   const d = new Date(ms);
@@ -11228,6 +11235,69 @@ function historyKindLabel(e) {
 // how an entry is named in a sentence: its name, or when it was
 const historyEntryName = (e) => (e.named ? '“' + e.name + '”' : historyDate(e.at));
 
+// A passage copied out of a version: pasted into the book, it's a move
+// (cause restore), its words found where they were deleted
+function historyCopied(bookId, text) {
+  if (!slogLive() || bookId !== book.id) return;
+  const clip = slogClipText(text);
+  slogState.clip = clip ? { text: clip, cut: false, bookId, history: true } : null;
+}
+// Restore This Version: the chapter's words replaced by the version's, as
+// one structural step (⌘Z, even from inside the text, puts them back), all
+// of it one restore in the Scribe's Log
+async function historyRestoreChapter(chId, html, when, version) {
+  if (!book || !book.chapterOrder.includes(chId)) return;
+  if (currentTab !== 'manuscript') switchTab('manuscript');
+  await slogWith({ src: 'move', cause: 'restore' }, async () => {
+    snapshotStructure('restore');
+    chapterHTML[chId] = html;
+    renderChapters();
+    await persistChapter(chId);
+  });
+  breakRun++; // the engine never saw this change: ⌘Z goes to NEO's undo
+  focusChapterStart(chId);
+  const sec = document.querySelector(`.chapter[data-id="${chId}"]`);
+  if (sec) sec.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
+  updateCounters();
+  scheduleNavRefresh();
+  const chapter = historyChapterLabel(chId);
+  toast(version
+    ? t('{chapter} is back to {when}. The text it replaced is the version “{name}”.', { chapter, when, name: version.name })
+    : t('{chapter} is back to {when}.', { chapter, when }), 9000);
+}
+// Restore as New Chapter: a chapter no longer in the book, back under its
+// own id (so its history carries on), with its title, in its old place:
+// after the chapter it followed if that's still there (first if it was
+// first), otherwise at the end
+async function historyRestoreNew(chId, html, info) {
+  if (!book || book.chapterOrder.includes(chId)) return;
+  if (currentTab !== 'manuscript') switchTab('manuscript');
+  await slogWith({ src: 'move', cause: 'restore' }, async () => {
+    snapshotStructure('restore chapter');
+    const was = info && info.was;
+    let at = book.chapterOrder.length;
+    if (was && was.after === null && was.at === 0) at = 0;
+    else if (was && was.after) {
+      const i = book.chapterOrder.indexOf(was.after);
+      if (i >= 0) at = i + 1;
+    }
+    book.chapterOrder.splice(at, 0, chId);
+    if (info && typeof info.title === 'string' && info.title.trim()) (book.chapterTitles = book.chapterTitles || {})[chId] = info.title;
+    chapterHTML[chId] = html;
+    renderChapters();
+    // the chapter's file is written before book.json takes it in
+    await persistChapter(chId);
+    await saveMeta();
+  });
+  breakRun++;
+  focusChapterStart(chId);
+  const sec = document.querySelector(`.chapter[data-id="${chId}"]`);
+  if (sec) sec.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
+  updateCounters();
+  scheduleNavRefresh();
+  toast(t('{chapter} is back in the book. {key} takes it out again.', { chapter: historyChapterLabel(chId), key: KZ }), 8000);
+}
+
 async function showHistory(msg) {
   const h = window.neo && window.neo.history;
   const D = globalThis.SlogDiff;
@@ -11261,6 +11331,10 @@ async function showHistory(msg) {
               <button type="button" class="btn-quiet hv-rename">${escHtml(t('Rename…'))}</button>
               <button type="button" class="btn-quiet hv-delete">${escHtml(t('Delete…'))}</button>
             </span>
+            <span class="hv-actions">
+              <button type="button" class="btn-quiet hv-copy" title="${escHtml(t('Copy the passage selected in this version, to paste into the book'))}">${escHtml(t('Copy'))}</button>
+              <button type="button" class="btn-gold hv-restore" hidden></button>
+            </span>
           </div>
           <div class="hv-compare-row" hidden>
             <label>${escHtml(t('Compare with'))} <select class="hv-against"></select></label>
@@ -11282,6 +11356,8 @@ async function showHistory(msg) {
   const against = bd.querySelector('.hv-against');
   const summary = bd.querySelector('.hv-summary');
   const note = bd.querySelector('.hv-problems');
+  const restoreBtn = bd.querySelector('.hv-restore');
+  const copyBtn = bd.querySelector('.hv-copy');
   // what's shown: the chapter, its entries, the one selected, read or
   // compared, and with what ('now' or another entry's key)
   const st = { data: null, chId: null, entries: [], sel: null, mode: 'view', against: null, seq: 0, texts: new Map() };
@@ -11410,6 +11486,11 @@ async function showHistory(msg) {
     bd.querySelector('.hv-name').textContent = e.named ? e.name : historyDate(e.at);
     bd.querySelector('.hv-sub').textContent = [e.named ? historyDate(e.at) : '', historyDevice(st.data, e.dev), historyKindLabel(e)].filter(Boolean).join(' · ');
     bd.querySelector('.hv-named-tools').hidden = !e.named;
+    restoreBtn.hidden = !h.restore || !!e.broken;
+    restoreBtn.textContent = inBook() ? t('Restore This Version') : t('Restore as New Chapter');
+    restoreBtn.disabled = true; // until its text is here (and differs from the chapter now)
+    restoreBtn.title = '';
+    copyBtn.hidden = !!e.broken;
     fillAgainst();
     if (st.mode === 'compare' && bd.querySelector('[data-mode="compare"]').disabled) st.mode = 'view';
     bd.querySelectorAll('.hv-modes button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === st.mode)));
@@ -11431,8 +11512,11 @@ async function showHistory(msg) {
     page.classList.remove('loading');
     if (mine.error) {
       page.innerHTML = `<p class="hv-error">${escHtml(t('This version can’t be shown: {why}', { why: mine.error }))}</p>`;
+      copyBtn.hidden = true;
       return;
     }
+    restoreBtn.disabled = inBook() && mine.text === nowText();
+    if (restoreBtn.disabled) restoreBtn.title = t('The chapter is already this version.');
     if (st.mode !== 'compare' || !other) {
       page.innerHTML = D.viewHtml(mine.text) || `<p class="hv-wait">${escHtml(t('This version of the chapter is empty.'))}</p>`;
       page.scrollTop = 0;
@@ -11484,6 +11568,71 @@ async function showHistory(msg) {
   bd.querySelectorAll('.hv-modes button').forEach((b) => {
     b.onclick = () => { st.mode = b.dataset.mode; show(); };
   });
+
+  // Copy: the passage selected in the page, as it reads in the newer text
+  // when compared (struck words and the folds' buttons left out). Pasted
+  // into the book it's a move from the version, and main.js gets the log
+  // ready to find where its words were (each version shown, once).
+  const prepared = new Set();
+  const prepare = (e) => {
+    if (!e || e.broken || !h.restore || prepared.has(st.chId + '|' + e.key)) return;
+    prepared.add(st.chId + '|' + e.key);
+    Promise.resolve(h.restore(bookId, e.ref, st.chId, { at: e.at })).catch(() => {});
+  };
+  const pageSelection = () => {
+    const sel = window.getSelection();
+    return sel.rangeCount && !sel.isCollapsed && page.contains(sel.getRangeAt(0).commonAncestorContainer) ? sel.getRangeAt(0) : null;
+  };
+  page.addEventListener('copy', (ev) => {
+    const range = pageSelection();
+    if (!range) return;
+    const holder = document.createElement('div');
+    holder.appendChild(range.cloneContents());
+    holder.querySelectorAll('.hv-fold, del').forEach((x) => x.remove());
+    holder.querySelectorAll('ins').forEach((x) => x.replaceWith(...x.childNodes));
+    holder.querySelectorAll('p').forEach((p) => { if (!p.textContent.trim()) p.remove(); });
+    const ps = [...holder.querySelectorAll('p')];
+    const plain = ps.length ? ps.map((p) => p.textContent).join('\n\n') : holder.textContent;
+    if (!plain.trim()) return;
+    ev.preventDefault();
+    ev.clipboardData.setData('text/plain', plain);
+    ev.clipboardData.setData('text/html', holder.innerHTML);
+    historyCopied(bookId, plain);
+    prepare(entry(st.sel));
+    if (st.mode === 'compare' && st.against && st.against !== 'now') prepare(entry(st.against));
+  });
+  copyBtn.onclick = () => {
+    if (!pageSelection()) { toast(t('Select a passage in the version first.'), 4000); return; }
+    document.execCommand('copy');
+    toast(t('Copied. Paste it where it goes in the book.'), 4000);
+  };
+
+  // Restore: the whole chapter goes back to this version (a version of the
+  // book as it stood is named first, and ⌘Z undoes it), or a chapter no
+  // longer in the book comes back in its old place
+  restoreBtn.onclick = async () => {
+    const e = entry(st.sel);
+    const chId = st.chId;
+    if (!e || e.broken || !h.restore || restoreBtn.disabled) return;
+    const gone = !inBook();
+    restoreBtn.disabled = true;
+    await slogSaveAll();
+    const day = new Date().toLocaleDateString(NeoI18n.getLocale(), { month: 'short', day: 'numeric' });
+    const name = gone ? null : t('Before restoring {chapter} ({date})', { chapter: historyChapterLabel(chId), date: day });
+    let res;
+    try { res = await h.restore(bookId, e.ref, chId, { at: e.at, name }); } catch (err) { res = { error: (err && err.message) || String(err) }; }
+    if (!bd.isConnected || !book || book.id !== bookId) return;
+    if (!res || res.error || typeof res.text !== 'string') {
+      restoreBtn.disabled = false;
+      toast(t('The version wasn’t restored: {why}', { why: (res && res.error) || '?' }), 8000);
+      return;
+    }
+    if (gone === book.chapterOrder.includes(chId)) { restoreBtn.disabled = false; return; } // the book changed meanwhile
+    const info = Object.values(st.data.chapters).find((c) => c.id === chId) || {};
+    close();
+    if (gone) await historyRestoreNew(chId, res.text, info);
+    else await historyRestoreChapter(chId, res.text, historyEntryName(e), res.version);
+  };
   against.onchange = () => { st.against = against.value; show(); };
   picker.onchange = () => openChapter(picker.value);
 
