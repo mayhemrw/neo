@@ -14,6 +14,7 @@
     "test:caret": "electron scripts/caret.e2e.js",
     "test:slog": "electron scripts/slog.e2e.js",
     "test:verifier": "electron scripts/verifier.e2e.js",
+    "test:devices": "node scripts/devices.e2e.js",
     "build:verifier": "node scripts/build-verifier.js",
     "test": "node --test \"scripts/*.test.js\"",
     "test:coverage": "node --test --experimental-test-coverage \"scripts/*.test.js\"",

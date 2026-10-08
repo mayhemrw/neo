@@ -81,6 +81,7 @@ Each book's log lives in its `scribes-log/` folder: `log.json` (made once) and o
 - Text that arrives from another device is traced to that device's chain: the Recorder adds a `{dev, n, doc, at}` source when the other device's chunks are already in the folder (`_arrivedFrom`), and the checker matches the rest by their words.
 - The window's side is the SCRIBE'S LOG section of `app.js`. A key, click or menu command opens a typed burst; it's described after a second's pause or two seconds' run, and every save describes its document first (`slogNote` in `persistChapter`, `flushAux`, `runSidecar` and `writeBookMeta`). Paste, drop, cut and copy are labeled by capture listeners, and every `snapshotStructure` label maps to a cause (`slogCauseOf`). A new tool that changes text over an `await`, or without a key, click or snapshot, needs `slogWith(label, fn)` or its words log as `unlogged`.
 - `npm run test:slog` (Electron; `xvfb-run` without a display) writes a book the way a writer does and checks its log has no `unlogged` entries.
+- `npm run test:devices` (`scripts/devices.e2e.js`, plain Node starting Electron once per run) is two computers on one library, as Google Drive would sync it: NEO runs as A, as B (its own app data, so its own device id), and as A again, then the verifier checks the exports and matches the .txt and .docx. It checks text keeps its origin across computers, every session's end is stamped as NEO quits (by the window's close button, by File → Quit with a book open, and by File → Quit from the shelf), and that NEO exits. `--live` uses FreeTSA and the OpenTimestamps calendars instead of the fakes.
 - Pocket's bridge has no `slog`, so nothing in the window logs there.
 - Duplicate (`book:duplicate`) doesn't copy `scribes-log/`: the copy's log starts at once (`Recorder.copied`), its words a baseline whose `from` names the original's log.
 - Outside timestamps: `slog-stamp.js` (`Stamper`, started with the app by `slogStampsStart`) is the recorder's `watcher`. It stamps each open chain's newest entry every 15 minutes if it moved, and every chunk's `close`, with FreeTSA and the OpenTimestamps calendars over `net.fetch`; receipts go to `scribes-log/stamps/*.stamps`, `stamp` entries into the chain (or the device's next chunk), and what waits (offline queue, stamp entries, pending proofs) to `userData/slog/stamps.json`. File → Scribe's Log shows the last timestamp under the checkbox.
@@ -201,6 +202,7 @@ npm run lint               # oxlint, Electron's standard-style JavaScript rules
 npm run test:spellcheck    # node --test scripts/spellcheck.test.js
 npm run test:dashes        # node --test scripts/dashes.test.js
 npm run test:verifier      # the verifier page, in Electron (xvfb-run without a display)
+npm run test:devices       # two computers on one library, end to end (add -- --live for the real services)
 npm run build:verifier     # writes verifier/verifier.html
 npm run bundle             # Hugh: brings in the newest .bundle from ~/Downloads and pushes main
 npm run release            # Hugh: next version (x.y.9 → x.(y+1).0), commit, push, tag (npm run release -- 2.0.0 for another)
