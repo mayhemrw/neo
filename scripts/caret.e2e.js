@@ -140,6 +140,56 @@ test('a new chapter made near the window\'s top moves down only to show its head
   assert.ok(w.headTop - w.top < 16, `and further than the heading needs: ${Math.round(w.headTop - w.top)}px`);
 });
 
+// A *** line with the caret on it: Backspace or Delete removes the whole
+// break, as Backspace just below it does. It never joins the line above as
+// three stars of text, and never loses a single star.
+async function breakBetween(a, b, at) {
+  await js(`(() => {
+    const body = document.querySelector('.chapter-body');
+    body.focus();
+    const first = body.children[10];
+    first.textContent = ${JSON.stringify(a)};
+    const brk = document.createElement('p');
+    brk.className = 'scene-break';
+    brk.textContent = '***';
+    first.after(brk);
+    brk.nextElementSibling.textContent = ${JSON.stringify(b)};
+    syncChapter(body, body.closest('.chapter').dataset.id); // as if typed: the chapter knows its break
+    getSelection().collapse(brk.firstChild, ${at});
+  })()`);
+  await tick(100);
+}
+const around = () => js(`(() => {
+  const body = document.querySelector('.chapter-body');
+  const s = getSelection();
+  const p = (s.anchorNode.nodeType === 1 ? s.anchorNode : s.anchorNode.parentElement).closest('p');
+  return { first: body.children[10].innerHTML, second: body.children[11].innerHTML, breaks: body.querySelectorAll('p.scene-break').length, caretIn: [...body.children].indexOf(p), caretAt: s.anchorOffset, caretLen: p.textContent.length };
+})()`);
+const SPOTS = ['before the first *', 'between the first and second *', 'between the second and third *', 'after the last *'];
+for (const key of ['Backspace', 'Delete']) for (const at of [0, 1, 2, 3]) {
+  test(`${key} with the caret ${SPOTS[at]} removes the whole break`, async () => {
+    const breaks = await js(`document.querySelectorAll('.chapter-body p.scene-break').length`);
+    await breakBetween('Gulls over the slips.', 'Mara counted the boats.', at);
+    await press(key, '');
+    const w = await around();
+    assert.equal(w.breaks, breaks, 'the break is gone');
+    assert.equal(w.first, 'Gulls over the slips.');
+    assert.equal(w.second, 'Mara counted the boats.');
+    if (key === 'Backspace') assert.deepEqual([w.caretIn, w.caretAt], [10, w.caretLen], 'the caret at the end of the line above');
+    else assert.deepEqual([w.caretIn, w.caretAt], [11, 0], 'the caret at the start of the line below');
+  });
+}
+
+test('⌘Z puts a break removed from its own line back', async () => {
+  await breakBetween('Gulls over the slips.', 'Mara counted the boats.', 0);
+  await press('Backspace', '');
+  wc.sendInputEvent({ type: 'keyDown', keyCode: 'z', modifiers: [process.platform === 'darwin' ? 'meta' : 'control'] });
+  wc.sendInputEvent({ type: 'keyUp', keyCode: 'z', modifiers: [process.platform === 'darwin' ? 'meta' : 'control'] });
+  await tick(400);
+  const back = await js(`(() => { const c = document.querySelector('.chapter-body').children; return [c[10].textContent, c[11].className, c[11].textContent, c[12].textContent]; })()`);
+  assert.deepEqual(back, ['Gulls over the slips.', 'scene-break', '***', 'Mara counted the boats.']);
+});
+
 /* ---------- runner ---------- */
 
 async function main() {

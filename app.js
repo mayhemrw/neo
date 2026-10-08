@@ -3865,7 +3865,10 @@ function poetryUnderHeading(body, chId) {
 }
 
 // Backspace just below a *** (or Delete just above one) removes the break
-// itself — prose never merges into the break's styled paragraph
+// itself — prose never merges into the break's styled paragraph. With the
+// caret on the *** line itself, either key removes the whole break too: a
+// break is one thing, so it never joins the line above as three stars of
+// text, and never loses one star at a time.
 function sceneBreakDelete(e, body, chId) {
   if (e.key !== 'Backspace' && e.key !== 'Delete') return false;
   if (e.metaKey || e.ctrlKey || e.altKey) return false;
@@ -3877,6 +3880,23 @@ function sceneBreakDelete(e, body, chId) {
   const block = el && el.closest ? el.closest('p') : null;
   if (!block || !body.contains(block)) return false;
   const back = e.key === 'Backspace';
+  if (block.classList.contains('scene-break')) {
+    // the caret goes where the key was heading: the end of the line above
+    // (Backspace) or the start of the line below (Delete), or the other one
+    // when there's nothing that way
+    const above = block.previousElementSibling;
+    const below = block.nextElementSibling;
+    e.preventDefault();
+    snapshotStructure('section break removed');
+    block.remove();
+    if (back && above) caretToEnd(above);
+    else if (below) caretIntoStart(below);
+    else if (above) caretToEnd(above);
+    syncChapter(body, chId);
+    resetNativeUndo();
+    breakRun++;
+    return true;
+  }
   const edge = document.createRange();
   edge.selectNodeContents(block);
   try {
