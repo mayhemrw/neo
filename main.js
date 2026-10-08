@@ -3377,9 +3377,12 @@ app.on('will-quit', (e) => {
   // (the chunks' last lines first; their hashes are sent, and get the rest
   // of the few seconds to come back, else they go at the next start)
   const done = Promise.resolve(slogTap((s) => s.closeAll('quit'))).then(() => slogStamper && slogStamper.stop());
+  // (quit again from a fresh turn: called while this event is still being
+  // handled, as it is when nothing was left to send and `done` settles at
+  // once, Electron ignores it and NEO stays running with no window)
   Promise.race([done, wait])
     .catch((err) => logError('scribe\'s log', err))
-    .then(() => app.quit());
+    .then(() => setImmediate(() => app.quit()));
 });
 
 // Sleep, wake, and a wall clock that jumps against the steady one: noted as
