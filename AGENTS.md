@@ -33,6 +33,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before adding a feature. The product is 
 | `slog-stamp.js` | The main process's stamper: when to stamp, receipt files, the offline queue, fetching finished OpenTimestamps proofs |
 | `slog-report.js` | The verification report: `reportStats` (origins overall and by chapter, pastes then revised, revision, sessions, the timeline, timestamps, flags, from `checkLog`'s result) and `renderReport` (one self-contained page, times exact, as dates or as weeks). Plain JavaScript that also runs in a browser, so NEO and the verifier make the same report |
 | `slog-files.js` | A book's `scribes-log/` folder on disk, loose files and archives read as one (`listLog`, `loadLog`); Merge Log into Archive (`mergeIntoArchive`); the exports for verification (`buildExport`, `readExport`). Node only |
+| `slog-history.js` | Versions rebuilt from the log (phase 3): `History.index` lists every chapter's session versions across every computer's chain (one per session that changed it; text that only arrived is the other computer's session), `rebuild`/`text` give the documents after any entry of a chain. Checkpoints and the index cache live in `userData/slog/history`, never in the library, and are rebuilt whenever they don't match the log. Node only |
 | `slog-zip.js` | Zip files for archives and exports: reading (inflate handed in, or the browser's `DecompressionStream`), writing, CRC-32. Plain JavaScript that also runs in a browser |
 | `verifier/` | The standalone verifier page that every export carries: `page.html` and `page.js` (the page), `check.js` (sorting what's dropped, checking it, saying what checked in plain words), `manuscript.js` (reading a .txt or .docx and matching it to the log's fingerprint), `build.js` (one self-contained page with the checker's files inside; main.js builds it for each export). Plain JavaScript that also runs in Node, except `page.js` |
 | `slog-hash.js`, `stamp-ots.js`, `stamp-tsa.js` | Outside timestamps for the Scribe's Log, in plain JavaScript that also runs in a browser: SHA-256/HMAC/SHA-1/RIPEMD-160, OpenTimestamps proofs and calendars, RFC 3161 tokens (checked through WebCrypto). The network is a `fetch` passed in. Trusted roots are in `certs/` |
@@ -212,7 +213,7 @@ npm run package:linux      # AppImage via electron-builder; also package, packag
 
 Tests use `node:test` and load `app.js` or `spell-worker.js` inside `vm`. They are not run by CI. The only CI check is a Windows smoke test that the packaged exe boots and creates a library (`.github/workflows/build.yml`, on `v*` tags). Pocket builds from `.github/workflows/pocket.yml`.
 
-`node scripts/check-romanian-package.js <Resources dir>` compares a packaged app's dictionaries to the source tree. `node scripts/benchmark-spellcheck.js` times the checker. Neither is an npm script.
+`node scripts/history-bench.js [sessions] [entries per session]` times versions on a synthetic novel-length log (600 sessions, 200,000 entries by default). `node scripts/check-romanian-package.js <Resources dir>` compares a packaged app's dictionaries to the source tree. `node scripts/benchmark-spellcheck.js` times the checker. Neither is an npm script.
 
 ## Handing changes to Hugh
 
