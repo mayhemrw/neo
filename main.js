@@ -960,6 +960,15 @@ ipcMain.handle('aux:write', (_e, bookId, name, html) => {
   return true;
 });
 
+// macOS only: the system dictionary panel for the word selected in the window (#179). Other
+// platforms have no equivalent, and the renderer only offers the menu item on darwin.
+ipcMain.handle('app:lookUp', (e) => {
+  if (process.platform === 'darwin' && e.sender.showDefinitionForSelection) {
+    e.sender.showDefinitionForSelection();
+  }
+  return true;
+});
+
 ipcMain.handle('json:read', (_e, bookId, name, fallback) => {
   const file = path.join(bookDir(bookId), libName(name) + '.json');
   const data = readJSON(file, fallback);
@@ -2609,6 +2618,7 @@ const SPELL_LANGUAGES = {
   'ro': { label: 'Română', pkg: 'dictionary-ro' },
   'hu': { label: 'Magyar', pkg: 'dictionary-hu' },
   'ru': { label: 'Русский', pkg: 'dictionary-ru' },
+  'sv': { label: 'Svenska', pkg: 'dictionary-sv' },
   'el': { label: 'Ελληνικά', pkg: 'dictionary-el' }
 };
 

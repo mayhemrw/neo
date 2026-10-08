@@ -1,7 +1,7 @@
 {
   "name": "neo",
   "productName": "NEO",
-  "version": "1.4.6",
+  "version": "1.4.7",
   "description": "A word processor for authors. Distraction-free by default.",
   "homepage": "https://github.com/hughhowey/neo",
   "main": "main.js",
@@ -107,9 +107,14 @@
     "asarUnpack": [
       "node_modules/dictionary-ro/**",
       "node_modules/dictionary-pt/**",
-      "node_modules/dictionary-hu/**"
+      "node_modules/dictionary-hu/**",
+      "node_modules/dictionary-sv/**"
     ],
     "extraResources": [
+      {
+        "from": "licenses/dictionary-sv",
+        "to": "app.asar.unpacked/node_modules/dictionary-sv"
+      },
       {
         "from": "licenses/dictionary-ro",
         "to": "app.asar.unpacked/node_modules/dictionary-ro"
@@ -165,6 +170,7 @@
     "dictionary-pt": "4.0.0",
     "dictionary-ro": "3.0.0",
     "dictionary-ru": "^3.0.0",
+    "dictionary-sv": "4.0.0",
     "electron-updater": "^6.3.9",
     "jszip": "^3.10.1",
     "koffi": "2.16.3"

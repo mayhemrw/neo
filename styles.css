@@ -1363,6 +1363,10 @@ body.full-screen.focus-mode #bottombar:not(:hover):not(.attn) { opacity: 0; }
   padding: 6px 14px; color: #191919; font-size: 12px;
 }
 #stats-chart { background: #1d1d1d; border-radius: 8px; padding: 10px; margin-top: 8px; }
+/* on a phone the modal is narrower than the chart's 520px: it scales down instead of spilling out */
+@media (max-width: 600px) {
+  #stats-chart { box-sizing: border-box; max-width: 100%; height: auto; display: block; }
+}
 
 /* --- Keyboard shortcut reference --- */
 .shortcuts-modal {
@@ -2126,3 +2130,14 @@ body.light #nav-pane.script .nav-item.sp-scene .n-num { color: #8f8a80; }
 .ob-cell.ob-sel .ob-card { box-shadow: 0 0 0 2px var(--accent), 0 2px 10px rgba(0, 0, 0, 0.25); }
 .ob-lasso { position: fixed; z-index: 50; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border-radius: 3px; pointer-events: none; }
 .ob-lassoing, .ob-lassoing * { user-select: none !important; -webkit-user-select: none !important; }
+
+/* a scene's card note on its empty first line, until the scene is written (#339) */
+.sp-geom > p[data-scene-note]:not([data-ghost])::after, .sp-narrow > p[data-scene-note]:not([data-ghost])::after {
+  content: attr(data-scene-note); position: absolute; left: 0; top: 0; right: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; /* one line: it takes no room on the page */
+  font-style: italic; color: color-mix(in srgb, var(--ink) 36%, var(--paper)); pointer-events: none;
+}
+.sp-geom > p[data-scene-note], .sp-narrow > p[data-scene-note] { position: relative; }
+
+/* the shelf's own size (#336), kept on this device */
+#shelves { zoom: var(--shelf-zoom, 1); }

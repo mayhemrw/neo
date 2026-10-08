@@ -1,6 +1,10 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('neo', {
+  platform: process.platform,
+  // macOS: the system dictionary panel for the selected word (#179)
+  lookUpText: () => ipcRenderer.invoke('app:lookUp'),
+
   readLibrary: () => ipcRenderer.invoke('library:read'),
   writeLibrary: (data) => ipcRenderer.invoke('library:write', data),
 

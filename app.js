@@ -101,6 +101,15 @@ function chapterName(chId, meta = book) {
   if (k === 'unnumbered') return ((meta.chapterTitles || {})[chId] || '').trim() || t('Untitled');
   return kindName(k);
 }
+// the chapter a note sits in, for the notes pane: its name, or for an
+// unnumbered chapter with no title (whose name would be Untitled), its
+// opening words (#346)
+function stickyChapterLabel(chId) {
+  if (chapterKind(chId) !== 'unnumbered' || ((book.chapterTitles || {})[chId] || '').trim()) return chapterName(chId);
+  const words = chapterText(chId).replace(/\s+/g, ' ').trim();
+  if (!words) return t('Untitled');
+  return words.length > 32 ? words.slice(0, 30).replace(/\s+\S*$/, '') + '…' : words;
+}
 // a chapter's heading as the reader sees it: its name, then any title —
 // once, for an unnumbered chapter, whose name is its title
 // The dash between a chapter's number and its title follows the book's
@@ -180,6 +189,8 @@ function setChapterKind(chId, kind) {
 }
 
 const isUntitled = (s) => !s || s === 'Untitled' || s === t('Untitled');
+// a title as the writer reads it: the untitled default in the current language
+const shownTitle = (s) => (isUntitled(s) ? t('Untitled') : s);
 
 // ---------- state ----------
 let library = null;          // library.json
@@ -705,6 +716,7 @@ function coverUrl(meta) {
 
 async function loadLibrary() {
   libraryDirPath = await window.neo.libraryPath();
+  applyShelfZoom();
   library = applyDeviceLook(await window.neo.readLibrary());
   // A first shelf is named in the language NEO had when it was made. If the
   // writer never renamed it, it follows a change of language.
@@ -1867,8 +1879,8 @@ function bookTile(meta, opts = {}) {
     bar.firstElementChild.style.width = pct + '%';
   }
   el.title = meta.wordGoal
-    ? t('{title} — {count} / {goal} words', { title: meta.title, count: meta.wordCount || 0, goal: meta.wordGoal })
-    : meta.title;
+    ? t('{title} — {count} / {goal} words', { title: shownTitle(meta.title), count: meta.wordCount || 0, goal: meta.wordGoal })
+    : shownTitle(meta.title);
   el.onclick = () => (opts.cover ? openTitlePage(opts.cover, meta) : openBook(meta.id));
   pressable(el, [el.title, meta.author ? t('by {author}', { author: meta.author }) : ''].filter(Boolean).join(', '));
   const refresh = el.querySelector('.b-refresh');
@@ -1939,7 +1951,7 @@ function bookTile(meta, opts = {}) {
     if (NO_HOVER || window.Capacitor) {
       // a touch screen: the larger cards, each saying what it does
       const options = [];
-      if (startPart) options.push({ label: t('Start a part here'), desc: t('A part page goes in before “{title}”.', { title: escHtml(meta.title) }), value: 'part' });
+      if (startPart) options.push({ label: t('Start a part here'), desc: t('A part page goes in before “{title}”.', { title: escHtml(shownTitle(meta.title)) }), value: 'part' });
       options.push(window.Capacitor
         ? { label: t('Export…'), desc: script ? t('PDF, Fountain or Final Draft, through the share sheet.') : t('Text, Markdown, HTML, PDF, Word or EPUB, through the share sheet.'), value: 'export' }
         : { label: t('Export…'), value: 'export' });
@@ -1950,7 +1962,7 @@ function bookTile(meta, opts = {}) {
         { label: t('Remove from bookshelf'), desc: t('Takes it off your shelves. The files stay safe in your NEO Library folder on disk.'), value: 'remove' },
         { label: trashLabel, desc: window.Capacitor ? t('Moves the book folder to Deleted Books in your NEO Library, where you can recover it.') : t('Sends the book folder to your system trash, where you can recover it.'), danger: true, value: 'trash' }
       );
-      choice = await optionModal(`“${escHtml(meta.title)}”`, null, options);
+      choice = await optionModal(t('“{title}”', { title: escHtml(shownTitle(meta.title)) }), null, options);
       if (choice === 'coverMenu') choice = await optionModal(t('Cover'), null, coverItems.filter((x) => x !== '-'));
     } else {
       // the desktop: a small menu at the pointer, the cover's choices one level in
@@ -1963,7 +1975,7 @@ function bookTile(meta, opts = {}) {
       items.push('-', { label: t('Remove from bookshelf'), value: 'remove' }, { label: trashLabel, value: 'trash', danger: true });
       const x = e.clientX;
       const y = e.clientY;
-      choice = await popMenu(x, y, items, { title: meta.title, from: el });
+      choice = await popMenu(x, y, items, { title: shownTitle(meta.title), from: el });
       if (choice === 'coverMenu') choice = await popMenu(x, y, coverItems, { title: t('Cover'), from: el });
     }
     if (choice === 'part') {
@@ -1973,7 +1985,7 @@ function bookTile(meta, opts = {}) {
     } else if (choice === 'refresh') {
       await refreshCover(meta, el);
     } else if (choice === 'export' && script) {
-      const fmt = await optionModal(t('Export “{title}”', { title: escHtml(meta.title) }), null, [
+      const fmt = await optionModal(t('Export “{title}”', { title: escHtml(shownTitle(meta.title)) }), null, [
         { label: 'PDF (.pdf)', value: 'pdf' },
         { label: 'Fountain (.fountain)', value: 'fountain' }, { label: 'Final Draft (.fdx)', value: 'fdx' }
       ]);
@@ -1981,7 +1993,7 @@ function bookTile(meta, opts = {}) {
       await openBook(meta.id);
       await doExport(fmt);
     } else if (choice === 'export') {
-      const fmt = await optionModal(t('Export “{title}”', { title: escHtml(meta.title) }), null, [
+      const fmt = await optionModal(t('Export “{title}”', { title: escHtml(shownTitle(meta.title)) }), null, [
         { label: t('Text (.txt)'), value: 'txt' }, { label: t('Markdown (.md)'), value: 'md' }, { label: t('HTML (.html)'), value: 'html' },
         { label: 'PDF (.pdf)', value: 'pdf' },
         { label: t('Word (.docx)'), value: 'docx' }, { label: t('EPUB (.epub)'), value: 'epub' },
@@ -2014,7 +2026,7 @@ function bookTile(meta, opts = {}) {
       await writeBookMeta(meta.id, meta);
       renderShelves();
     } else if (choice === 'goal') {
-      const goal = await askInput(t('Word count goal for “{title}”', { title: escHtml(meta.title) }), t('e.g. 80000 — blank removes the goal'),
+      const goal = await askInput(t('Word count goal for “{title}”', { title: escHtml(shownTitle(meta.title)) }), t('e.g. 80000 — blank removes the goal'),
         meta.wordGoal ? String(meta.wordGoal) : '');
       if (goal === null) return;
       meta.wordGoal = parseInt(goal, 10) || 0;
@@ -2024,7 +2036,7 @@ function bookTile(meta, opts = {}) {
       for (const s of library.shelves) s.bookIds = s.bookIds.filter((b) => b !== meta.id);
       await writeLibrary(library);
       renderShelves();
-      toast(t('“{title}” removed from the shelves — its files are still in your NEO Library', { title: meta.title }));
+      toast(t('“{title}” removed from the shelves — its files are still in your NEO Library', { title: shownTitle(meta.title) }));
     } else if (choice === 'trash') {
       const ok = await window.neo.deleteBook(meta.id, meta.title);
       if (ok) {
@@ -2196,7 +2208,7 @@ async function refreshCover(meta, el) {
       : { label: t('Paint a cover from the text'), desc: t('Once the story passes {n} words.', { n: PAINT_AT }), value: 'nope' });
   }
   // a plain abstract with nothing else to offer just re-rolls
-  const choice = options.length === 1 ? 'reroll' : await optionModal(t('Cover for “{title}”', { title: escHtml(meta.title) }), null, options);
+  const choice = options.length === 1 ? 'reroll' : await optionModal(t('Cover for “{title}”', { title: escHtml(shownTitle(meta.title)) }), null, options);
   if (!choice || choice === 'nope') return;
   const live = (book && book.id === meta.id) ? book : meta;
   if (choice === 'paint') {
@@ -2364,7 +2376,7 @@ async function moveBookToAuthor(bookId, authorId) {
   await writeBookMeta(bookId, meta);
   await writeLibrary(library);
   renderShelves();
-  toast(t('“{title}” now sits on {name}’s top shelf — Esc puts it back', { title: meta.title, name: target.name }), 6000);
+  toast(t('“{title}” now sits on {name}’s top shelf — Esc puts it back', { title: shownTitle(meta.title), name: target.name }), 6000);
 }
 async function undoShelfMove() {
   const m = lastShelfMove;
@@ -2377,7 +2389,7 @@ async function undoShelfMove() {
   if (meta) { meta.author = m.author; await writeBookMeta(m.bookId, meta); }
   await writeLibrary(library);
   renderShelves();
-  toast(t('“{title}” is back where it was', { title: m.title }));
+  toast(t('“{title}” is back where it was', { title: shownTitle(m.title) }));
   return true;
 }
 document.addEventListener('keydown', (e) => {
@@ -2465,6 +2477,7 @@ $('#author-chip').onclick = async () => {
 
 let openGeneration = 0;
 async function openBook(bookId) {
+  diskWordsAt = Date.now();
   // a book being exported from the shelf finishes first (it borrows the
   // open book's place for the moment it takes)
   while (shelfExport) await new Promise((r) => setTimeout(r, 50));
@@ -2633,7 +2646,7 @@ function renderChapters() {
     // screen readers name each chapter by its heading (a lone chapter by the book)
     body.setAttribute('role', 'textbox');
     body.setAttribute('aria-multiline', 'true');
-    if (chId === solo) body.setAttribute('aria-label', book.title || t('The story'));
+    if (chId === solo) body.setAttribute('aria-label', book.title ? shownTitle(book.title) : t('The story'));
     else body.setAttribute('aria-labelledby', head.id);
     body.spellcheck = false; // NEO runs its own spellcheck pass
     if (!story) body.classList.add('no-cap');
@@ -4006,7 +4019,7 @@ function captureBody(body) {
   // after a scene break, for the screen only)
   // (and a script's page breaks, (CONT'D) and suggestions)
   return dropJunkSpans(body.innerHTML).replace(/<(b|i|em|strong|u|s|strike|sub|sup)\s+style="[^"]*"/g, '<$1').replace(/<p\b[^>]*>/g, (tag) => tag.replace(/ data-(?:attr|speech|first|walk)=""/g, '')
-    .replace(/ data-(?:pg|fill|contd|ghost|ghost-empty|sp-paste)(?:="[^"]*")?/g, ''));
+    .replace(/ data-(?:pg|fill|contd|ghost|ghost-empty|sp-paste|scene-note)(?:="[^"]*")?/g, ''));
 }
 
 // The engine's style spans (stripJunkSpans), left out of what's saved. A
@@ -4582,7 +4595,8 @@ function quoteOpenIn(text, q, straight = '') {
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     if (straight && c === straight) straights++;
-    else if (c === open && open !== close) depth++;
+    else if (c === open && open === close) depth = depth ? 0 : 1;
+    else if (c === open) depth++;
     else if (c === close) {
       if (close === '’' && /\p{L}/u.test(text[i - 1] || '') && /\p{L}/u.test(text[i + 1] || '')) continue;
       depth = Math.max(0, depth - 1);
@@ -4606,7 +4620,8 @@ const QUOTE_STYLES = {
   ro: { open: '„', close: '”' },
   ru: { open: '«', close: '»' },
   el: { open: '«', close: '»' },
-  hu: { open: '„', close: '”' }
+  hu: { open: '„', close: '”' },
+  sv: { open: '”', close: '”' }
 };
 // The single quotation marks, where ' types them: English and Dutch ‘…’;
 // German ‚…‘, or ›…‹ in a book set in »…«, or ‹…› in Swiss «…» (#286).
@@ -4642,7 +4657,7 @@ function bookQuotes(el) {
   const body = el && el.closest ? el.closest('.chapter-body') : null;
   let c = opens(body ? body.textContent : '');
   if (!c['»'] && !c['«'] && !c.own && book) c = opens(book.chapterOrder.map((id) => chapterHTML[id] || '').join(' '));
-  if (c['»'] > c.own && c['»'] >= c['«']) return { open: '»', close: '«' };
+  if (c['»'] > c.own && c['»'] >= c['«']) return { open: '»', close: writingLanguage().split('-')[0] === 'sv' ? '»' : '«' };
   if (c['«'] > c.own && c['«'] > c['»']) return { open: '«', close: '»' };
   return q;
 }
@@ -5784,7 +5799,7 @@ const SP_NAMES = {
 };
 const spKey = (n) => K('⌘' + n, 'Ctrl+' + n);
 // the screen's own marks on a script's lines, never saved
-const SP_SCREEN_ATTRS = ['data-pg', 'data-fill', 'data-contd', 'data-ghost', 'data-ghost-empty'];
+const SP_SCREEN_ATTRS = ['data-pg', 'data-fill', 'data-contd', 'data-ghost', 'data-ghost-empty', 'data-scene-note'];
 // characters NEO guessed from a line in capitals, and headings it made of
 // INT./EXT.: either goes back to action when the guess turns out wrong
 const spGuessed = new WeakSet();
@@ -6092,8 +6107,38 @@ function scriptInput(body) {
   spShowElement();
 }
 
+// ---- a scene's card note, in gray on its empty first line ----
+// The way a book's section notes stand on the page until written over: a
+// scene with nothing written under its heading yet shows its note there,
+// gone at the first letter typed. A screen mark (data-scene-note), never
+// saved, and nothing Enter takes. (#339)
+function spSceneNoteGhosts(ps, lines) {
+  const notes = book.sceneNotes || {};
+  const want = new Map();
+  for (let i = 0; i < ps.length; i++) {
+    if (lines[i].type !== 'heading') continue;
+    const note = ps[i].dataset.sceneId && notes[ps[i].dataset.sceneId];
+    if (!note) continue;
+    let j = i + 1;
+    let blank = null;
+    let written = false;
+    for (; j < ps.length && lines[j].type !== 'heading'; j++) {
+      if (ps[j].textContent.trim()) { written = true; break; }
+      if (!blank) blank = ps[j];
+    }
+    if (!written && blank) want.set(blank, note);
+  }
+  for (const p of ps) {
+    const note = want.get(p) || null;
+    if (p.getAttribute('data-scene-note') !== note) { if (note) p.setAttribute('data-scene-note', note); else p.removeAttribute('data-scene-note'); }
+  }
+}
+
 // ---- the gray suggestion at the caret ----
 function spRefreshGhost() {
+  // a scene note on the line being typed on goes the moment it has words
+  const at = spCaretPara();
+  if (at && at.hasAttribute('data-scene-note') && at.textContent.trim()) at.removeAttribute('data-scene-note');
   const p = spCaretPara();
   let ghost = '';
   if (p && document.activeElement === spBodyOf(p) && ['character', 'heading', 'transition'].includes(spType(p)) && spCaretAtEnd(p) && spDismissed.get(p) !== p.textContent) {
@@ -6169,6 +6214,7 @@ function spRepaginate() {
     const fill = a.brk ? String(Math.min(SP_LINES_PER_PAGE, a.fill)) : null;
     if (p.getAttribute('data-fill') !== fill) { if (fill) p.setAttribute('data-fill', fill); else p.removeAttribute('data-fill'); }
   });
+  spSceneNoteGhosts(ps, lines);
   const chapters = $('#chapters');
   chapters.style.setProperty('--sp-last', String(Math.max(0, SP_LINES_PER_PAGE - pg.used)));
   if (narrow) chapters.style.setProperty('--sp-fullw', chapters.clientWidth + 'px');
@@ -6978,7 +7024,7 @@ function renderStickies() {
     el.className = 'sticky unresolved';
     el.dataset.sid = s.id;
     el.innerHTML = `
-      <div class="s-ch">${chIdx >= 0 ? chapterName(s.chapterId) : t('Unplaced')}</div>
+      <div class="s-ch">${chIdx >= 0 ? escHtml(stickyChapterLabel(s.chapterId)) : t('Unplaced')}</div>
       <textarea placeholder="${t('What needs doing here?')}" spellcheck="false"></textarea>
       <div class="s-actions"><button class="s-go">${t('Go to')}</button><span class="s-sep">·</span><button class="s-done">${t('Resolve')}</button></div>`;
     const ta = el.querySelector('textarea');
@@ -7155,7 +7201,7 @@ function renderNav() {
     item.innerHTML = `<div class="n-row" title="${t('Drag to reorder chapters')}"><span class="n-label"></span>
       <span style="display:flex;align-items:center">${story ? `<span class="n-words">${fmtNum(words)}</span>` : ''}${flagged ? `<span class="n-flag" title="${t('Unresolved placeholder')}"></span>` : ''}</span></div>`;
     item.querySelector('.n-label').textContent = chId === solo
-      ? (book.title || t('The story'))
+      ? (book.title ? shownTitle(book.title) : t('The story'))
       : (chTitle ? `${chapterMark(chId)} · ${chTitle}` : chapterName(chId));
 
     // the row is the drag handle, so the note below stays freely editable
@@ -7747,6 +7793,7 @@ function switchTab(name) {
   closeCardEditor();
   auxLoad++;
   $('#editor-view').classList.remove('board-on');
+  updateZoomDisplay(); // the page's own zoom, not the cards' (#336)
   sidePaneForTab(name);
   const scroller = $('#paper-scroll');
   if (book && currentTab && currentTab !== name) {
@@ -8301,6 +8348,27 @@ function applyPageZoom() {
 }
 
 function cardZoom() { return readStoredZoom(CARD_ZOOM_KEY, library.cardZoom || 1, CARD_ZOOM_RANGE); }
+
+// The shelf has a size of its own (#336): bigger covers without the page's
+// type growing. ⌘+ and ⌘− (Ctrl), a pinch or Ctrl-scroll, and ⌘0 on the
+// shelf, in steps of a tenth, kept on this device.
+const SHELF_ZOOM_KEY = 'neo.shelfZoom';
+const SHELF_ZOOM_RANGE = { min: 0.8, max: 2 };
+const shelfZoom = () => readStoredZoom(SHELF_ZOOM_KEY, 1, SHELF_ZOOM_RANGE);
+const shelfShowing = () => !$('#bookshelf-view').hidden;
+function applyShelfZoom() {
+  const z = shelfZoom();
+  document.documentElement.style.setProperty('--shelf-zoom', z);
+}
+function stepShelfZoom(dir) {
+  const now = shelfZoom();
+  const next = dir === 0 ? 1 : Math.min(SHELF_ZOOM_RANGE.max, Math.max(SHELF_ZOOM_RANGE.min, Math.round((now + dir * 0.1) * 10) / 10));
+  if (next === now) return;
+  rememberZoom(SHELF_ZOOM_KEY, next);
+  applyShelfZoom();
+}
+// a page zoom moves in tenths, so it reads 110%, 120%, never 121%
+const tenth = (z) => Math.round(z * 10) / 10;
 const CARD_ZOOMS = [0.55, 0.7, 0.85, 1, 1.15, 1.3, 1.5];
 function stepCardZoom(dir) {
   const now = cardZoom();
@@ -8675,7 +8743,9 @@ function openCard(cell, { fresh = false } = {}) {
     tools.appendChild(more);
   }
   const tip = document.createElement('span');
-  tip.textContent = t('Enter: done · Tab: next card · {key}: new card', { key: K('⌥Enter', 'Alt+Enter') });
+  tip.textContent = fresh && cell.dataset.kind !== 'loose'
+    ? t('Enter: another new card · Enter on an empty card, or Esc: done')
+    : t('Enter: done · Tab: next card · {key}: new card', { key: K('⌥Enter', 'Alt+Enter') });
   tools.appendChild(tip);
   cell.querySelector('.ob-card').appendChild(tools);
   cardEditor = { cell, text, slug, before: note, slugBefore: slug ? slug.textContent : null, fresh };
@@ -8683,7 +8753,11 @@ function openCard(cell, { fresh = false } = {}) {
   text.addEventListener('blur', cardBlur);
   text.addEventListener('paste', (e) => {
     e.preventDefault();
-    document.execCommand('insertText', false, (e.clipboardData.getData('text/plain') || '').replace(/\s+/g, ' '));
+    const raw = e.clipboardData.getData('text/plain') || '';
+    const items = outlineLines(raw);
+    // a list (from Word, Obsidian, a notes app): one card per line (#348)
+    if (items.length > 1) { pasteOutline(items); return; }
+    document.execCommand('insertText', false, raw.replace(/\s+/g, ' '));
   });
   const first = slug && fresh ? slug : text;
   first.focus();
@@ -8831,6 +8905,15 @@ function cardKeys(e) {
     return;
   }
   if (e.isComposing || e.keyCode === 229) return;
+  // Enter on a new card with words on it: on to another new card, so an
+  // outline can be typed straight through; Enter on an empty one stops
+  // there (the way a list's empty bullet does), and so does Esc (#334)
+  if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && ed.fresh &&
+      cell.dataset.kind !== 'loose' && (text.textContent.trim() || (ed.slug && ed.slug.textContent.trim()))) {
+    e.preventDefault();
+    newCardAfter(cell);
+    return;
+  }
   // Enter: the card is done (and stays where the keyboard is)
   if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
     e.preventDefault();
@@ -8883,6 +8966,52 @@ function cardKeys(e) {
       cardEditor = null;
       deleteSectionNote(chId, cell.dataset.sec);
     }
+  }
+}
+
+// A pasted list, one item a line: bullets (-, *, •), numbers (1. 2)) and
+// letters (a.) come off, blank lines go. A line indented more than the
+// list's least indented ones is a level down. (#348)
+function outlineLines(raw) {
+  const items = [];
+  for (const line of String(raw).replace(/\r\n?/g, '\n').split('\n')) {
+    const m = /^([ \t]*)(?:[-*+•◦▪‣·–—]\s+|\d{1,3}[.)]\s+|[a-zA-Z][.)]\s+)?(.*)$/.exec(line);
+    const words = (m ? m[2] : line).replace(/\s+/g, ' ').trim();
+    if (!words) continue;
+    items.push({ indent: (m ? m[1] : '').replace(/\t/g, '    ').length, text: words });
+  }
+  const least = items.length ? Math.min(...items.map((x) => x.indent)) : 0;
+  for (const x of items) x.level = x.indent > least ? 1 : 0;
+  return items;
+}
+
+// The list's first line goes on the open card, and each line after it on a
+// new card of its own, as if typed with Enter. On a chapter card the top
+// lines are chapters and the indented ones their sections; on a section,
+// scene or loose card, every line is another of the same.
+function pasteOutline(items) {
+  const ed = cardEditor;
+  if (!ed) return;
+  const kind = ed.cell.dataset.kind;
+  document.execCommand('insertText', false, items[0].text);
+  for (const it of items.slice(1)) {
+    const cur = cardEditor && cardEditor.cell;
+    if (!cur || !cur.isConnected) break;
+    if (kind === 'loose') { closeCardEditor(); addLooseCard(); }
+    else if (kind === 'chapter' && it.level === 0) {
+      const chId = cur.dataset.ch;
+      closeCardEditor();
+      newChapterCard(book.chapterOrder.indexOf(chId) + 1);
+    } else newCardAfter(cur);
+    const next = cardEditor;
+    if (!next || next.cell === cur) break;
+    next.text.focus();
+    next.text.textContent = it.text;
+    const r = document.createRange();
+    r.selectNodeContents(next.text);
+    r.collapse(false);
+    window.getSelection().removeAllRanges();
+    window.getSelection().addRange(r);
   }
 }
 
@@ -10567,6 +10696,7 @@ function updateCounters() {
     return;
   }
   const total = bookWordCount();
+  const known = book.wordCount; // the count before this one (trackDailyWords)
   const wc = $('#word-counter');
   if (isScript()) spCounters();
   else updateBookCounters(total, wc);
@@ -10581,7 +10711,7 @@ function updateCounters() {
       requestPaint(book, bookPlainText());
     }
   }
-  trackDailyWords(total);
+  trackDailyWords(total, known);
 }
 function updateBookCounters(total, wc) {
   if (wordMode === 'book') setText(wc, t('{n} words', { n: total }));
@@ -10616,9 +10746,16 @@ function writingDay(d = new Date()) {
 }
 const todayStr = () => writingDay();
 
-function trackDailyWords(total) {
+// when the text last came in from disk (a book opening, another device's
+// changes adopted): a drop then isn't the writer cutting (#345)
+let diskWordsAt = 0;
+function trackDailyWords(total, known = book.wordCount) {
   book.dailyCounts = book.dailyCounts || {};
   const today = todayStr();
+  // a book that reads as empty for a moment (its chapters still coming in,
+  // or a synced folder still downloading them) must not set the day's start:
+  // from zero, "today" would count the whole book (#345)
+  if (!total && (known || 0) > 0) return;
   if (!book.dailyCounts[today]) {
     book.dailyCounts[today] = { start: total, end: total };
     scheduleMetaSave();
@@ -10629,13 +10766,13 @@ function trackDailyWords(total) {
   // day's start down with them, so today never reads below zero, and what's
   // written after the cut counts in full. (Cut what you wrote today, and
   // today is smaller: that part is honest.)
-  if (total < book.dailyCounts[today].start) {
+  if (total < book.dailyCounts[today].start && Date.now() - diskWordsAt > 3000) {
     book.dailyCounts[today].start = total;
     scheduleMetaSave();
   }
   if (sprint && sprint.bookId !== book.id) sprint = null; // a sprint belongs to the book it began in
   if (sprint && total < sprint.startCount) sprint.startCount = total;
-  const wordsToday = book.dailyCounts[today].end - book.dailyCounts[today].start;
+  const wordsToday = Math.max(0, book.dailyCounts[today].end - book.dailyCounts[today].start);
   const gc = $('#goal-counter');
   if (sprint && !sprint.done) {
     const sprintWords = total - sprint.startCount;
@@ -11986,6 +12123,7 @@ let refreshing = false;
 async function refreshFromDisk() {
   if (refreshing || shelfExport) return;
   refreshing = true;
+  diskWordsAt = Date.now();
   bookMetaCache.clear(); // whatever another device wrote, the next redraw reads
   let slogDone = null;
   try {
@@ -12214,6 +12352,7 @@ async function refreshFromDisk() {
   } catch (err) {
     console.error(err);
   } finally {
+    diskWordsAt = Date.now();
     if (slogDone) slogDone();
     refreshing = false;
   }
@@ -12698,7 +12837,7 @@ document.addEventListener('keydown', (e) => {
   const cmd = e.metaKey || e.ctrlKey;
   // on Linux, Ctrl+Shift+U belongs to the input method (it types a Unicode
   // character by its code), so Read Aloud there is Ctrl+Shift+K (#287)
-  if (cmd && e.shiftKey && !e.altKey && (e.code === 'KeyU' || (IS_LINUX && e.code === 'KeyK'))) {
+  if (cmd && e.shiftKey && !e.altKey && e.code === (IS_LINUX ? 'KeyK' : 'KeyU')) {
     if (!book || $('#editor-view').hidden) return;
     e.preventDefault();
     e.stopPropagation();
@@ -13215,7 +13354,7 @@ function toggleSpellcheck() {
 const SPELL_LANGUAGE_NAMES = {
   'en-US': t('US English'), 'en-GB': t('UK English'), 'en-CA': t('Canadian English'),
   'en-AU': t('Australian English'), fr: t('French'), es: t('Spanish'), de: t('German'),
-  nl: t('Dutch'), pl: t('Polish'), 'pt-BR': t('Brazilian Portuguese'), ro: t('Romanian'), ru: t('Russian'), hu: t('Hungarian')
+  nl: t('Dutch'), pl: t('Polish'), 'pt-BR': t('Brazilian Portuguese'), ro: t('Romanian'), ru: t('Russian'), hu: t('Hungarian'), sv: t('Swedish')
 };
 async function changeSpellLanguage(code) {
   const ok = await window.neo.setSpellLanguage(code);
@@ -13349,6 +13488,34 @@ function showSpellMenu(x, y, word, suggestions, actions) {
 }
 
 let typewriterEnabled = false;
+
+// ---- look up rules:
+// macOS shows the system dictionary for a selected word; the menu only makes sense for one word,
+// never for a phrase or a whole paragraph (#179).
+const LOOK_UP_MAX_WORD = 60;
+function lookUpWord(text) {
+  const word = (text || '').trim();
+  if (!word || word.length > LOOK_UP_MAX_WORD) return null;
+  return /\s/.test(word) ? null : word;
+}
+// ---- end of look up rules ----
+
+// macOS: a selected word in the manuscript or the notes gets the system "Look Up" — the panel
+// Safari and Books show (#179). The listener runs in the bubble phase, after the spellcheck menu,
+// and stands down when any other menu already answered the right-click.
+document.addEventListener('contextmenu', (e) => {
+  if (window.neo.platform !== 'darwin' || e.defaultPrevented) return;
+  const editor = e.target.closest && e.target.closest('.chapter-body, #aux-editor');
+  if (!editor) return;
+  const sel = window.getSelection();
+  const word = sel && sel.rangeCount && !sel.isCollapsed ? lookUpWord(sel.toString()) : null;
+  if (!word) return;
+  e.preventDefault();
+  popMenu(e.clientX, e.clientY, [{ label: t('Look Up “{word}”', { word }), value: 'lookup' }]).then((choice) => {
+    if (choice === 'lookup') window.neo.lookUpText();
+  });
+});
+
 // The page needs empty room beneath its last line, or the caret can't be held
 // at the centre once the end of the draft scrolls into view (body.typewriter
 // deepens #paper's bottom margin; see styles.css). Only as much as the last
@@ -13767,7 +13934,7 @@ function openStats() {
   bd.className = 'modal-backdrop';
   bd.innerHTML = `
     <div class="modal" style="width:${hasBook ? 580 : 380}px">
-      <h2 style="font-size:17px">${hasBook ? t('{title} — progress', { title: escHtml(book.title) }) : t('Goals')}</h2>
+      <h2 style="font-size:17px">${hasBook ? t('{title} — progress', { title: escHtml(shownTitle(book.title)) }) : t('Goals')}</h2>
       ${hasBook ? `
       <div class="stats-nums">
         <div><div class="big">${fmtNum(total)}</div><div class="lbl">${t('total words')}</div></div>
@@ -14008,6 +14175,7 @@ function setPageZoom(next, at) {
   updateZoomDisplay();
 }
 let cardWheel = 0;
+let pageWheel = 0;
 $('#editor-view').addEventListener('wheel', (e) => {
   if (!e.ctrlKey) return;
   e.preventDefault();
@@ -14017,12 +14185,24 @@ $('#editor-view').addEventListener('wheel', (e) => {
     if (Math.abs(cardWheel) > 40) { stepCardZoom(cardWheel < 0 ? 1 : -1); cardWheel = 0; }
     return;
   }
-  setPageZoom(activePageZoom() * Math.exp(-e.deltaY * 0.005), { x: e.clientX, y: e.clientY });
+  // …and the page a tenth at a time (#336: a smooth pinch left it at 101%)
+  pageWheel += e.deltaY;
+  if (Math.abs(pageWheel) > 40) {
+    setPageZoom(tenth(activePageZoom() + (pageWheel < 0 ? 0.1 : -0.1)), { x: e.clientX, y: e.clientY });
+    pageWheel = 0;
+  }
+}, { passive: false });
+let shelfWheel = 0;
+$('#bookshelf-view').addEventListener('wheel', (e) => {
+  if (!e.ctrlKey) return;
+  e.preventDefault();
+  shelfWheel += e.deltaY;
+  if (Math.abs(shelfWheel) > 40) { stepShelfZoom(shelfWheel < 0 ? 1 : -1); shelfWheel = 0; }
 }, { passive: false });
 
 // zoom control in the bottom bar: buttons, click-to-reset, and scroll
-$('#zoom-in').onclick = () => (boardShowing() ? stepCardZoom(1) : setPageZoom(activePageZoom() + 0.1));
-$('#zoom-out').onclick = () => (boardShowing() ? stepCardZoom(-1) : setPageZoom(activePageZoom() - 0.1));
+$('#zoom-in').onclick = () => (boardShowing() ? stepCardZoom(1) : setPageZoom(tenth(activePageZoom() + 0.1)));
+$('#zoom-out').onclick = () => (boardShowing() ? stepCardZoom(-1) : setPageZoom(tenth(activePageZoom() - 0.1)));
 $('#zoom-level').onclick = () => (boardShowing() ? stepCardZoom(0) : setPageZoom(1));
 $('#zoom-control').addEventListener('wheel', (e) => {
   e.preventDefault();
@@ -15859,9 +16039,9 @@ async function doEmailDraft() {
     if (!ok) return;
   }
   const total = bookWordCount();
-  const subject = t('NEO draft — {title} — {n} words — {date}', { title: book.title, n: total, date: fmtDate(new Date()) });
+  const subject = t('NEO draft — {title} — {n} words — {date}', { title: shownTitle(book.title), n: total, date: fmtDate(new Date()) });
   const hash = await manuscriptHash();
-  const body = t('Draft snapshot of “{title}” — {n} words.', { title: book.title, n: total }) + '\n'
+  const body = t('Draft snapshot of “{title}” — {n} words.', { title: shownTitle(book.title), n: total }) + '\n'
     + t('Sent from NEO on {date}.', { date: new Date().toLocaleString(NeoI18n.getLocale()) }) + '\n\n'
     + t('SHA-256 fingerprint of the manuscript text:') + `\n${hash}\n\n`
     + (library.emailMethod === 'gmail'
@@ -16019,11 +16199,13 @@ async function showAbout() {
 // Text size and the reset travel with page zoom; the menu item and the
 // keyboard fallback share this so the two cannot drift.
 async function setEditorFontSize(value) {
-  // ⌘+ and ⌘− on the outline's cards make the cards larger and smaller
+  // ⌘+ and ⌘− on the shelf make the covers larger and smaller
+  if (shelfShowing()) { stepShelfZoom(value); return; }
+  // …on the outline's cards, the cards
   if (boardShowing()) { stepCardZoom(value); return; }
   // a script's type is the page's: larger and smaller zoom the page
   if (book && isScript()) {
-    setPageZoom(value === 0 ? 1 : activePageZoom() * (value > 0 ? 1.1 : 1 / 1.1));
+    setPageZoom(value === 0 ? 1 : tenth(activePageZoom() + (value > 0 ? 0.1 : -0.1)));
     return;
   }
   const cur = library.editorFontSize || 17;
