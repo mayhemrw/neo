@@ -33,6 +33,9 @@ fs.writeFileSync(path.join(LIB, 'library.json'), JSON.stringify({
 }));
 const EXPORT_TO = path.join(tmp, 'export.zip');
 const REPORT_TO = path.join(tmp, 'report.html');
+// NEO's own .txt and .docx of the book as it stood at the export, for the verifier
+const TXT_TO = path.join(tmp, 'harbor-export.txt');
+const DOCX_TO = path.join(tmp, 'harbor-export.docx');
 const MANUSCRIPT = path.join(tmp, 'harbor.txt');
 fs.writeFileSync(MANUSCRIPT, [
   'The harbor was quiet before the storm.',
@@ -407,6 +410,12 @@ async function main() {
     for (let i = 0; i < 200 && !fs.existsSync(EXPORT_TO); i++) await tick(100);
     await tick(500);
     notes.exportToast = await js(`document.getElementById('hint').textContent`);
+    // File → Export as .txt and .docx, nothing written since the export
+    for (const [format, to] of [['txt', TXT_TO], ['docx', DOCX_TO]]) {
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath: to });
+      await js(`doExport(${JSON.stringify(format)})`);
+      for (let i = 0; i < 100 && !fs.existsSync(to); i++) await tick(50);
+    }
     // File → Scribe's Log → Verification Report…: exact times, and a PDF
     dialog.showSaveDialog = async () => ({ canceled: false, filePath: REPORT_TO });
     await js(`(() => { slogReport({ type: 'slogReport', bookId: book.id }); })()`);
@@ -450,6 +459,30 @@ async function main() {
     const exported = fs.existsSync(EXPORT_TO) ? await checkZip(EXPORT_TO, {}) : null;
     const exportZip = fs.existsSync(EXPORT_TO) ? require('../slog-zip.js').unzipSync(new Uint8Array(fs.readFileSync(EXPORT_TO)), require('zlib').inflateRawSync).files : {};
     const edits = entries.filter((e) => e.kind === 'edit' || e.kind === 'base');
+    // The verifier page, opened as a file with the network stopped: the
+    // export's own copy (it trusts FreeTSA only, so the fake authority's
+    // receipts can't be checked there), and one built to trust the fake
+    // authority, given the export and then NEO's .txt and .docx of the book
+    if (exported) {
+      const { openVerifier } = require('./verifier-page.js');
+      const own = path.join(tmp, 'verifier-own.html');
+      fs.writeFileSync(own, Buffer.from(exportZip['verifier.html']));
+      const testPage = path.join(tmp, 'verifier-test.html');
+      fs.writeFileSync(testPage, require('../verifier/build.js').buildVerifier({ extraAnchors: [fs.readFileSync(fakes.ROOT_PEM, 'utf8')] }));
+      const a = await openVerifier(own);
+      notes.ownPage = await a.choose([EXPORT_TO]);
+      a.close();
+      const v = await openVerifier(testPage);
+      notes.vExport = await v.choose([EXPORT_TO]);
+      notes.vTxt = await v.choose([TXT_TO]);
+      notes.vDocx = await v.choose([DOCX_TO]);
+      const bad = path.join(tmp, 'harbor-changed.txt');
+      fs.writeFileSync(bad, fs.readFileSync(TXT_TO, 'utf8').replace(/\bboats\b/, 'ships'));
+      notes.vBad = await v.choose([bad]);
+      notes.vRequests = v.requests.slice();
+      notes.vErrors = [...a.errors, ...v.errors];
+      v.close();
+    }
     for (const e of edits) console.log(`  ${e.n} ${e.kind} ${e.doc} ${e.src}${e.cause ? '/' + e.cause : ''}${e.ev ? ' ev ' + e.ev : ''}${e.from ? ' from ' + JSON.stringify(e.from.map((p) => p[3].n || p[3].doc || 'log')) : ''}  ${JSON.stringify(e.x ? e.x.ins.map((s) => s.slice(0, 50)) : e.ops)}`);
     // the stretches of text whose move wasn't traced, to say which failed
     const untraced = () => Object.entries(dev.traced).flatMap(([doc, d]) => {
@@ -568,6 +601,30 @@ async function main() {
         const pdf = fs.readFileSync(REPORT_TO.replace(/html$/, 'pdf'));
         assert.equal(pdf.subarray(0, 5).toString(), '%PDF-');
         assert.ok(pdf.length > 10000, 'a real PDF');
+      }],
+      ['the export\'s own verifier checks it, and can\'t vouch for an authority it doesn\'t carry', () => {
+        const o = notes.ownPage;
+        assert.equal(o.verdict, 'warn', JSON.stringify(o.items));
+        const st = (k) => o.items.find((i) => i.key === k) || {};
+        assert.equal(st('files').status, 'ok');
+        assert.equal(st('chains').status, 'ok');
+        assert.equal(st('stamps').status, 'warn');
+        assert.match(st('stamps').text, /authority this verifier doesn't trust/);
+        assert.match(o.report, /Where the text came from/);
+      }],
+      ['the verifier matches NEO\'s own .txt and .docx of the book, and not a changed one', () => {
+        assert.equal(notes.vExport.verdict, 'ok', JSON.stringify(notes.vExport.items));
+        const ms = (r, name) => r.items.find((i) => i.key === 'ms-' + name) || {};
+        assert.equal(ms(notes.vTxt, 'harbor-export.txt').status, 'ok', JSON.stringify(notes.vTxt.items));
+        assert.match(ms(notes.vTxt, 'harbor-export.txt').text, /lines NEO's own export adds/);
+        assert.equal(ms(notes.vDocx, 'harbor-export.docx').status, 'ok', JSON.stringify(notes.vDocx.items));
+        assert.equal(notes.vDocx.verdict, 'ok');
+        assert.match(notes.vDocx.report, /matches it exactly/);
+        assert.equal(ms(notes.vBad, 'harbor-changed.txt').status, 'bad');
+        assert.match(ms(notes.vBad, 'harbor-changed.txt').title, /doesn't match the manuscript/);
+        assert.equal(notes.vBad.verdict, 'bad');
+        assert.deepEqual(notes.vRequests, [], 'nothing went out');
+        assert.deepEqual(notes.vErrors, []);
       }],
       ['merging into an archive leaves a log that checks, and writing carries on', () => {
         assert.match(notes.archiveToast, /^Merged \d+ files into archive-/);

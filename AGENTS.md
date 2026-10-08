@@ -34,6 +34,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before adding a feature. The product is 
 | `slog-report.js` | The verification report: `reportStats` (origins overall and by chapter, pastes then revised, revision, sessions, the timeline, timestamps, flags, from `checkLog`'s result) and `renderReport` (one self-contained page, times exact, as dates or as weeks). Plain JavaScript that also runs in a browser, so NEO and the verifier make the same report |
 | `slog-files.js` | A book's `scribes-log/` folder on disk, loose files and archives read as one (`listLog`, `loadLog`); Merge Log into Archive (`mergeIntoArchive`); the exports for verification (`buildExport`, `readExport`). Node only |
 | `slog-zip.js` | Zip files for archives and exports: reading (inflate handed in, or the browser's `DecompressionStream`), writing, CRC-32. Plain JavaScript that also runs in a browser |
+| `verifier/` | The standalone verifier page that every export carries: `page.html` and `page.js` (the page), `check.js` (sorting what's dropped, checking it, saying what checked in plain words), `manuscript.js` (reading a .txt or .docx and matching it to the log's fingerprint), `build.js` (one self-contained page with the checker's files inside; main.js builds it for each export). Plain JavaScript that also runs in Node, except `page.js` |
 | `slog-hash.js`, `stamp-ots.js`, `stamp-tsa.js` | Outside timestamps for the Scribe's Log, in plain JavaScript that also runs in a browser: SHA-256/HMAC/SHA-1/RIPEMD-160, OpenTimestamps proofs and calendars, RFC 3161 tokens (checked through WebCrypto). The network is a `fetch` passed in. Trusted roots are in `certs/` |
 | `locales/<code>.json` | One language. Regional files (`fr-CA.json`) hold only the strings that differ |
 | `pocket/` | Capacitor shell. It does not contain its own editor |
@@ -88,6 +89,7 @@ Each book's log lives in its `scribes-log/` folder: `log.json` (made once) and o
 - File → Scribe's Log is a submenu: Log This Book (the checkbox), the last timestamp, Verification Report… (below), Export for Verification… (`slog:export`; the window's `slogExport` asks which kind, says what each holds, saves everything and sends the hashes of the lines NEO's exports add, `slogAddedLines`) and Merge Log into Archive (`slog:archive`). Anything that lists a log's files goes through `slog-files.js` (`listLog`), never `readdir` on `scribes-log/`, so archived chunks and receipts are found.
 - `scripts/slog-archive.test.js` covers zips, archives (read, merged, carried on from) and exports.
 - File → Scribe's Log → Verification Report… (`slog:report`; the window's `slogReport` asks how exactly to show times and whether to add a PDF) closes the session and stamps its end like an export, checks the log, and writes `slog-report.js`'s page; the PDF is the page printed by an offscreen window (`slogReportPdf`). `scripts/slog-report.test.js` covers the counting and the privacy settings. A Tracer made with `detail` (only the report does) keeps, per unit, the hour it was written, its paste, whether it was moved and whether it's markup; the default origins stay plain categories.
+- The verifier (`verifier/`): `slogVerifierPage` in main.js builds it into every export with `verifier/build.js`, so it's always this NEO's checker; `npm run build:verifier` writes `verifier/verifier.html` (not committed) to try it in a browser. Its scripts are inlined with every `<` that could end a `<script>` written as `\x3C` (`scriptSafe`). Everything shown from a log goes in as text, never markup. It trusts only `certs/*-root.pem`. Its only network use is Check against Bitcoin (mempool.space, then blockstream.info), held to that by its Content-Security-Policy. `scripts/verifier.test.js` covers manuscripts, sorting, the summary and the build; `npm run test:verifier` (`scripts/verifier.e2e.js`) drives the page in a window with the network stopped; `slog.e2e.js` matches NEO's own .txt and .docx with it.
 - `captureBody` leaves the engine's style spans out of what's saved (`dropJunkSpans`); the page keeps them until the chapter is next opened, because taking them off at once breaks ⌘Z.
 
 ## Paperbacks for KDP
@@ -198,6 +200,8 @@ npm run test:coverage      # node --test --experimental-test-coverage scripts/*.
 npm run lint               # oxlint, Electron's standard-style JavaScript rules
 npm run test:spellcheck    # node --test scripts/spellcheck.test.js
 npm run test:dashes        # node --test scripts/dashes.test.js
+npm run test:verifier      # the verifier page, in Electron (xvfb-run without a display)
+npm run build:verifier     # writes verifier/verifier.html
 npm run bundle             # Hugh: brings in the newest .bundle from ~/Downloads and pushes main
 npm run release            # Hugh: next version (x.y.9 → x.(y+1).0), commit, push, tag (npm run release -- 2.0.0 for another)
 npm run package:mac        # macOS build; npm run package calls this

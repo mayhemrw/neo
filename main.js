@@ -954,12 +954,13 @@ function slogReadme(kind, m) {
   ];
   return lines.join('\r\n');
 }
-// The checker from this NEO (scripts/build-verifier.js makes verifier/verifier.html)
+// The checker from this NEO: one page with the checker's own files inside
+// it (verifier/build.js), built from them each time so it can't fall behind
 function slogVerifierPage() {
-  try { return fs.readFileSync(path.join(__dirname, 'verifier', 'verifier.html'), 'utf8'); } catch { /* not built */ }
+  try { return require('./verifier/build.js').buildVerifier({ version: app.getVersion(), built: 'built with NEO ' + app.getVersion() }); } catch (err) { logError('scribe\'s log verifier', err); }
   return '<!doctype html><meta charset="utf-8"><title>Scribe\'s Log verifier</title>' +
     '<body style="font:16px/1.5 system-ui,sans-serif;max-width:36em;margin:3em auto;padding:0 1em">' +
-    '<h1>Scribe\'s Log verifier</h1><p>This copy of NEO was built without its verifier page, so this export doesn\'t carry one. ' +
+    '<h1>Scribe\'s Log verifier</h1><p>This copy of NEO couldn\'t build its verifier page, so this export doesn\'t carry one. ' +
     'The log itself is complete: any checker that follows SLOG-FORMAT.md can check it.</p>';
 }
 // The session's chunk closed and its end stamped, for an export or a

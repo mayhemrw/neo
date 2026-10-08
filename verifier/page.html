@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Nothing leaves this page but the block lookups of Check against Bitcoin -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src https://mempool.space https://blockstream.info; base-uri 'none'; form-action 'none'">
+<title>Scribe's Log verifier</title>
+<style>
+:root {
+  --bg: #f6f5f1; --surface: #ffffff; --surface-2: #f0efea; --line: #e2e1dc; --text: #1d1c1a; --text-2: #52514e; --muted: #75736d;
+  --accent: #2a78d6; --accent-ink: #ffffff; --good: #1d7a4f; --good-bg: #e6f4ec; --warn: #8a5a00; --warn-bg: #fdf3dc; --bad: #b3261e; --bad-bg: #fbe9e7; --info: #3e5c86; --info-bg: #e9f0f9;
+  --radius: 10px; color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615; --surface: #1f1f1d; --surface-2: #2a2a27; --line: #3a3935; --text: #ecebe6; --text-2: #c4c2bb; --muted: #9a988f;
+    --accent: #6da7ec; --accent-ink: #0d1a2b; --good: #6fd09b; --good-bg: #183026; --warn: #f0c060; --warn-bg: #352a12; --bad: #ff9a8f; --bad-bg: #3a1c19; --info: #9cbbe6; --info-bg: #1c2738;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+body { font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; padding: 32px 20px 56px; }
+main { max-width: 860px; margin: 0 auto; }
+h1 { font-size: 26px; line-height: 1.2; margin: 0 0 4px; letter-spacing: -0.01em; }
+h2 { font-size: 18px; margin: 32px 0 10px; }
+p { margin: 0 0 10px; }
+.sub { color: var(--muted); margin-bottom: 20px; }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+button, select { font: inherit; }
+button { cursor: pointer; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--text); padding: 7px 14px; }
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+button:focus-visible, select:focus-visible, .drop:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:disabled { opacity: 0.6; cursor: default; }
+select { border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--text); padding: 6px 8px; }
+.drop { border: 2px dashed var(--line); border-radius: var(--radius); background: var(--surface); padding: 28px 20px; text-align: center; transition: border-color .15s, background .15s; }
+.drop.over { border-color: var(--accent); background: var(--info-bg); }
+.drop .big { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+.drop .row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 14px; }
+.drop.compact { padding: 14px 16px; text-align: left; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.drop.compact .big { font-size: 15px; margin: 0; flex: 1 1 260px; }
+.drop.compact .row { margin: 0; }
+.drop.compact .hint { display: none; }
+.busy { margin: 16px 0; color: var(--text-2); }
+.verdict { border-radius: var(--radius); padding: 14px 16px; margin: 20px 0 6px; font-weight: 600; font-size: 17px; }
+.verdict.ok { background: var(--good-bg); color: var(--good); }
+.verdict.warn { background: var(--warn-bg); color: var(--warn); }
+.verdict.bad { background: var(--bad-bg); color: var(--bad); }
+.source { color: var(--text-2); margin: 8px 0 14px; }
+.items { list-style: none; padding: 0; margin: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); overflow: hidden; }
+.items li { display: grid; grid-template-columns: 28px 1fr; gap: 4px 10px; padding: 12px 14px; border-top: 1px solid var(--line); }
+.items li:first-child { border-top: 0; }
+.mark { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 13px; font-weight: 700; margin-top: 1px; }
+.mark.ok { background: var(--good-bg); color: var(--good); }
+.mark.warn { background: var(--warn-bg); color: var(--warn); }
+.mark.bad { background: var(--bad-bg); color: var(--bad); }
+.mark.info { background: var(--info-bg); color: var(--info); }
+.items .t { font-weight: 600; }
+.items .d { grid-column: 2; color: var(--text-2); font-size: 14px; }
+.items .d p { margin: 2px 0; overflow-wrap: anywhere; }
+.items .act { grid-column: 2; margin-top: 6px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.reportbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.reportbar label { color: var(--text-2); }
+.reportbar .grow { flex: 1; }
+iframe.report { width: 100%; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; min-height: 400px; display: block; }
+details { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 14px; margin-top: 10px; }
+details summary { cursor: pointer; font-weight: 600; }
+details p { margin-top: 8px; color: var(--text-2); font-size: 14px; }
+footer { margin-top: 36px; color: var(--muted); font-size: 13px; }
+.hash { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; }
+[hidden] { display: none !important; }
+@media (max-width: 560px) { body { padding: 20px 16px 40px; } .drop { padding: 20px 14px; } }
+</style>
+</head>
+<body>
+<main>
+<h1>Scribe's Log verifier</h1>
+<p class="sub">From NEO {{VERSION}}. Checks a book's Scribe's Log, and a manuscript against it, right here in this browser.</p>
+
+<div id="drop" class="drop" tabindex="0" aria-describedby="drop-hint">
+  <div class="big" id="drop-big">Drop a Scribe's Log export (.zip) here, and the manuscript (.txt or .docx) if you have it</div>
+  <p class="muted small hint" id="drop-hint">A book's <span class="hash">scribes-log</span> folder or an archive works too. Nothing you drop leaves this computer: the page works offline.</p>
+  <div class="row">
+    <button type="button" class="primary" id="pick-files">Choose files…</button>
+    <button type="button" id="pick-folder">Choose a folder…</button>
+  </div>
+  <input type="file" id="files" multiple hidden accept=".zip,.txt,.text,.docx,.slog,.stamps,.json,.der">
+  <input type="file" id="folder" hidden webkitdirectory multiple>
+</div>
+
+<p id="busy" class="busy" hidden role="status" aria-live="polite"></p>
+<p id="note" class="muted small" hidden></p>
+
+<section id="results" hidden>
+  <div id="verdict" class="verdict" role="status"></div>
+  <p id="source" class="source"></p>
+  <ul id="items" class="items"></ul>
+
+  <h2>Report</h2>
+  <div class="reportbar">
+    <label for="privacy">Times</label>
+    <select id="privacy">
+      <option value="exact">Exact times</option>
+      <option value="dates" selected>Dates only</option>
+      <option value="weeks">Weeks only</option>
+    </select>
+    <span class="grow"></span>
+    <button type="button" id="save-report">Save report…</button>
+  </div>
+  <p class="muted small">The same report NEO makes (File → Scribe's Log → Verification Report…), made here from what you dropped. Dates only and weeks only leave the time of day out of the report; the export itself always has exact times.</p>
+  <iframe id="report" class="report" title="Scribe's Log report"></iframe>
+</section>
+
+<details>
+  <summary>What a Scribe's Log can and can't show</summary>
+  <!--CAN SHOW-->
+</details>
+<details>
+  <summary>How this checks</summary>
+  <p>Each entry of the log names the hash of the one before it, so changing, adding or taking out any entry breaks the chain from there on. The verifier walks every chain, replays every change from an empty book, traces each piece of text to where it first came from, and checks every outside timestamp: FreeTSA's receipts against FreeTSA's own certificate (carried inside this page, never taken from the log), and OpenTimestamps proofs up to a Bitcoin block. A manuscript is matched by its fingerprint: SHA-256 of its text, with whitespace evened out and the title page and headings NEO adds left out.</p>
+  <p>The format is set out in SLOG-FORMAT.md, in NEO's source, so anyone can write their own checker.</p>
+</details>
+<details>
+  <summary>About this copy of the verifier</summary>
+  <p>Every export carries its own copy of this page, from the NEO that made it. If you need to be sure the page itself hasn't been changed, check the export with a copy you got from NEO's source instead: a verifier from any later NEO checks older exports too.</p>
+  <p class="hash">Verifier {{VERSION}} · {{BUILT}}</p>
+</details>
+<footer>Scribe's Log verifier from NEO {{VERSION}}. Works offline. Only Check against Bitcoin goes online, and only when you press it, to fetch block headers from mempool.space (or blockstream.info).</footer>
+</main>
+<!--MODULES-->
+</body>
+</html>

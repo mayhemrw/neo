@@ -228,7 +228,7 @@ stamps/certs/<sha256>.der
 
 A checker compares every file with `files` (a file missing, changed or not listed is a problem), then checks the log as for a folder. The README and the verifier page are NEO's, not the log's, and aren't listed.
 
-**Matching a manuscript without the text.** NEO's own .txt and .docx exports add lines that aren't in the manuscript hash: the title page (title, subtitle, author, "by" and the author), headings, and a contents page. `added` holds the SHA-256 of each such line, normalized as the manuscript hash normalizes text (NFC, whitespace runs to one space, trimmed), as written and in capitals (the .txt sets headings in capitals). A checker drops the lines of a .txt or .docx whose normalized SHA-256 is in `added`, then compares the manuscript hash of what's left with `manuscript.hash`.
+**Matching a manuscript without the text.** NEO's own .txt and .docx exports add lines that aren't in the manuscript hash: the title page (title, subtitle, author, "by" and the author), headings, and a contents page. `added` holds the SHA-256 of each such line, normalized as the manuscript hash normalizes text (NFC, whitespace runs to one space, trimmed), as written and in capitals (the .txt sets headings in capitals). A checker drops the lines of a .txt or .docx whose normalized SHA-256 is in `added`, then compares the manuscript hash of what's left with `manuscript.hash`. A .docx's lines are the paragraphs of `word/document.xml`: the text of its runs (`w:t`), a tab as a tab, a line or page break (`w:br`, `w:cr`) starting a new line; deleted text under tracked changes (`w:delText`), field codes and a text box's `mc:Fallback` copy aren't text. A file that is the manuscript alone matches as it is. Limits: a paragraph that happens to read exactly like one of NEO's added lines is dropped with them (and the file then doesn't match), and a titled part's heading in the .txt is one line in capitals (`PART I: THE TITLE`) while the manuscript has the title as written, so a book with titled parts matches only through its .docx.
 
 ## Checking a log
 
@@ -284,3 +284,15 @@ NEO's File → Scribe's Log → Verification Report… (and the verifier, from a
 - **The timeline** counts the manuscript, by origin, as each device had it at each `close` and at its chain's last entry.
 - **Times** are shown exactly, as dates, or as weeks (from Monday), in the time zone of whoever makes the report, which the page names. The setting applies to the report only; the log and its exports keep exact times.
 - **Devices** are Device 1, 2… as above. The report shows the book's title, its own author name and chapter titles (from the words; without them, "Chapter 1"…), and never the text.
+
+## The verifier
+
+Every export carries `verifier.html`, one self-contained page built from the same checker NEO runs (`verifier/build.js` puts `slog-hash.js`, `slog-zip.js`, `stamp-tsa.js`, `stamp-ots.js`, `slog-verify.js`, `slog-report.js` and the page's own scripts inside it, with the trusted roots from `certs/`). It works from a double-click with the network off. What it does:
+
+- **Takes** an export (zipped or unzipped), a `scribes-log` folder (or a book folder holding one), an archive with its `log.json`, or a log's files dropped one by one, and any number of manuscripts (.txt or .docx).
+- **Checks** the export's files against its manifest, then the log as above: chains, commitments (with the words), replay, origins across devices, receipts against its own roots (never against certificates from the log), stamp entries, coverage and the clock check.
+- **Bitcoin:** OpenTimestamps proofs that reach a block are shown with the block's height and the merkle root it must hold, as block explorers show it (byte-reversed), so anyone can look them up by hand. Check against Bitcoin fetches each block's header from mempool.space, then blockstream.info, only when pressed; the page's Content-Security-Policy allows no other connection.
+- **Matches** each manuscript as under Exports. With the words (a full export), a manuscript that doesn't match is compared line by line with the manuscript the log replays to, and the first line that differs is shown.
+- **Reports:** the same page as File → Scribe's Log → Verification Report…, with the same three privacy settings, which can be saved.
+
+Results say which parts checked, which couldn't be checked and why (an authority the page doesn't carry, a block not looked up, the writing after the last receipt), and which failed. A verifier can only vouch for itself as far as its source: the copy inside an export came with the export, so a checker who needs certainty uses a copy built from NEO's source (`node scripts/build-verifier.js`).
