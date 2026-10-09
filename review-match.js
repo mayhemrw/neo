@@ -95,6 +95,20 @@
     const paraAt = new Map();
     let before = '';
     let after = '';
+    // Word marks a paragraph's own mark (after it); NEO's text has a mark
+    // between paragraphs. They differ only at the section's end: paragraphs
+    // added (or taken out) last have no mark after them here, so the mark
+    // before them is the one that came (or went) with them.
+    const ps = section.paras;
+    const whole = (p, k) => p.segs.length > 0 && p.segs.every((x) => x[k] >= 0) && p.mark[k] >= 0;
+    let tail = ps.length;
+    let tailKind = '';
+    for (const k of ['ins', 'del']) {
+      let j = ps.length;
+      while (j > 1 && whole(ps[j - 1], k)) j--;
+      if (j < tail) { tail = j; tailKind = k; }
+    }
+    const markAfter = (i) => (tailKind && i >= tail - 1 && i + 1 < ps.length ? ps[i + 1].mark : ps[i].mark);
     section.paras.forEach((p, i) => {
       paraAt.set(p.index, i);
       startsB.push(before.length);
@@ -105,9 +119,10 @@
         if (s.ins < 0) before += s.text;
       }
       if (i < section.paras.length - 1) {
-        pieces.push({ text: PARA, ins: p.mark.ins, del: p.mark.del, fmt: -1, mark: true, o: before.length, a: after.length, para: p.index });
-        if (p.mark.del < 0) after += PARA;
-        if (p.mark.ins < 0) before += PARA;
+        const mk = markAfter(i);
+        pieces.push({ text: PARA, ins: mk.ins, del: mk.del, fmt: -1, mark: true, o: before.length, a: after.length, para: p.index });
+        if (mk.del < 0) after += PARA;
+        if (mk.ins < 0) before += PARA;
       }
     });
     return { pieces, before, after, startsB, startsA, paraAt };
@@ -212,15 +227,36 @@
       run = null;
     };
     const moves = new Map();
+    let lastMove = null; // { m, side }: the move the piece before this one was part of
     for (const pc of pieces) {
       const c = pc.ins >= 0 ? changes[pc.ins] : pc.del >= 0 ? changes[pc.del] : null;
-      if (pc.ins >= 0 && pc.del >= 0) { cancelled++; continue; }
+      if (pc.ins >= 0 && pc.del >= 0) { cancelled++; lastMove = null; continue; }
       if (c && (c.type === 'moveFrom' || c.type === 'moveTo') && c.move) {
         flush();
         const m = moves.get(c.move) || { from: '', fromAt: -1, to: '', toAt: -1, author: c.author, date: c.date };
         if (c.type === 'moveFrom') { if (m.fromAt < 0) m.fromAt = pc.o; m.from += pc.text; } else { if (m.toAt < 0) m.toAt = pc.o; m.to += pc.text; }
         moves.set(c.move, m);
+        lastMove = { m, side: c.type };
         continue;
+      }
+      // a moved paragraph's own mark, right after its words: part of the
+      // move (the paragraph goes, or comes, whole), never a change of its own
+      if (c && c.moved && lastMove && ((c.type === 'markDel' && lastMove.side === 'moveFrom') || (c.type === 'markIns' && lastMove.side === 'moveTo'))) {
+        if (lastMove.side === 'moveFrom') lastMove.m.from += pc.text; else lastMove.m.to += pc.text;
+        continue;
+      }
+      lastMove = null;
+      // …or right before them (a paragraph moved to or from a chapter's end)
+      if (c && c.moved) {
+        const next = pieces[pieces.indexOf(pc) + 1];
+        const nc = next ? (next.ins >= 0 ? changes[next.ins] : next.del >= 0 ? changes[next.del] : null) : null;
+        if (nc && nc.move && ((c.type === 'markDel' && nc.type === 'moveFrom') || (c.type === 'markIns' && nc.type === 'moveTo'))) {
+          flush();
+          const m = moves.get(nc.move) || { from: '', fromAt: -1, to: '', toAt: -1, author: nc.author, date: nc.date };
+          if (nc.type === 'moveFrom') { if (m.fromAt < 0) m.fromAt = pc.o; m.from += pc.text; } else { if (m.toAt < 0) m.toAt = pc.o; m.to += pc.text; }
+          moves.set(nc.move, m);
+          continue;
+        }
       }
       if (!c) {
         // unchanged text ends a run; a formatting change on it is its own
@@ -496,6 +532,9 @@
           anchor = anchorIn(s.stream.before, s.o, end - s.o);
         }
         th = { chapter: s ? s.chId : null, anchor, resolved: !!root.done, fileResolved: !!root.done, comments: [], paraId: root.paraId || '' };
+        // (on the title page, before the first chapter: said so, not "not placed")
+        const at = root.start || root.ref;
+        if (!s && at && where.size && at.p < Math.min(...where.keys())) th.front = true;
         threadOf.set(root.id, th);
         threads.push(th);
         add(th, root);

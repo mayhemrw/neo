@@ -196,6 +196,14 @@ describe('comments into threads', () => {
     assert.deepEqual([onTitle.chapter, onTitle.anchor, onTitle.resolved], ['c1', null, false]);
     assert.deepEqual(r.counts.Dana.comments, 3);
   });
+
+  test('a comment on the title page says so: on no chapter, marked front', () => {
+    const comments = `<w:comments ${W}><w:comment w:id="5" w:author="Dana" w:date="2026-10-09T10:00:00Z"><w:p>${run('Better title?')}</w:p></w:comment></w:comments>`;
+    const body = para('<w:commentRangeStart w:id="5"/>' + run('A Tale') + '<w:commentRangeEnd w:id="5"/>', '<w:pStyle w:val="Title"/>') + para(run('C. Dickens')) + heading('Chapter 1', 1) + para('') + ONE.map((x) => para(run(x))).join('');
+    const m = RD.parse({ 'word/document.xml': `<w:document ${W}><w:body>${body}</w:body></w:document>`, 'word/comments.xml': comments });
+    const r = M.match(m, sent([{ id: 'c1', title: 'Chapter 1', paras: ONE }]));
+    assert.deepEqual(r.threads.map((th) => [th.chapter, !!th.front, th.comments[0].text]), [[null, true, 'Better title?']]);
+  });
 });
 
 describe('anchors found again in today’s text', () => {
@@ -389,5 +397,60 @@ describe('review.json from two computers at once (mergeReview)', () => {
     const nums = (list) => Object.fromEntries(list.map((r) => [r.name, r.num]));
     assert.deepEqual(nums(onA), { Dana: 1, Lee: 2 });
     assert.deepEqual(nums(onB), nums(onA));
+  });
+});
+
+describe('a paragraph moved in Word', () => {
+  test('one move, the paragraph whole: its own marks go with it, never a ¶ of their own', () => {
+    const A = (id) => `w:id="${id}" w:author="Dana" w:date="2026-10-09T10:00:00Z"`;
+    const moved = 'Mr. Williams shakes his head.';
+    const to = { xml: `<w:p><w:pPr><w:rPr><w:moveTo ${A(1)}/></w:rPr></w:pPr><w:moveToRangeStart ${A(2)} w:name="move1"/><w:moveTo ${A(3)}>${run(moved)}</w:moveTo><w:moveToRangeEnd w:id="2"/></w:p>` };
+    const from = { xml: `<w:p><w:pPr><w:rPr><w:moveFrom ${A(4)}/></w:rPr></w:pPr><w:moveFromRangeStart ${A(5)} w:name="move1"/><w:moveFrom ${A(6)}><w:r><w:delText xml:space="preserve">${moved}</w:delText></w:r></w:moveFrom><w:moveFromRangeEnd w:id="5"/></w:p>` };
+    const paras = ['“I wish I knew.”', 'Sam just nods.', moved, 'The last line.'];
+    const m = file([{ title: 'Chapter 1', paras: [paras[0], to, paras[1], from, paras[3]] }]);
+    const r = M.match(m, sent([{ id: 'c1', title: 'Chapter 1', paras }]), { fallback: 'Dana' });
+    assert.deepEqual(r.suggestions.map((s) => [s.kind, s.del, s.ins, !!s.untracked]), [['move', moved + P, moved + P, false]]);
+    const s = r.suggestions[0];
+    const text = paras.join(P);
+    const f = M.findAnchor(text, s.anchor);
+    const t = M.findAnchor(text, s.to);
+    assert.ok(f && t);
+    // applied: taken out, then put in where it went
+    const out = text.slice(0, f.o) + text.slice(f.o + f.len);
+    const at = t.o < f.o ? t.o : t.o - f.len;
+    assert.equal(out.slice(0, at) + s.ins + out.slice(at), [paras[0], moved, paras[1], paras[3]].join(P));
+  });
+
+  const A = (id) => `w:id="${id}" w:author="Dana" w:date="2026-10-09T10:00:00Z"`;
+  const toP = (t) => ({ xml: `<w:p><w:pPr><w:rPr><w:moveTo ${A(1)}/></w:rPr></w:pPr><w:moveToRangeStart ${A(2)} w:name="move1"/><w:moveTo ${A(3)}>${run(t)}</w:moveTo><w:moveToRangeEnd w:id="2"/></w:p>` });
+  const fromP = (t) => ({ xml: `<w:p><w:pPr><w:rPr><w:moveFrom ${A(4)}/></w:rPr></w:pPr><w:moveFromRangeStart ${A(5)} w:name="move1"/><w:moveFrom ${A(6)}><w:r><w:delText xml:space="preserve">${t}</w:delText></w:r></w:moveFrom><w:moveFromRangeEnd w:id="5"/></w:p>` });
+  const apply = (text, s) => {
+    const f = M.findAnchor(text, s.anchor);
+    const t = M.findAnchor(text, s.to);
+    assert.ok(f && t, 'both ends found');
+    const out = text.slice(0, f.o) + text.slice(f.o + f.len);
+    const at = t.o < f.o ? t.o : t.o - f.len;
+    return out.slice(0, at) + s.ins + out.slice(at);
+  };
+  test('to the end of a chapter, and from it: still a paragraph of its own, nothing run together', () => {
+    const paras = ['One.', 'Two.', 'Three.'];
+    let m = file([{ title: 'Chapter 1', paras: [paras[0], fromP('Two.'), paras[2], toP('Two.')] }]);
+    let r = M.match(m, sent([{ id: 'c1', title: 'Chapter 1', paras }]), { fallback: 'Dana' });
+    assert.deepEqual(r.suggestions.map((s) => s.kind), ['move']);
+    assert.equal(apply(paras.join(P), r.suggestions[0]), ['One.', 'Three.', 'Two.'].join(P));
+    m = file([{ title: 'Chapter 1', paras: [toP('Three.'), paras[0], paras[1], fromP('Three.')] }]);
+    r = M.match(m, sent([{ id: 'c1', title: 'Chapter 1', paras }]), { fallback: 'Dana' });
+    assert.deepEqual(r.suggestions.map((s) => s.kind), ['move']);
+    assert.equal(apply(paras.join(P), r.suggestions[0]), ['Three.', 'One.', 'Two.'].join(P));
+  });
+  test('a paragraph added at the end of a chapter is its own paragraph, and nothing else changed', () => {
+    const paras = ['One.', 'Two.'];
+    const added = { xml: `<w:p><w:pPr><w:rPr><w:ins ${A(7)}/></w:rPr></w:pPr>${ins('Three.', 8)}</w:p>` };
+    const m = file([{ title: 'Chapter 1', paras: [...paras, added] }, { title: 'Chapter 2', paras: ['Next.'] }]);
+    const r = M.match(m, sent([{ id: 'c1', title: 'Chapter 1', paras }, { id: 'c2', title: 'Chapter 2', paras: ['Next.'] }]), { fallback: 'Dana' });
+    assert.deepEqual(r.suggestions.map((s) => [s.kind, s.ins, !!s.untracked]), [['insert', P + 'Three.', false]]);
+    const text = paras.join(P);
+    const f = M.findAnchor(text, r.suggestions[0].anchor);
+    assert.equal(text.slice(0, f.o) + r.suggestions[0].ins + text.slice(f.o), ['One.', 'Two.', 'Three.'].join(P));
   });
 });

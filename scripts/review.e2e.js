@@ -935,6 +935,48 @@ test('the log: each editor’s words numbered, the writer’s own typed; nothing
   assert.equal(errors, '');
 });
 
+test('a paragraph moved in Word (here to the chapter’s end) is one change, and accepting it moves the paragraph whole', async () => {
+  const c2 = await ch(1);
+  const parasNow = () => js(`ReviewMatch.htmlParas(chapterHTML[${JSON.stringify(c2)}])`);
+  const before = await parasNow();
+  const X = 'The night was cold.';
+  const at = before.indexOf(X);
+  assert.ok(at >= 0 && at < before.length - 1, JSON.stringify(before));
+  const last = before[before.length - 1].slice(-20);
+  const file = path.join(tmp, 'moved.docx');
+  await sendTo('Dana Editor', file);
+  const out = await edited(file, path.join(tmp, 'moved-back.docx'), (doc) => {
+    const span = (needle) => {
+      const i = doc.indexOf(needle);
+      assert.ok(i >= 0, needle);
+      return [doc.lastIndexOf('<w:p ', i), doc.indexOf('</w:p>', i) + 6];
+    };
+    const [ws, we] = span(X);
+    const p = doc.slice(ws, we);
+    const open = p.slice(0, p.indexOf('>') + 1).replace(/ w14:paraId="[^"]*"/, '');
+    let inner = p.slice(p.indexOf('>') + 1, -6);
+    let ppr = '';
+    const pe = inner.indexOf('</w:pPr>');
+    if (inner.startsWith('<w:pPr') && pe > 0) { ppr = inner.slice(0, pe + 8); inner = inner.slice(pe + 8); }
+    const A = (id) => `w:id="${id}" w:author="Dana Editor" w:date="2026-10-10T10:00:00Z"`;
+    const mark = (kind, id) => (ppr ? ppr.replace('</w:pPr>', `<w:rPr><w:${kind} ${A(id)}/></w:rPr></w:pPr>`) : `<w:pPr><w:rPr><w:${kind} ${A(id)}/></w:rPr></w:pPr>`);
+    const fromP = open + mark('moveFrom', 7001) + `<w:moveFromRangeStart ${A(7002)} w:name="move9"/><w:moveFrom ${A(7003)}>` + inner.replace(/<w:t(\s|>)/g, '<w:delText$1').replace(/<\/w:t>/g, '</w:delText>') + '</w:moveFrom><w:moveFromRangeEnd w:id="7002"/></w:p>';
+    const toP = open + mark('moveTo', 7004) + `<w:moveToRangeStart ${A(7005)} w:name="move9"/><w:moveTo ${A(7006)}>` + inner + '</w:moveTo><w:moveToRangeEnd w:id="7005"/></w:p>';
+    const d = doc.slice(0, ws) + fromP + doc.slice(we);
+    const i = d.indexOf(last);
+    const e = d.indexOf('</w:p>', i) + 6;
+    return d.slice(0, e) + toP + d.slice(e);
+  });
+  await importIt(out);
+  const imp = (await reviewJson()).imports.slice(-1)[0].id;
+  const mine = await sug((x) => x.import === imp && x.status === 'open');
+  assert.deepEqual(mine.map((x) => [x.kind, x.del.replace(/\u2029/g, '¶'), x.ins.replace(/\u2029/g, '¶')]), [['move', X + '¶', '¶' + X]], 'one move, no ¶ of its own, nothing untracked');
+  await js(`reviewDecideOne(${JSON.stringify(mine[0].id)}, 'accept')`);
+  await until(async () => (await sug((x) => x.id === mine[0].id))[0].status === 'accepted');
+  const want = before.filter((x) => x !== X).concat(X);
+  assert.deepEqual(await parasNow(), want);
+});
+
 test('review.json written by another computer meanwhile: taken in, and never written over', async () => {
   const dir = await bookDirOf();
   const file = path.join(dir, 'review.json');
@@ -966,6 +1008,20 @@ test('review.json written by another computer meanwhile: taken in, and never wri
   fs.writeFileSync(file, JSON.stringify(later));
   await js(`reviewRefresh()`);
   assert.equal(await js(`rvs.data.editors.includes('From the laptop')`), true);
+});
+
+test('on the Review tab the left edge doesn’t slide the Chapters pane over the list', async () => {
+  const hover = (tab) => js(`(() => {
+    goToTab(${JSON.stringify(tab)});
+    const pane = $('#nav-pane');
+    pane.classList.remove('open');
+    $('#nav-hotzone').dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+    const open = pane.classList.contains('open');
+    pane.classList.remove('open');
+    return open;
+  })()`);
+  assert.equal(await hover('review'), false);
+  assert.equal(await hover('manuscript'), true, 'the page still has it');
 });
 
 test('Import Review… is in the palette, and does nothing on the shelf', async () => {

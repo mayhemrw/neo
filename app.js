@@ -7490,6 +7490,9 @@ function wireHoverPane(hotzone, pane, isPinnable) {
     (pane.id === 'nav-pane' && (chapterDragActive || !!document.querySelector('.pop-menu')));
   hotzone.addEventListener('mouseenter', (e) => {
     if (e.buttons) return; // dragging something — stand down
+    // the Review tab's list of changes sits by the left edge: reaching for
+    // Accept mustn't slide the Chapters pane over it (it has its own list)
+    if (pane.id === 'nav-pane' && $('#editor-view').classList.contains('review-on')) return;
     pane.classList.add('open');
   });
   hotzone.addEventListener('mouseleave', (e) => {
@@ -17524,7 +17527,11 @@ function reviewMarginHtml(threads) {
     if (th.resolved) flags.push(`<span class="rv-flag rv-done">${escHtml(t('Resolved'))}</span>`);
     if (why === 'gone') flags.push(`<span class="rv-flag rv-stale">${escHtml(t('passage changed'))}</span>`);
     if (why === 'missing') flags.push(`<span class="rv-flag rv-stale">${escHtml(t('chapter gone'))}</span>`);
-    if (why === 'unplaced') flags.push(`<span class="rv-flag">${escHtml(t('not placed'))}</span>`);
+    if (why === 'unplaced') {
+      flags.push(th.front
+        ? `<span class="rv-flag" title="${escAttr(t('On the title page, which isn’t a chapter in NEO. Kept here; it stays out of the next file for an editor.'))}">${escHtml(t('title page'))}</span>`
+        : `<span class="rv-flag" title="${escAttr(t('On a part of the file NEO couldn’t match to a chapter. Kept here; it stays out of the next file for an editor.'))}">${escHtml(t('not placed'))}</span>`);
+    }
     const quote = th.anchor && th.anchor.exact ? `<div class="rv-quote">${escHtml(reviewSnip(th.anchor.exact, 90))}</div>` : '';
     const first = th.comments[0];
     let body;

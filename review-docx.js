@@ -454,8 +454,10 @@
           if (inRpr && markRpr) {
             // the paragraph mark itself was inserted or deleted
             if (P) {
-              if (name === 'w:ins' || name === 'w:moveTo') P.mark.ins = addChange('markIns', a, P.index);
-              else P.mark.del = addChange('markDel', a, P.index);
+              // (a moved paragraph's own mark: `moved`, so it goes with the move)
+              const moved = name === 'w:moveTo' || name === 'w:moveFrom' ? { moved: true } : undefined;
+              if (name === 'w:ins' || name === 'w:moveTo') P.mark.ins = addChange('markIns', a, P.index, moved);
+              else P.mark.del = addChange('markDel', a, P.index, moved);
             }
           } else if (inRpr && R) {
             // a run marked inserted or deleted in its own properties
