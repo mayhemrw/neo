@@ -22,7 +22,7 @@ What it does well is make a fake expensive: because of the timestamps, faking a 
 
 ### Does the log say anything about my computer?
 
-No. Computers are only numbered, in the order they first wrote to the book ("Device 1"); nothing about the machines themselves is recorded. The report shows the book's title, the author name on it and its chapter titles, and none of the writing.
+Next to nothing. Computers are only numbered, in the order they first wrote to the book ("Device 1"); nothing about the machines themselves is recorded beyond which version of NEO wrote the log. The report shows the book's title, the author name on it, its chapter titles, the NEO version and the time zone its times are shown in, and none of the writing.
 
 ### Who can see my log?
 
@@ -40,8 +40,8 @@ No. Without a connection NEO keeps writing the log and saves the timestamps it o
 
 Whatever you choose to send:
 
-- **The Verification Report** (**File → Scribe's Log → Verification Report…**): a page (and PDF, if you like) summing up where the text came from, how it was revised, when you wrote and the outside timestamps. No writing in it. You pick exact times, dates only or weeks only.
-- **An export** (**File → Scribe's Log → Export for Verification…**): the log itself, so they can check it. **Without the text** carries no words at all; **With the text** carries every word, deleted passages too. Either one comes with its own verifier page, which runs in any browser, offline, without NEO.
+- **The Verification Report** (**File → Scribe's Log → Verification Report…**): a page (and PDF, if you like) summing up where the text came from, how it was revised, when you wrote and the outside timestamps. No writing in it. You pick exact times, dates only or weeks only, and whether to name your editors.
+- **An export** (**File → Scribe's Log → Export for Verification…**): the log itself, so they can check it, always with exact times. **Without the text** carries no words at all; **With the text** carries every word, deleted passages too. Either one comes with its own verifier page, which runs in any browser, offline, without NEO.
 
 ### What's in an export made "With the text"?
 
@@ -61,7 +61,7 @@ Nothing is recorded while it's off. What it recorded before stays in the book's 
 
 ### I pasted from my old draft. Will that look bad?
 
-It shows as "Pasted from outside", and stays a paste even after you revise it (the report says "then revised"; what you typed into it counts as typed). Importing a draft with **File → Import Manuscripts…** shows as "Imported". The report doesn't score or judge any of this; it only says where the words came from.
+It shows as "Pasted from outside", and stays a paste even after you revise it (the report says "then revised"; what you typed into it counts as typed). A draft brought in with **File → Import Manuscripts…** (which makes it a new book) shows as "Imported". The report doesn't score or judge any of this; it only says where the words came from.
 
 ### Does the log slow NEO down or fill my disk?
 
@@ -83,11 +83,11 @@ Named versions live in the book's `versions` folder, a few small files, along wi
 
 ### Can I undo a restore?
 
-Yes. Ctrl+Z (⌘Z) undoes it right away, and NEO names a version of the book before every whole-chapter restore, so you can go back even after a restart.
+Yes. Ctrl+Z or ⌘Z undoes it right away, and NEO names a version of the book before every whole-chapter restore, so you can go back even after a restart.
 
 ### I deleted a chapter. Is it gone?
 
-No. Open **View → Chapter History…**, pick it from the chapter list (deleted chapters come after the book's own), and click **Restore as New Chapter**. It goes back in its old place with its history.
+No. Open **View → Chapter History…**, pick it from the chapter list (deleted chapters come after the book's own), and click **Restore as New Chapter**. It goes back in its old place (or at the end, if the chapter it followed is gone) with its history.
 
 ## Editors and Word
 
@@ -105,7 +105,7 @@ No. They get an ordinary Word file (.docx) with Track Changes already on, and th
 
 ### What if my editor forgot to turn on Track Changes?
 
-NEO compares their file with the version you sent and finds the changes anyway. They show in the Review tab marked "untracked".
+NEO compares their file with the version you sent and finds the changes anyway. They show in the Review tab marked "made without Track Changes".
 
 ### What if I kept writing after I sent the book?
 
@@ -117,7 +117,7 @@ That's fine. NEO knows which version the editor started from and places each cha
 
 ### Will my editor see my replies?
 
-Yes, on the next **File → Export → Word for an Editor…** Your replies go into the file as real Word replies, signed with the book's author name, and threads you resolved are marked done. Threads you resolved and deleted stay home.
+Yes, on the next **File → Export → Word for an Editor…** Your replies go into the file as real Word replies, signed with the book's author name (or "Author" if it has none), and threads you resolved are marked done. Threads you resolved and deleted stay home.
 
 ### Does any of this show on my writing page?
 
@@ -127,7 +127,7 @@ No. Tracked changes and comments only ever show in the Review tab. The writing p
 
 ### How do I find a command I can't remember?
 
-Press Ctrl+K (⌘K) and type part of its name. Every menu command is there, with its shortcut.
+Press Ctrl+K or ⌘K and type part of its name. Every menu command is there, with its shortcut.
 
 ### Do these features work in NEO Pocket?
 

@@ -147,7 +147,7 @@ The FIND & REPLACE section of `app.js` (⌘F, `#searchbar`, at the top of the wi
 
 Help → How-To Guide… and Help → FAQ… (`showGuide` in `app.js`, after the shortcuts sheet) show `docs/HOW-TO.md` and `docs/FAQ.md` in a window like the shortcuts sheet: the two as tabs, their `##` headings (and the FAQ's questions) down the side, links between them followed in place, Esc puts the caret back. `help:guide` in `main.js` reads them from NEO's own folder by name only (`GUIDES` in `guide.js`). English only for now (TRANSLATING.md); Pocket's bridge has no `guide`.
 
-- A feature that changes a menu name, or a new feature a writer needs steps for, updates the guides in the same change. Menu names go in bold as `**File → Export → Manuscript Format…**` (no period after a closing …), shortcuts as "Ctrl+K (⌘K)". No em dashes.
+- A feature that changes a menu name, or a new feature a writer needs steps for, updates the guides in the same change. Menu names go in bold as `**File → Export → Manuscript Format…**` (no period after a closing …), shortcuts as "Ctrl+K or ⌘K". No em dashes.
 - `scripts/guide.test.js` checks the rendering, the links and every menu name against `main.js`; `npm run test:guide` (`scripts/guide.e2e.js`, Electron) checks every menu name against the real menu at its place, opens both guides from Help and finds them in the palette.
 
 ## Manuscript format
