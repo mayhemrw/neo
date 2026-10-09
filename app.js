@@ -16353,7 +16353,11 @@ async function importReview(filePath = null) {
     } catch (err) { window.neo.logError('review copy: ' + (err && err.stack || err)); }
     // reviewers keep their color from round to round
     for (const n of names) {
-      if (!review.reviewers.some((r) => r.name === n)) review.reviewers.push({ name: n, num: ReviewMatch.nextNum(review.reviewers), color: REVIEW_COLORS[review.reviewers.length % REVIEW_COLORS.length] });
+      if (!review.reviewers.some((r) => r.name === n)) {
+        const used = new Set(review.reviewers.map((r) => r.color));
+        const color = REVIEW_COLORS.find((c) => !used.has(c)) || REVIEW_COLORS[review.reviewers.length % REVIEW_COLORS.length];
+        review.reviewers.push({ name: n, num: ReviewMatch.nextNum(review.reviewers), color });
+      }
     }
     for (const s of found.suggestions) {
       review.suggestions.push(Object.assign({ id: reviewNewId('s'), round: round ? round.id : null, import: importId, status: 'open' }, s));
@@ -16401,7 +16405,7 @@ async function importReview(filePath = null) {
 /* Nothing here touches the writing page's look: the tab shows only while */
 /* something waits.                                                       */
 
-const rvs = { bookId: null, data: null, cur: null, curT: null, busy: false, unfold: new Set(), showDeleted: false, drafts: new Map() };
+const rvs = { bookId: null, data: null, cur: null, curT: null, busy: false, unfold: new Set(), showDeleted: false, drafts: new Map(), hide: new Set(), own: null, ownDraft: '', colors: null };
 
 const reviewOpen = (d) => (d ? d.suggestions.filter((s) => s.status === 'open') : []);
 const reviewOpenThreads = (d) => (d ? d.threads.filter((th) => !th.resolved && !th.deleted) : []);
@@ -16426,6 +16430,9 @@ async function reviewOpened(bookId) {
   rvs.cur = null;
   rvs.curT = null;
   rvs.unfold.clear();
+  rvs.hide.clear();
+  rvs.own = null;
+  rvs.colors = null;
   reviewTabShow();
   if (!window.neo.review || !window.ReviewMatch) return;
   let d = null;
@@ -16680,13 +16687,170 @@ function reviewChapterText(chId) {
 
 /* -- deciding -- */
 
-// list: suggestions; how: 'accept' or 'reject'; what: words for a version's
-// name when several are accepted at once ("all changes"). Returns
+// Where a point of a chapter's text (in its offsets before `ops` were
+// applied) is after them, or -1 if an op took it. `k` is the suggestion's
+// place in review.json: of two insertions at the same point, the one later
+// in the editor's file goes after (a file passed from one editor to the
+// next has them so).
+function reviewMapPoint(x, ops, k) {
+  let d = 0;
+  for (const op of ops) {
+    if (op.style) continue;
+    const delta = (op.ins || '').length - op.len;
+    if (op.len) {
+      if (op.o + op.len <= x) d += delta;
+      else if (op.o < x) return -1;
+    } else if (op.o < x || (op.o === x && op.k < k)) d += delta;
+  }
+  return x + d;
+}
+// An anchor of another suggestion carried over the ops just applied (so a
+// change next to an accepted one is still found: a file passed from one
+// editor to the next puts their changes side by side); null if its words
+// were touched
+function reviewCarry(anchor, oldText, newText, ops, k) {
+  if (!anchor) return null;
+  const f = ReviewMatch.findAnchor(oldText, anchor);
+  if (!f) return null;
+  const a = reviewMapPoint(f.o, ops, k);
+  const b = f.len ? reviewMapPoint(f.o + f.len, ops, -Infinity) : a;
+  if (a < 0 || b < 0 || b - a !== f.len) return null;
+  const next = ReviewMatch.anchorIn(newText, a, f.len);
+  return next.exact === anchor.exact ? next : null;
+}
+
+// Accepting `items` (open suggestions) on the page: reviewer by reviewer
+// (the log names each), chapter by chapter, from the end of each chapter
+// back, so earlier places stay put. Other open suggestions in a chapter
+// that changed have their anchors carried over the change (what they were
+// goes into `before`, for ⌘Z). Returns { done, left }.
+function reviewApplyAccept(items, now, before) {
+  const d = rvs.data;
+  const kOf = new Map(d.suggestions.map((s, i) => [s, i]));
+  const deciding = new Set(items);
+  let done = 0;
+  let left = 0;
+  const byWho = new Map();
+  for (const s of items) {
+    if (!byWho.has(s.reviewer)) byWho.set(s.reviewer, []);
+    byWho.get(s.reviewer).push(s);
+  }
+  for (const [who, mine] of byWho) {
+    slogWith({ src: 'editor', by: reviewLogBy(who), cause: 'review' }, () => {
+      const chapters = new Map();
+      for (const s of mine) {
+        const k = s.chapter || '';
+        if (!chapters.has(k)) chapters.set(k, []);
+        chapters.get(k).push(s);
+      }
+      let titles = false;
+      for (const [chId, ss] of chapters) {
+        const body = chId ? document.querySelector(`.chapter[data-id="${chId}"] .chapter-body`) : null;
+        let text = body ? reviewParasText(reviewDomParas(body)) : null;
+        // (what the page shows must be what's saved, or places can't be trusted)
+        if (body && text !== ReviewMatch.htmlText(captureBody(body))) text = null;
+        const taken = [];
+        const ops = [];
+        for (const s of ss) {
+          const pl = reviewPlace(s, text);
+          if (pl.title) {
+            book.chapterTitles = book.chapterTitles || {};
+            book.chapterTitles[chId] = String(s.ins || '').trim();
+            titles = true;
+            s.status = 'accepted';
+            s.decided = now;
+            done++;
+            continue;
+          }
+          if (pl.why || !body) { left++; continue; }
+          // two changes to the same words: the first is taken, the other waits
+          const clash = pl.ops.some((x) => taken.some((y) => x.o < y.o + y.len && y.o < x.o + x.len));
+          if (clash) { left++; continue; }
+          taken.push(...pl.ops);
+          for (const op of pl.ops) op.k = kOf.get(s);
+          ops.push(...pl.ops);
+          s.status = 'accepted';
+          s.decided = now;
+          done++;
+        }
+        if (!ops.length || !body) continue;
+        // from the end back; at one point, what's taken out first, then
+        // what goes in, the editor's later words first (so they end up after)
+        ops.sort((x, y) => y.o - x.o || (y.len ? 1 : 0) - (x.len ? 1 : 0) || y.k - x.k);
+        for (const op of ops) {
+          if (op.style) {
+            for (const k of ['b', 'i']) {
+              if (op.style.now[k] !== undefined && !!op.style.now[k] !== !!op.style.was[k]) reviewStyle(body, op.o, op.len, k, !!op.style.now[k]);
+            }
+          } else reviewSplice(body, op.o, op.len, op.ins);
+        }
+        syncChapter(body, chId);
+        // the others still waiting in this chapter: found where they are now
+        const now2 = reviewParasText(reviewDomParas(body));
+        for (const o of d.suggestions) {
+          if (o.status !== 'open' || deciding.has(o) || o.chapter !== chId || o.kind === 'title') continue;
+          const k = kOf.get(o);
+          const a = o.anchor && o.anchor.exact !== undefined ? reviewCarry(o.anchor, text, now2, ops, k) : null;
+          const to = o.kind === 'move' && o.to ? reviewCarry(o.to, text, now2, ops, k) : null;
+          if (!a && !to) continue;
+          before.push({ id: o.id, status: o.status, anchor: o.anchor, to: o.to });
+          if (a) o.anchor = a;
+          if (to) o.to = to;
+        }
+      }
+      if (titles) {
+        for (const chId of book.chapterOrder) {
+          const span = document.querySelector(`.chapter[data-id="${chId}"] .ch-title`);
+          if (!span || !book.chapterTitles || typeof book.chapterTitles[chId] !== 'string') continue;
+          if (span.textContent.trim() !== book.chapterTitles[chId]) {
+            span.textContent = book.chapterTitles[chId];
+            span.closest('.chapter-head').classList.toggle('has-title', !!book.chapterTitles[chId]);
+          }
+        }
+        saveMeta();
+        renderNav();
+      }
+    });
+  }
+  return { done, left };
+}
+
+// The writer's own words for a passage two editors changed (M6): typed in
+// the Review tab, so logged as typed. own: { chId, o, len, text } in the
+// chapter's text as it is now, or { chId, title } for its title.
+function reviewApplyOwn(own) {
+  return slogWith({ src: 'typed', cause: 'review' }, () => {
+    if (own.title !== undefined) {
+      book.chapterTitles = book.chapterTitles || {};
+      book.chapterTitles[own.chId] = String(own.title).trim();
+      const span = document.querySelector(`.chapter[data-id="${own.chId}"] .ch-title`);
+      if (span) {
+        span.textContent = book.chapterTitles[own.chId];
+        span.closest('.chapter-head').classList.toggle('has-title', !!book.chapterTitles[own.chId]);
+      }
+      saveMeta();
+      renderNav();
+      return true;
+    }
+    const body = document.querySelector(`.chapter[data-id="${own.chId}"] .chapter-body`);
+    if (!body) return false;
+    reviewSplice(body, own.o, own.len, own.text);
+    syncChapter(body, own.chId);
+    return true;
+  });
+}
+
+// list: suggestions; how: 'accept', 'reject' or 'own' (the writer's own
+// words in place of them all: opts.own); what: words for a version's name
+// when several are accepted at once ("all changes"). opts.reject: others
+// set aside in the same step (picking one editor's wording); opts.version:
+// whether to name a version first (several accepted: yes). Returns
 // { done, left } (left: those whose passage couldn't be found).
-async function reviewDecide(list, how, what = '') {
+async function reviewDecide(list, how, what = '', opts = {}) {
   if (!reviewMine() || rvs.busy) return { done: 0, left: 0 };
   const items = list.filter((s) => s.status === 'open');
   if (!items.length) return { done: 0, left: 0 };
+  const also = (opts.reject || []).filter((s) => s.status === 'open' && !items.includes(s));
   rvs.busy = true;
   const bookId = book.id;
   const d = rvs.data;
@@ -16695,7 +16859,8 @@ async function reviewDecide(list, how, what = '') {
   try {
     // several taken at once: a version of the book first, like Replace All
     let version = null;
-    if (how === 'accept' && items.length > 1) {
+    const wantVersion = opts.version !== undefined ? opts.version : how === 'accept' && items.length > 1;
+    if (wantVersion) {
       await slogSaveAll();
       if (!book || book.id !== bookId) return { done: 0, left: 0 };
       const h = window.neo.history;
@@ -16713,94 +16878,31 @@ async function reviewDecide(list, how, what = '') {
     }
     snapshotStructure('review');
     const snap = undoStack[undoStack.length - 1];
-    if (snap) snap.review = { bookId, before: items.map((s) => ({ id: s.id, status: s.status })) };
+    const before = items.concat(also).map((s) => ({ id: s.id, status: s.status }));
+    if (snap) snap.review = { bookId, before };
     const now = Date.now();
-    if (how === 'reject') {
-      for (const s of items) { s.status = 'rejected'; s.decided = now; done++; }
+    if (how === 'reject' || how === 'own') {
+      if (how === 'own' && !reviewApplyOwn(opts.own)) left = items.length;
+      else for (const s of items) { s.status = 'rejected'; s.decided = now; done++; }
     } else {
-      // reviewer by reviewer (the log names each), chapter by chapter, from
-      // the end of each chapter back, so earlier places stay put
-      const byWho = new Map();
-      for (const s of items) {
-        if (!byWho.has(s.reviewer)) byWho.set(s.reviewer, []);
-        byWho.get(s.reviewer).push(s);
-      }
-      for (const [who, mine] of byWho) {
-        slogWith({ src: 'editor', by: reviewLogBy(who), cause: 'review' }, () => {
-          const chapters = new Map();
-          for (const s of mine) {
-            const k = s.chapter || '';
-            if (!chapters.has(k)) chapters.set(k, []);
-            chapters.get(k).push(s);
-          }
-          let titles = false;
-          for (const [chId, ss] of chapters) {
-            const body = chId ? document.querySelector(`.chapter[data-id="${chId}"] .chapter-body`) : null;
-            let text = body ? reviewParasText(reviewDomParas(body)) : null;
-            // (what the page shows must be what's saved, or places can't be trusted)
-            if (body && text !== ReviewMatch.htmlText(captureBody(body))) text = null;
-            const taken = [];
-            const ops = [];
-            for (const s of ss) {
-              const pl = reviewPlace(s, text);
-              if (pl.title) {
-                book.chapterTitles = book.chapterTitles || {};
-                book.chapterTitles[chId] = String(s.ins || '').trim();
-                titles = true;
-                s.status = 'accepted';
-                s.decided = now;
-                done++;
-                continue;
-              }
-              if (pl.why || !body) { left++; continue; }
-              // two changes to the same words: the first is taken, the other waits
-              const clash = pl.ops.some((x) => taken.some((y) => x.o < y.o + y.len && y.o < x.o + x.len));
-              if (clash) { left++; continue; }
-              taken.push(...pl.ops);
-              ops.push(...pl.ops);
-              s.status = 'accepted';
-              s.decided = now;
-              done++;
-            }
-            if (!ops.length || !body) continue;
-            ops.sort((x, y) => y.o - x.o || (x.len ? 1 : 0) - (y.len ? 1 : 0));
-            for (const op of ops) {
-              if (op.style) {
-                for (const k of ['b', 'i']) {
-                  if (op.style.now[k] !== undefined && !!op.style.now[k] !== !!op.style.was[k]) reviewStyle(body, op.o, op.len, k, !!op.style.now[k]);
-                }
-              } else reviewSplice(body, op.o, op.len, op.ins);
-            }
-            syncChapter(body, chId);
-          }
-          if (titles) {
-            for (const chId of book.chapterOrder) {
-              const span = document.querySelector(`.chapter[data-id="${chId}"] .ch-title`);
-              if (!span || !book.chapterTitles || typeof book.chapterTitles[chId] !== 'string') continue;
-              if (span.textContent.trim() !== book.chapterTitles[chId]) {
-                span.textContent = book.chapterTitles[chId];
-                span.closest('.chapter-head').classList.toggle('has-title', !!book.chapterTitles[chId]);
-              }
-            }
-            saveMeta();
-            renderNav();
-          }
-        });
-      }
+      const r = reviewApplyAccept(items, now, before);
+      done = r.done;
+      left = r.left;
     }
+    if (done) for (const s of also) { s.status = 'rejected'; s.decided = now; }
     breakRun++; // the engine never saw these: ⌘Z goes to NEO's undo
     try { await reviewSave(bookId, d); } catch (err) {
       window.neo.logError('review: ' + (err && err.stack || err));
       toast(t('Couldn’t save the review’s progress: {error}', { error: plainError(err) }), 8000);
     }
-    if (how === 'accept' && (done > 1 || left)) {
+    if (opts.quiet) { /* the caller says it */ } else if (how === 'accept' && (done > 1 || left)) {
       const parts = [t('{n} accepted.', { n: done })];
       if (left) parts.push(t('{n} left: their passages have changed since (see the list).', { n: left }));
       if (version) parts.push(t('The book before is the version “{name}”.', { name: version }));
       parts.push(t('{key} to undo.', { key: KZ }));
       toast(parts.join(' '), 8000);
     } else if (how === 'reject' && done > 1) toast(t('{n} rejected.', { n: done }) + ' ' + t('{key} to undo.', { key: KZ }), 5000);
-    return { done, left };
+    return { done, left, version };
   } finally {
     rvs.busy = false;
     reviewTabShow();
@@ -16819,11 +16921,13 @@ function reviewUndone(r) {
     if (deleted) th.deleted = th.deleted || Date.now(); else delete th.deleted;
   }
   const byId = new Map(rvs.data.suggestions.map((s) => [s.id, s]));
-  for (const { id, status } of r.before || []) {
+  for (const { id, status, anchor, to } of r.before || []) {
     const s = byId.get(id);
     if (!s) continue;
     s.status = status;
     delete s.decided;
+    if (anchor !== undefined) s.anchor = anchor;
+    if (to !== undefined) s.to = to;
   }
   reviewSave(r.bookId, rvs.data).catch((err) => window.neo.logError('review: ' + (err && err.stack || err)));
   reviewTabShow();
@@ -16846,7 +16950,10 @@ function reviewFormatWords(s) {
   return out.join(', ') || t('formatting');
 }
 
-// The suggestions shown, in book order: [{ s, chId, place }]
+// The suggestions shown, in book order: { rows: [{ s, chId, place, at }]
+// (what the reviewer filter leaves, outside any group), groups (passages
+// two editors changed, below), all (every row shown, grouped or not),
+// textOf }
 function reviewRows() {
   const d = rvs.data;
   const texts = new Map();
@@ -16855,53 +16962,171 @@ function reviewRows() {
     return texts.get(chId);
   };
   const order = new Map(book.chapterOrder.map((id, i) => [id, i]));
-  const rows = reviewOpen(d).map((s) => {
+  const all = reviewOpen(d).filter((s) => !rvs.hide.has(s.reviewer)).map((s) => {
     const place = reviewPlace(s, s.chapter && order.has(s.chapter) ? textOf(s.chapter) : null);
     const first = place.ops.length ? Math.min(...place.ops.map((x) => x.o)) : -1;
     return { s, chId: s.chapter && order.has(s.chapter) ? s.chapter : null, place, at: s.kind === 'title' ? -1 : first };
   });
-  rows.sort((a, b) => (a.chId === null) - (b.chId === null) || (order.get(a.chId) ?? 0) - (order.get(b.chId) ?? 0) || a.at - b.at);
-  return { rows, textOf };
+  all.sort((a, b) => (a.chId === null) - (b.chId === null) || (order.get(a.chId) ?? 0) - (order.get(b.chId) ?? 0) || a.at - b.at);
+  const groups = reviewGroups(all, textOf);
+  const inGroup = new Set(groups.flatMap((g) => g.rows));
+  const rows = all.filter((r) => !inGroup.has(r));
+  return { rows, groups, all, textOf };
+}
+
+// Which file a suggestion came in with: two files sent out side by side
+// (parallel rounds) are two sides; one file passed from one editor to the
+// next (sequential) is one, whoever's name is on each change
+const reviewSide = (s) => s.import || 'who:' + (s.reviewer || '');
+
+// Passages two editors changed from different files (M6): the open
+// suggestions of different files whose words overlap, gathered (a chain of
+// overlaps is one passage). Each is { id, chId, o, end, title, rows, alts:
+// [{ key, reviewer, rows }] }, o and end in the chapter's text today (title:
+// both changed its chapter's title). Moves and formatting stay out: they
+// can be taken alongside.
+function reviewGroups(all, textOf) {
+  const KINDS = new Set(['replace', 'delete', 'insert', 'title']);
+  const cand = all.filter((r) => r.chId && !r.place.why && KINDS.has(r.s.kind));
+  const up = new Map(cand.map((r) => [r, r]));
+  const root = (r) => { while (up.get(r) !== r) r = up.get(r); return r; };
+  const span = (r) => r.place.ops[0];
+  const clash = (a, b) => {
+    if (a.chId !== b.chId || reviewSide(a.s) === reviewSide(b.s)) return false;
+    if (a.s.kind === 'title' || b.s.kind === 'title') return a.s.kind === b.s.kind;
+    const x = span(a);
+    const y = span(b);
+    if (x.len && y.len) return x.o < y.o + y.len && y.o < x.o + x.len;
+    if (!x.len && !y.len) return x.o === y.o;
+    const [p, q] = x.len ? [y, x] : [x, y];
+    return p.o > q.o && p.o < q.o + q.len;
+  };
+  for (let i = 0; i < cand.length; i++) {
+    for (let j = i + 1; j < cand.length; j++) {
+      if (cand[j].chId !== cand[i].chId) break;
+      if (clash(cand[i], cand[j])) up.set(root(cand[j]), root(cand[i]));
+    }
+  }
+  const byRoot = new Map();
+  for (const r of cand) {
+    const k = root(r);
+    if (!byRoot.has(k)) byRoot.set(k, []);
+    byRoot.get(k).push(r);
+  }
+  const out = [];
+  for (const rows of byRoot.values()) {
+    if (rows.length < 2) continue;
+    const title = rows[0].s.kind === 'title';
+    const o = title ? -1 : Math.min(...rows.map((r) => span(r).o));
+    const end = title ? -1 : Math.max(...rows.map((r) => span(r).o + span(r).len));
+    const alts = new Map();
+    for (const r of rows) {
+      const key = reviewSide(r.s);
+      if (!alts.has(key)) alts.set(key, { key, reviewer: r.s.reviewer, rows: [] });
+      alts.get(key).rows.push(r);
+    }
+    out.push({ id: 'g:' + rows[0].s.id, chId: rows[0].chId, o, end, title, rows, alts: [...alts.values()], text: title ? '' : textOf(rows[0].chId) });
+  }
+  return out;
+}
+// one side of a passage, as that editor would have it: the passage's words
+// today with their changes in, struck and underlined
+function reviewAltHtml(g, alt) {
+  if (g.title) {
+    const s = alt.rows[0].s;
+    return `<del>${escHtml(s.del)}</del> <ins>${escHtml(s.ins)}</ins>`;
+  }
+  const text = g.text || '';
+  const pre = reviewShow(text.slice(Math.max(0, g.o - 30), g.o)).replace(/^\S*\s/, '');
+  const post = reviewShow(text.slice(g.end, g.end + 30)).replace(/\s\S*$/, '');
+  let mid = '';
+  let pos = g.o;
+  const ops = alt.rows.map((r) => ({ op: r.place.ops[0], s: r.s })).sort((a, b) => a.op.o - b.op.o);
+  for (const { op, s } of ops) {
+    if (op.o > pos) mid += escHtml(reviewShow(text.slice(pos, op.o)));
+    const cut = text.slice(Math.max(op.o, pos), op.o + op.len);
+    if (cut) mid += `<del>${escHtml(reviewShow(cut))}</del>`;
+    if (s.ins) mid += `<ins>${escHtml(reviewShow(s.ins))}</ins>`;
+    pos = Math.max(pos, op.o + op.len);
+  }
+  if (g.end > pos) mid += escHtml(reviewShow(text.slice(pos, g.end)));
+  return (g.o > 0 ? '…' : '') + escHtml(pre) + mid + escHtml(post) + (g.end < text.length ? '…' : '');
+}
+// the passage today, as the writer's box starts it (paragraphs as lines)
+const reviewOwnStart = (g) => (g.title ? chapterHeading(g.chId) : (g.text || '').slice(g.o, g.end).replace(/\u2029/g, '\n'));
+
+// Everyone with something waiting (changes or comments), for the bar's
+// chips: [{ name, color, n (changes), c (comments) }], hidden ones too
+function reviewWho() {
+  const d = rvs.data;
+  const m = new Map();
+  const get = (name) => {
+    if (!m.has(name)) m.set(name, { name, color: reviewColor(name), n: 0, c: 0 });
+    return m.get(name);
+  };
+  for (const s of reviewOpen(d)) get(s.reviewer || '').n++;
+  for (const th of reviewOpenThreads(d)) { const w = reviewThreadWho(th); if (w !== null) get(w).c++; }
+  const order = new Map(d.reviewers.map((r, i) => [r.name, i]));
+  return [...m.values()].sort((a, b) => (order.get(a.name) ?? 1e9) - (order.get(b.name) ?? 1e9));
 }
 
 function reviewRender() {
   const host = $('#review-view');
   if (!host || !book) return;
   if (!reviewMine()) { host.innerHTML = `<p class="rv-empty">${escHtml(t('Reading the review…'))}</p>`; return; }
-  const { rows, textOf } = reviewRows();
-  if (rvs.cur && !rows.some((r) => r.s.id === rvs.cur)) rvs.cur = null;
+  const { rows, groups, all, textOf } = reviewRows();
+  if (rvs.cur && !rows.some((r) => r.s.id === rvs.cur) && !groups.some((g) => g.id === rvs.cur)) rvs.cur = null;
+  if (rvs.own && !groups.some((g) => g.id === rvs.own)) { rvs.own = null; rvs.ownDraft = ''; }
   const kinds = REVIEW_KIND();
-  const byWho = new Map();
-  for (const r of rows) byWho.set(r.s.reviewer, (byWho.get(r.s.reviewer) || 0) + 1);
   const placed = rows.filter((r) => !r.place.why).length;
+  const shown = all.length;
+  const hidden = reviewOpen(rvs.data).length - shown;
 
-  // the bar: how many, each reviewer's, all
-  let bar = `<div class="rv-bar"><span class="rv-sum">${escHtml(rows.length ? t('{n} changes waiting', { n: rows.length }) : reviewOpenThreads(rvs.data).length ? t('No changes waiting') : t('Nothing left to review.'))}</span>`;
-  for (const [who, n] of byWho) {
-    bar += `<span class="rv-who" style="--rv:${escAttr(reviewColor(who))}"><i></i>${escHtml(who)} <span class="rv-n">${n}</span>` +
-      `<button type="button" class="rv-mini" data-act="accept-who" data-who="${escAttr(who)}" title="${escAttr(t('Accept all of {name}’s changes', { name: who }))}">${escHtml(t('Accept'))}</button>` +
-      `<button type="button" class="rv-mini" data-act="reject-who" data-who="${escAttr(who)}" title="${escAttr(t('Reject all of {name}’s changes', { name: who }))}">${escHtml(t('Reject'))}</button></span>`;
+  // the bar: how many, each reviewer (a chip that shows or hides them,
+  // their color, and their changes taken or left at once), all
+  const said = shown ? t('{n} changes waiting', { n: shown }) : reviewOpenThreads(rvs.data).length ? t('No changes waiting') : t('Nothing left to review.');
+  let bar = `<div class="rv-bar"><span class="rv-sum">${escHtml(said)}${hidden ? ' ' + escHtml(t('({n} hidden)', { n: hidden })) : ''}`;
+  const openTh = reviewOpenThreads(rvs.data).length;
+  if (openTh) bar += ' · ' + escHtml(t('{n} comments open', { n: openTh }));
+  bar += '</span>';
+  const who = reviewWho();
+  for (const w of who) {
+    const off = rvs.hide.has(w.name);
+    const n = all.filter((r) => r.s.reviewer === w.name).length;
+    bar += `<span class="rv-who${off ? ' rv-off' : ''}" data-who="${escAttr(w.name)}" style="--rv:${escAttr(w.color)}">` +
+      `<button type="button" class="rv-dot" data-act="color" title="${escAttr(t('{name}’s color', { name: w.name }))}" aria-label="${escAttr(t('{name}’s color', { name: w.name }))}"><i></i></button>` +
+      `<button type="button" class="rv-name" data-act="filter" aria-pressed="${off ? 'false' : 'true'}" title="${escAttr(off ? t('Show {name}’s changes and comments (Alt-click: only theirs)', { name: w.name }) : t('Hide {name}’s changes and comments (Alt-click: only theirs)', { name: w.name }))}">${escHtml(w.name)} <span class="rv-n">${w.n + w.c}</span></button>` +
+      (n && !off ? `<button type="button" class="rv-mini" data-act="accept-who" data-who="${escAttr(w.name)}" title="${escAttr(t('Accept all of {name}’s changes', { name: w.name }))}">${escHtml(t('Accept'))}</button>` +
+      `<button type="button" class="rv-mini" data-act="reject-who" data-who="${escAttr(w.name)}" title="${escAttr(t('Reject all of {name}’s changes', { name: w.name }))}">${escHtml(t('Reject'))}</button>` : '') + '</span>';
+    if (rvs.colors === w.name) {
+      bar += `<span class="rv-swatches" role="group" aria-label="${escAttr(t('{name}’s color', { name: w.name }))}">` +
+        REVIEW_COLORS.map((c) => `<button type="button" class="rv-swatch${c === w.color ? ' on' : ''}" data-act="set-color" data-who="${escAttr(w.name)}" data-color="${escAttr(c)}" style="--rv:${escAttr(c)}" aria-label="${escAttr(c)}"></button>`).join('') + '</span>';
+    }
   }
-  if (rows.length) {
-    bar += `<span class="rv-all"><button type="button" class="btn-gold rv-btn" data-act="accept-all"${placed ? '' : ' disabled'}>${escHtml(t('Accept All'))}</button>` +
-      `<button type="button" class="btn-quiet rv-btn" data-act="reject-all">${escHtml(t('Reject All'))}</button></span>`;
+  if (rvs.hide.size) bar += `<button type="button" class="rv-mini" data-act="show-all">${escHtml(t('Show everyone'))}</button>`;
+  if (shown) {
+    bar += `<span class="rv-all"><button type="button" class="btn-gold rv-btn" data-act="accept-all"${placed ? '' : ' disabled'}>${escHtml(hidden ? t('Accept Shown') : t('Accept All'))}</button>` +
+      `<button type="button" class="btn-quiet rv-btn" data-act="reject-all">${escHtml(hidden ? t('Reject Shown') : t('Reject All'))}</button></span>`;
   }
   bar += '</div>';
-  // (the comments waiting, said in the bar too)
-  const openTh = reviewOpenThreads(rvs.data).length;
-  if (openTh) bar = bar.replace('</span>', ' · ' + escHtml(t('{n} comments open', { n: openTh })) + '</span>');
 
-  // the list, by chapter
+  // the list, by chapter; a passage two editors changed is one item, their
+  // wordings side by side
+  const items = rows.map((r) => ({ r, ch: r.chId, at: r.at })).concat(groups.map((g) => ({ g, ch: g.chId, at: g.o })));
+  const order = new Map(book.chapterOrder.map((id, i) => [id, i]));
+  items.sort((a, b) => (a.ch === null) - (b.ch === null) || (order.get(a.ch) ?? 0) - (order.get(b.ch) ?? 0) || a.at - b.at);
   let list = '';
   let lastCh;
-  for (const r of rows) {
-    if (r.chId !== lastCh) {
-      lastCh = r.chId;
-      const name = r.chId ? chapterHeading(r.chId) : t('Not placed in a chapter');
-      list += `<div class="rv-ch">${escHtml(name)}` + (r.chId
-        ? `<button type="button" class="rv-mini" data-act="accept-ch" data-ch="${escAttr(r.chId)}">${escHtml(t('Accept'))}</button><button type="button" class="rv-mini" data-act="reject-ch" data-ch="${escAttr(r.chId)}">${escHtml(t('Reject'))}</button>`
+  for (const it of items) {
+    if (it.ch !== lastCh) {
+      lastCh = it.ch;
+      const name = it.ch ? chapterHeading(it.ch) : t('Not placed in a chapter');
+      list += `<div class="rv-ch">${escHtml(name)}` + (it.ch
+        ? `<button type="button" class="rv-mini" data-act="accept-ch" data-ch="${escAttr(it.ch)}">${escHtml(t('Accept'))}</button><button type="button" class="rv-mini" data-act="reject-ch" data-ch="${escAttr(it.ch)}">${escHtml(t('Reject'))}</button>`
         : '') + '</div>';
     }
+    if (it.g) { list += reviewGroupHtml(it.g); continue; }
+    const r = it.r;
     const s = r.s;
     let what;
     if (s.kind === 'format') what = `<span class="rv-txt">${escHtml(reviewSnip(s.text || (s.anchor && s.anchor.exact)))}</span> → ${escHtml(reviewFormatWords(s))}`;
@@ -16927,38 +17152,75 @@ function reviewRender() {
       `<div class="rv-acts"><button type="button" class="rv-mini" data-act="accept"${can ? '' : ' disabled'} title="${escAttr(can ? t('Accept (A)') : t('The passage has changed since: apply it by hand, then reject it'))}">${escHtml(t('Accept'))}</button>` +
       `<button type="button" class="rv-mini" data-act="reject" title="${escAttr(t('Reject (R)'))}">${escHtml(t('Reject'))}</button></div></div>`;
   }
-  if (!rows.length) list = `<p class="rv-empty">${escHtml(t('Every change has been decided.'))}</p>`;
+  if (!items.length) list = `<p class="rv-empty">${escHtml(hidden ? t('Nothing waiting from the editors shown.') : t('Every change has been decided.'))}</p>`;
 
   // the book, read-only, each open suggestion inline
-  const marks = new Map(); // chId → [{ o, len, s, part }]
+  const marks = new Map(); // chId → [{ o, len, s, part } | { o, len, g }]
+  const mark = (chId, m) => { if (!marks.has(chId)) marks.set(chId, []); marks.get(chId).push(m); };
   for (const r of rows) {
     if (!r.chId || r.place.why || r.s.kind === 'title') continue;
-    if (!marks.has(r.chId)) marks.set(r.chId, []);
-    const list2 = marks.get(r.chId);
     if (r.s.kind === 'move') {
       const from = r.place.ops.find((x) => x.len);
       const to = r.place.ops.find((x) => !x.len);
-      if (from) list2.push({ o: from.o, len: from.len, s: r.s, part: 'from' });
-      if (to) list2.push({ o: to.o, len: 0, s: r.s, part: 'to' });
-    } else list2.push({ o: r.place.ops[0].o, len: r.place.ops[0].len, s: r.s, part: '' });
+      if (from) mark(r.chId, { o: from.o, len: from.len, s: r.s, part: 'from' });
+      if (to) mark(r.chId, { o: to.o, len: 0, s: r.s, part: 'to' });
+    } else mark(r.chId, { o: r.place.ops[0].o, len: r.place.ops[0].len, s: r.s, part: '' });
   }
+  for (const g of groups) if (!g.title) mark(g.chId, { o: g.o, len: g.end - g.o, g });
   const titles = new Map(rows.filter((r) => r.s.kind === 'title' && r.chId).map((r) => [r.chId, r.s]));
+  const titleGroups = new Map(groups.filter((g) => g.title).map((g) => [g.chId, g]));
   const { notes, threads } = reviewThreadPlaces(textOf);
   let page = '';
   for (const chId of book.chapterOrder) {
     if (chapterKind(chId) === 'contents') continue;
     const text = textOf(chId);
     const ts = titles.get(chId);
-    const head = ts
-      ? `<span class="rv-s${ts.id === rvs.cur ? ' cur' : ''}" data-sid="${escAttr(ts.id)}" style="--rv:${escAttr(reviewColor(ts.reviewer))}"><del>${escHtml(ts.del)}</del><ins>${escHtml(ts.ins)}</ins></span>`
-      : escHtml(chapterHeading(chId));
+    const tg = titleGroups.get(chId);
+    const head = tg
+      ? `<span class="rv-s rv-clash${tg.id === rvs.cur ? ' cur' : ''}" data-sid="${escAttr(tg.id)}" style="${escAttr(reviewClashStyle(tg))}">${escHtml(chapterHeading(chId))}</span>`
+      : ts
+        ? `<span class="rv-s${ts.id === rvs.cur ? ' cur' : ''}" data-sid="${escAttr(ts.id)}" style="--rv:${escAttr(reviewColor(ts.reviewer))}"><del>${escHtml(ts.del)}</del><ins>${escHtml(ts.ins)}</ins></span>`
+        : escHtml(chapterHeading(chId));
     page += `<section class="rv-chapter" data-ch="${escAttr(chId)}"><h3>${head}</h3>${reviewMarkup(text || '', marks.get(chId) || [], notes.get(chId) || [])}</section>`;
   }
   host.innerHTML = `${bar}<div class="rv-cols"><div class="rv-list" role="listbox" tabindex="0" aria-label="${escAttr(t('Changes'))}">${list}</div><div class="rv-page">${page}</div>` +
     `<div class="rv-margin" aria-label="${escAttr(t('Comments'))}">${reviewMarginHtml(threads)}</div></div>`;
-  for (const box of host.querySelectorAll('.rv-replybox')) if (box.value) box.style.height = box.scrollHeight + 'px';
+  for (const box of host.querySelectorAll('.rv-replybox, .rv-ownbox')) if (box.value) box.style.height = box.scrollHeight + 'px';
   reviewPlaceCards();
   requestAnimationFrame(reviewPlaceCards);
+}
+
+// a passage two editors changed: the colors of both, for its mark
+function reviewClashStyle(g) {
+  const cs = g.alts.map((a) => reviewColor(a.reviewer));
+  return `--rv:${cs[0]};--rv2:${cs[1] || cs[0]}`;
+}
+// its item in the list: each side's wording, side by side, to pick one of
+// (1, 2…), or the writer's own words in a box
+function reviewGroupHtml(g) {
+  const cur = g.id === rvs.cur;
+  const names = g.alts.map((a) => a.reviewer);
+  const sameName = new Set(names).size < names.length;
+  let html = `<div class="rv-item rv-group${cur ? ' cur' : ''}" data-sid="${escAttr(g.id)}" style="${escAttr(reviewClashStyle(g))}" role="option" aria-selected="${cur}">` +
+    `<div class="rv-head"><span class="rv-kind">${escHtml(g.title ? t('Chapter title') : t('One passage, two wordings'))}</span><span class="rv-by">${escHtml(t('{n} editors changed this', { n: g.alts.length }))}</span></div><div class="rv-alts">`;
+  g.alts.forEach((alt, i) => {
+    const imp = sameName && rvs.data.imports.find((x) => x.id === alt.key);
+    const label = imp ? `${alt.reviewer} · ${reviewWhen(imp.at)}` : alt.reviewer;
+    html += `<div class="rv-alt" style="--rv:${escAttr(reviewColor(alt.reviewer))}"><div class="rv-alt-by"><i></i>${escHtml(label)}</div>` +
+      `<div class="rv-what">${reviewAltHtml(g, alt)}</div>` +
+      `<button type="button" class="rv-mini" data-act="pick" data-alt="${escAttr(alt.key)}" title="${escAttr(t('Use this wording ({key})', { key: i + 1 }))}">${escHtml(t('Use {name}’s', { name: alt.reviewer }))}</button></div>`;
+  });
+  html += '</div>';
+  if (rvs.own === g.id) {
+    const val = rvs.ownDraft !== '' ? rvs.ownDraft : reviewOwnStart(g);
+    html += `<textarea class="rv-ownbox" rows="2" aria-label="${escAttr(t('Your own wording'))}">${escHtml(val)}</textarea>` +
+      `<div class="rv-acts rv-own-acts"><button type="button" class="rv-mini rv-gold" data-act="own-use" title="${escAttr(t('Put your wording in, and set both editors’ aside ({key})', { key: K('⌘Enter', 'Ctrl+Enter') }))}">${escHtml(t('Use mine'))}</button>` +
+      `<button type="button" class="rv-mini" data-act="own-cancel">${escHtml(t('Cancel'))}</button></div>`;
+  } else {
+    html += `<div class="rv-acts"><button type="button" class="rv-mini" data-act="own" title="${escAttr(t('Write your own (W)'))}">${escHtml(t('Write your own'))}</button>` +
+      `<button type="button" class="rv-mini" data-act="reject-group" title="${escAttr(t('Reject both (R)'))}">${escHtml(t('Reject all'))}</button></div>`;
+  }
+  return html + '</div>';
 }
 
 // A chapter's text as paragraphs, with its marks: a deletion struck, an
@@ -17010,6 +17272,13 @@ function reviewMarkup(text, marks, notes = []) {
   for (const m of marks) {
     if (m.o < pos) continue; // overlapping another: in the list only
     textUpTo(m.o);
+    if (m.g) {
+      // a passage two editors changed: today's words, marked in both colors
+      const open = `<span class="rv-s rv-clash${m.g.id === rvs.cur ? ' cur' : ''}" data-sid="${escAttr(m.g.id)}" style="${escAttr(reviewClashStyle(m.g))}">`;
+      if (m.len) textUpTo(m.o + m.len, open, '</span>');
+      else html += open + '<span class="rv-clash-pt">⇄</span></span>';
+      continue;
+    }
     const s = m.s;
     const open = `<span class="rv-s${s.id === rvs.cur ? ' cur' : ''}${s.kind === 'format' ? ' rv-fmt' : ''}" data-sid="${escAttr(s.id)}" style="--rv:${escAttr(reviewColor(s.reviewer))}">`;
     if (s.kind === 'format') {
@@ -17043,6 +17312,12 @@ function reviewMarkup(text, marks, notes = []) {
 
 // the writer, as replies name them
 const reviewMe = () => (book && book.author && book.author !== t('Anonymous') ? book.author : t('Author'));
+// whose a thread is, for the reviewer filter: the first editor in it (null
+// when only the writer has written in it)
+function reviewThreadWho(th) {
+  const c = (th.comments || []).find((x) => !x.mine);
+  return c ? c.by || '' : null;
+}
 // a thread's color: its first commenter's (the writer's own in gold)
 function reviewThreadColor(th) {
   const c = th.comments && th.comments[0];
@@ -17060,6 +17335,8 @@ function reviewThreadPlaces(textOf) {
   const order = new Map(book.chapterOrder.map((id, i) => [id, i]));
   for (const th of rvs.data.threads) {
     if (th.deleted || !th.comments || !th.comments.length) continue;
+    const who = reviewThreadWho(th);
+    if (who !== null && rvs.hide.has(who)) continue;
     let why = '';
     let at = -1;
     const chId = th.chapter && order.has(th.chapter) ? th.chapter : null;
@@ -17242,6 +17519,13 @@ function reviewFocus() {
 }
 // a decision on one, then on to the next that waits
 async function reviewDecideOne(id, how) {
+  if (String(id).startsWith('g:')) {
+    // a passage two editors changed: Reject sets every wording aside;
+    // Accept needs to know whose
+    if (how === 'reject') return reviewGroupAct(id, 'reject');
+    toast(t('Two editors changed this passage: pick a wording (1, 2…), or write your own (W).'), 5000);
+    return;
+  }
   const s = rvs.data && rvs.data.suggestions.find((x) => x.id === id);
   if (!s) return;
   const ids = [...$('#review-view').querySelectorAll('.rv-item')].map((el) => el.dataset.sid);
@@ -17251,20 +17535,101 @@ async function reviewDecideOne(id, how) {
   if (res.done && next) reviewSelect(next);
   reviewFocus();
 }
+// A passage two editors changed (M6): act 'pick' (alt: that side's key)
+// takes that wording and sets the others aside, 'own' puts the writer's
+// own words in (text) and sets them all aside, 'reject' sets them all
+// aside. One ⌘Z step each; no version (it's one passage).
+async function reviewGroupAct(gid, act, { alt = null, text = '' } = {}) {
+  if (!reviewMine() || rvs.busy) return;
+  const g = reviewRows().groups.find((x) => x.id === gid);
+  if (!g) return;
+  const ids = [...$('#review-view').querySelectorAll('.rv-item')].map((el) => el.dataset.sid);
+  const next = ids[ids.indexOf(gid) + 1] || ids[ids.indexOf(gid) - 1] || null;
+  const all = g.rows.map((r) => r.s);
+  let res;
+  if (act === 'pick') {
+    const side = g.alts.find((x) => x.key === alt);
+    if (!side) return;
+    const mine = side.rows.map((r) => r.s);
+    res = await reviewDecide(mine, 'accept', '', { reject: all.filter((s) => !mine.includes(s)), version: false, quiet: true });
+    if (res.done) toast(t('{name}’s wording is in; the other set aside. {key} to undo.', { name: side.reviewer, key: KZ }), 5000);
+  } else if (act === 'own') {
+    const own = g.title ? { chId: g.chId, title: text } : { chId: g.chId, o: g.o, len: g.end - g.o, text: String(text).replace(/\r?\n/g, ReviewMatch.PARA) };
+    res = await reviewDecide(all, 'own', '', { own, version: false, quiet: true });
+    if (res.done) {
+      rvs.own = null;
+      rvs.ownDraft = '';
+      toast(t('Your wording is in; both editors’ set aside. {key} to undo.', { key: KZ }), 5000);
+    }
+  } else {
+    res = await reviewDecide(all, 'reject', '', { quiet: true });
+  }
+  if (res && res.done && next) reviewSelect(next);
+  reviewFocus();
+}
 async function reviewBulk(act, el) {
-  const open = reviewOpen(rvs.data);
-  let list = open;
-  let what = t('all changes');
+  const { rows, groups } = reviewRows();
+  const how = act.startsWith('accept') ? 'accept' : 'reject';
+  // accepting at once leaves the passages two editors changed for the
+  // writer to pick from; rejecting sets those aside too
+  let list = rows.map((r) => r.s).concat(how === 'reject' ? groups.flatMap((g) => g.rows.map((r) => r.s)) : []);
+  const filtered = rvs.hide.size > 0;
+  let what = filtered ? t('the changes shown') : t('all changes');
+  let skipped = how === 'accept' ? groups : [];
   if (act.endsWith('-who')) {
+    // one reviewer's: theirs, wherever they are (in a passage another
+    // editor changed too, theirs is taken; the other's waits, out of date)
     const who = el.dataset.who;
-    list = open.filter((s) => s.reviewer === who);
+    list = reviewRows().all.filter((r) => r.s.reviewer === who).map((r) => r.s);
     what = t('{name}’s changes', { name: who });
+    skipped = [];
   } else if (act.endsWith('-ch')) {
-    list = open.filter((s) => s.chapter === el.dataset.ch);
+    list = list.filter((s) => s.chapter === el.dataset.ch);
+    skipped = skipped.filter((g) => g.chId === el.dataset.ch);
     what = t('the changes in {chapter}', { chapter: chapterHeading(el.dataset.ch) });
   }
-  await reviewDecide(list, act.startsWith('accept') ? 'accept' : 'reject', what);
+  if (!list.length && skipped.length) {
+    toast(t('Two editors changed each of these passages: pick a wording in the list.'), 6000);
+    return;
+  }
+  const res = await reviewDecide(list, how, what);
+  if (res.done && skipped.length) toast(t('{n} accepted. {k} passages two editors both changed wait for you to pick a wording.', { n: res.done, k: skipped.length }) + (res.version ? ' ' + t('The book before is the version “{name}”.', { name: res.version }) : '') + ' ' + t('{key} to undo.', { key: KZ }), 9000);
   reviewFocus();
+}
+// the writer's own wording for a passage: a box under the editors', with
+// the passage as it is today to start from
+function reviewOwnOpen(gid) {
+  rvs.own = gid;
+  rvs.ownDraft = '';
+  rvs.cur = gid;
+  reviewRender();
+  const box = $('#review-view .rv-ownbox');
+  if (box) { box.focus({ preventScroll: true }); box.setSelectionRange(box.value.length, box.value.length); }
+}
+// the reviewer filter: a chip's click shows or hides that reviewer; with
+// Alt (Option), only theirs (again: everyone)
+function reviewFilter(name, only) {
+  const names = reviewWho().map((w) => w.name);
+  if (only) {
+    const solo = names.every((n) => (n === name) !== rvs.hide.has(n));
+    rvs.hide = new Set(solo ? [] : names.filter((n) => n !== name));
+  } else if (rvs.hide.has(name)) rvs.hide.delete(name);
+  else rvs.hide.add(name);
+  reviewRender();
+}
+// a reviewer's color, chosen from the swatches under their chip
+async function reviewSetColor(name, color) {
+  const r = reviewerOf(name);
+  rvs.colors = null;
+  if (!r || !REVIEW_COLORS.includes(color) || r.color === color) { reviewRender(); return; }
+  const was = r.color;
+  r.color = color;
+  try { await reviewSave(book.id, rvs.data); } catch (err) {
+    r.color = was;
+    window.neo.logError('review: ' + (err && err.stack || err));
+    toast(t('Couldn’t save the review’s progress: {error}', { error: plainError(err) }), 8000);
+  }
+  reviewRender();
 }
 
 (() => {
@@ -17294,7 +17659,17 @@ async function reviewBulk(act, el) {
     if (btn) {
       if (btn.disabled) return;
       const act = btn.dataset.act;
-      if (act === 'accept' || act === 'reject') {
+      const chip = btn.closest('.rv-who');
+      const grp = btn.closest('.rv-group');
+      if (act === 'filter' && chip) reviewFilter(chip.dataset.who, e.altKey || e.shiftKey);
+      else if (act === 'color' && chip) { rvs.colors = rvs.colors === chip.dataset.who ? null : chip.dataset.who; reviewRender(); } else if (act === 'set-color') reviewSetColor(btn.dataset.who, btn.dataset.color);
+      else if (act === 'show-all') { rvs.hide.clear(); reviewRender(); } else if (grp && act === 'pick') reviewGroupAct(grp.dataset.sid, 'pick', { alt: btn.dataset.alt });
+      else if (grp && act === 'reject-group') reviewGroupAct(grp.dataset.sid, 'reject');
+      else if (grp && act === 'own') reviewOwnOpen(grp.dataset.sid);
+      else if (grp && act === 'own-cancel') { rvs.own = null; rvs.ownDraft = ''; reviewRender(); reviewFocus(); } else if (grp && act === 'own-use') {
+        const box = grp.querySelector('.rv-ownbox');
+        reviewGroupAct(grp.dataset.sid, 'own', { text: box ? box.value : '' });
+      } else if (act === 'accept' || act === 'reject') {
         const item = btn.closest('[data-sid]');
         if (item) reviewDecideOne(item.dataset.sid, act);
       } else reviewBulk(act, btn);
@@ -17313,6 +17688,13 @@ async function reviewBulk(act, el) {
   });
   // a reply grows as it's typed; ⌘Enter (Ctrl+Enter) sends it, Esc leaves it
   host.addEventListener('input', (e) => {
+    const own = e.target.closest('.rv-ownbox');
+    if (own) {
+      own.style.height = 'auto';
+      own.style.height = own.scrollHeight + 'px';
+      rvs.ownDraft = own.value;
+      return;
+    }
     const box = e.target.closest('.rv-replybox');
     if (!box) return;
     box.style.height = 'auto';
@@ -17325,6 +17707,23 @@ async function reviewBulk(act, el) {
     reviewPlaceCards();
   });
   host.addEventListener('keydown', (e) => {
+    const own = e.target.closest && e.target.closest('.rv-ownbox');
+    if (own && !e.isComposing && e.keyCode !== 229) {
+      const grp = own.closest('.rv-group');
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        e.stopPropagation();
+        reviewGroupAct(grp.dataset.sid, 'own', { text: own.value });
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        rvs.own = null;
+        rvs.ownDraft = '';
+        reviewRender();
+        reviewFocus();
+      }
+      return;
+    }
     const box = e.target.closest && e.target.closest('.rv-replybox');
     if (!box || e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
@@ -17360,7 +17759,15 @@ async function reviewBulk(act, el) {
       if (e.key === 'Enter' || e.key === ' ') return; // a button's own
     }
     const k = e.key.toLowerCase();
-    if (k === 'j' || e.key === 'ArrowDown') { e.preventDefault(); reviewStep(1); } else if (k === 'k' || e.key === 'ArrowUp') { e.preventDefault(); reviewStep(-1); } else if ((k === 'a' || k === 'r') && !e.shiftKey && rvs.cur) {
+    const inGroup = rvs.cur && String(rvs.cur).startsWith('g:');
+    if (inGroup && /^[1-9]$/.test(e.key)) {
+      // a passage two editors changed: 1, 2… picks that wording, W your own
+      const btn = host.querySelectorAll(`.rv-group[data-sid="${CSS.escape(rvs.cur)}"] [data-act="pick"]`)[+e.key - 1];
+      if (btn) { e.preventDefault(); reviewGroupAct(rvs.cur, 'pick', { alt: btn.dataset.alt }); }
+    } else if (inGroup && k === 'w' && !e.shiftKey) {
+      e.preventDefault();
+      reviewOwnOpen(rvs.cur);
+    } else if (k === 'j' || e.key === 'ArrowDown') { e.preventDefault(); reviewStep(1); } else if (k === 'k' || e.key === 'ArrowUp') { e.preventDefault(); reviewStep(-1); } else if ((k === 'a' || k === 'r') && !e.shiftKey && rvs.cur) {
       e.preventDefault();
       reviewDecideOne(rvs.cur, k === 'a' ? 'accept' : 'reject');
     }

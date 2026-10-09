@@ -2424,6 +2424,34 @@ body.night .rv-page { box-shadow: 0 4px 30px rgba(0,0,0,0.7); border: 1px solid 
 .rv-gone span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 body.light .rv-thread { color: #2a2824; background: #fbfaf8; }
 body.light .rv-replybox, body.light .rv-cm.rv-reply { border-color: #cfcac0; }
+/* more than one editor (M6): each reviewer's chip shows or hides them,
+   its dot picks their color; a passage two editors changed is one item,
+   their wordings side by side, and on the page marked in both colors */
+.rv-who .rv-dot, .rv-who .rv-name { font: inherit; background: none; border: none; color: inherit; padding: 0; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.rv-who .rv-dot { width: 15px; height: 15px; justify-content: center; border-radius: 50%; }
+.rv-who .rv-dot > i { width: 9px; height: 9px; border-radius: 50%; background: var(--rv); display: inline-block; }
+.rv-who .rv-dot:hover > i, .rv-who .rv-dot:focus-visible > i { box-shadow: 0 0 0 2px color-mix(in srgb, var(--rv) 45%, transparent); }
+.rv-who .rv-dot:focus-visible, .rv-who .rv-name:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.rv-who.rv-off { opacity: 0.45; border-style: dashed; }
+.rv-who.rv-off .rv-name { text-decoration: line-through; text-decoration-color: color-mix(in srgb, currentColor 50%, transparent); }
+.rv-swatches { display: inline-flex; gap: 5px; padding: 3px 6px; border-radius: 999px; background: var(--bg-soft); }
+.rv-swatch { width: 16px; height: 16px; border-radius: 50%; border: 2px solid transparent; background: var(--rv); cursor: pointer; padding: 0; }
+.rv-swatch.on, .rv-swatch:hover, .rv-swatch:focus-visible { border-color: var(--ink, #fff); outline: none; }
+.rv-group { border-left: 3px solid var(--rv); border-image: linear-gradient(var(--rv) 50%, var(--rv2) 50%) 1; }
+.rv-alts { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-top: 6px; }
+.rv-alt { border-top: 2px solid var(--rv); padding-top: 4px; display: flex; flex-direction: column; gap: 4px; }
+.rv-alt .rv-what { margin-top: 0; font-size: 12.5px; flex: 1; }
+.rv-alt .rv-mini { align-self: flex-start; }
+.rv-alt-by { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); }
+.rv-alt-by > i { width: 7px; height: 7px; border-radius: 50%; background: var(--rv); display: inline-block; }
+.rv-group .rv-acts { opacity: 1; }
+.rv-ownbox { display: block; width: 100%; box-sizing: border-box; margin-top: 8px; resize: none; overflow: hidden; font: inherit; font-size: 12.5px; line-height: 1.45; padding: 5px 7px; border-radius: 4px; border: 1px solid var(--accent); background: transparent; color: inherit; }
+.rv-ownbox:focus { outline: none; }
+.rv-mini.rv-gold { border-color: var(--accent); color: var(--accent); }
+.rv-s.rv-clash { background: linear-gradient(to bottom, transparent 62%, color-mix(in srgb, var(--rv) 22%, transparent) 62%, color-mix(in srgb, var(--rv2) 22%, transparent)); border-bottom: 2px dashed var(--rv2); cursor: pointer; }
+.rv-s.rv-clash.cur { background: color-mix(in srgb, var(--rv) 14%, color-mix(in srgb, var(--rv2) 14%, transparent)); outline: 1px solid color-mix(in srgb, var(--rv2) 60%, transparent); }
+.rv-clash-pt { font-size: 0.75em; color: var(--rv); padding: 0 2px; vertical-align: 0.2em; }
+body.light .rv-swatches { background: #f1eee8; }
 @media (max-width: 1180px) {
   .rv-cols { grid-template-columns: minmax(220px, 300px) minmax(0, var(--page-w)); }
   .rv-margin { grid-column: 2; position: static; height: auto !important; display: grid; gap: 8px; }
