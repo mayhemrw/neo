@@ -275,6 +275,23 @@ describe('threads that come back (a second round)', () => {
     assert.equal(k[1].comments.length, 1);
   });
 
+  test('the same words on another passage are a new thread: never hidden in a deleted one, never two into one', () => {
+    const k = known();
+    // "Too long." again, on new words (t3 was deleted by the writer)
+    let r = M.mergeThreads(k, [{ chapter: 'c2', anchor: { exact: 'a new passage' }, resolved: false, comments: [c('Dana', 'Too long.', 'EEEE0001')] }]);
+    assert.deepEqual([r.merged, r.added.length], [0, 1]);
+    assert.equal(k[2].deleted, true);
+    // "Cut this?" on other words in another chapter, and twice in one file
+    k[1].anchor = { exact: 'the stones' };
+    r = M.mergeThreads(k, [
+      { chapter: 'c1', anchor: { exact: 'the stones' }, resolved: true, comments: [c('Dana', 'Cut this?', 'EEEE0002')] },
+      { chapter: 'c1', anchor: { exact: 'the gulls' }, resolved: false, comments: [c('Dana', 'Cut this?', 'EEEE0003')] },
+      { chapter: 'c2', anchor: { exact: 'the stones' }, resolved: false, comments: [c('Dana', 'Cut this?', 'EEEE0004')] }
+    ]);
+    assert.deepEqual([r.merged, r.added.length], [1, 2]);
+    assert.deepEqual(k[1].anchor, { exact: 'the stones' });
+  });
+
   test('a deleted thread that gets an answer comes back; one without stays deleted', () => {
     const k = known();
     M.mergeThreads(k, [{ chapter: 'c2', anchor: null, resolved: false, comments: [c('Dana', 'Too long.', 'AAAA0003')] }]);
@@ -331,5 +348,46 @@ describe('more than one editor (M6)', () => {
     assert.equal(r.suggestions[0].anchor.o, r.suggestions[1].anchor.o);
     assert.deepEqual(Object.keys(r.counts).sort(), ['Ann', 'Bo']);
     assert.equal(r.suggestions.filter((s) => s.untracked).length, 0, 'nothing untracked');
+  });
+});
+
+describe('review.json from two computers at once (mergeReview)', () => {
+  const blank = () => ({ v: 1, editors: [], rounds: [], imports: [], reviewers: [], suggestions: [], threads: [] });
+  const S = (id, status = 'open') => ({ id, status, del: 'a', ins: 'b' });
+  test('each side keeps what it added; a change made here wins, an untouched item takes the file’s', () => {
+    const base = Object.assign(blank(), { suggestions: [S('s1'), S('s2')], reviewers: [{ name: 'Dana', num: 1 }] });
+    const local = JSON.parse(JSON.stringify(base));
+    local.suggestions[0].status = 'accepted'; // accepted here
+    const remote = JSON.parse(JSON.stringify(base));
+    remote.suggestions[1].status = 'rejected'; // rejected there
+    remote.suggestions.push(S('s3')); // an import there
+    remote.rounds.push({ id: 'r1', to: 'Lee' });
+    remote.editors = ['Lee'];
+    const m = M.mergeReview(base, local, remote);
+    assert.deepEqual(m.suggestions.map((s) => [s.id, s.status]), [['s1', 'accepted'], ['s2', 'rejected'], ['s3', 'open']]);
+    assert.deepEqual(m.rounds.map((r) => r.id), ['r1']);
+    assert.deepEqual(m.editors, ['Lee']);
+  });
+  test('undone here stays undone; a thread keeps both sides’ comments', () => {
+    const th = { id: 't1', comments: [{ by: 'Dana', at: '1', text: 'Hm?', paraId: 'A1' }] };
+    const base = Object.assign(blank(), { suggestions: [S('s1', 'accepted')], threads: [th] });
+    const local = JSON.parse(JSON.stringify(base));
+    local.suggestions[0].status = 'open'; // Ctrl+Z here
+    local.threads[0].comments.push({ by: 'Me', at: '2', text: 'Yes.', mine: true });
+    const remote = JSON.parse(JSON.stringify(base));
+    remote.threads[0].comments.push({ by: 'Dana', at: '3', text: 'And?', paraId: 'A2' });
+    const m = M.mergeReview(base, local, remote);
+    assert.equal(m.suggestions[0].status, 'open');
+    assert.deepEqual(m.threads[0].comments.map((c) => c.text), ['Hm?', 'Yes.', 'And?']);
+  });
+  test('two editors given one number on two computers are numbered apart, the same way on both', () => {
+    const base = blank();
+    const a = Object.assign(blank(), { reviewers: [{ name: 'Dana', num: 1 }] });
+    const b = Object.assign(blank(), { reviewers: [{ name: 'Lee', num: 1 }] });
+    const onA = M.mergeReview(base, a, b).reviewers;
+    const onB = M.mergeReview(base, b, a).reviewers;
+    const nums = (list) => Object.fromEntries(list.map((r) => [r.name, r.num]));
+    assert.deepEqual(nums(onA), { Dana: 1, Lee: 2 });
+    assert.deepEqual(nums(onB), nums(onA));
   });
 });

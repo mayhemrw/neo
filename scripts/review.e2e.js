@@ -935,6 +935,39 @@ test('the log: each editor’s words numbered, the writer’s own typed; nothing
   assert.equal(errors, '');
 });
 
+test('review.json written by another computer meanwhile: taken in, and never written over', async () => {
+  const dir = await bookDirOf();
+  const file = path.join(dir, 'review.json');
+  const there = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const open = there.suggestions.find((s) => s.status === 'open' && !s.group);
+  // the other computer: a round sent, a reply in a thread, and a change rejected
+  there.rounds.push({ id: 'r-elsewhere', at: Date.now(), to: 'Someone Else', imports: [] });
+  const th = there.threads.find((x) => !x.deleted);
+  th.comments.push({ by: 'Charles Dickens', at: new Date().toISOString(), text: 'Typed on the laptop.', mine: true });
+  const other = there.suggestions.find((s) => s.status === 'open' && s !== open);
+  if (other) other.status = 'rejected';
+  fs.writeFileSync(file, JSON.stringify(there));
+  // this window, before it has looked: a change taken here
+  if (open) {
+    await js(`reviewDecideOne(${JSON.stringify(open.id)}, 'reject')`);
+    await until(() => js(`!rvs.busy`));
+  }
+  const after = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.ok(after.rounds.some((r) => r.id === 'r-elsewhere'), 'the other computer\'s round kept');
+  assert.ok(after.threads.find((x) => x.id === th.id).comments.some((c) => c.text === 'Typed on the laptop.'), 'its reply kept');
+  if (open) assert.equal(after.suggestions.find((s) => s.id === open.id).status, 'rejected', 'and this window\'s own step');
+  if (other) assert.equal(after.suggestions.find((s) => s.id === other.id).status, 'rejected');
+  // what's in the window has it too (and a refresh changes nothing more)
+  await js(`reviewRefresh()`);
+  assert.ok(await js(`rvs.data.rounds.some((r) => r.id === 'r-elsewhere')`));
+  // a change made only on the other computer, taken in by a refresh
+  const later = JSON.parse(fs.readFileSync(file, 'utf8'));
+  later.editors = ['From the laptop', ...later.editors];
+  fs.writeFileSync(file, JSON.stringify(later));
+  await js(`reviewRefresh()`);
+  assert.equal(await js(`rvs.data.editors.includes('From the laptop')`), true);
+});
+
 test('Import Review… is in the palette, and does nothing on the shelf', async () => {
   const items = await js(`window.neo.palette.items()`);
   const it = items.find((x) => x.label === 'Import Review…');

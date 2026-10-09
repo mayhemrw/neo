@@ -12446,6 +12446,8 @@ async function refreshFromDisk() {
       renderStickies();
       if (currentTab === 'darlings') renderDarlings();
     }
+    // the review (an editor's file imported, or changes taken, on another computer)
+    reviewRefresh().catch((err) => window.neo.logError('review refresh: ' + (err && err.stack || err)));
     let adopted = 0;
     let conflicts = 0;
     const replaced = []; // page text a disk copy would otherwise have taken away
@@ -16128,11 +16130,51 @@ function reviewNormal(data) {
   r.editors = r.editors.filter((x) => typeof x === 'string' && x.trim());
   return r;
 }
+// review.json is shared by every computer on the library (and by the
+// steps of this window that each hold a copy, like an import that awaits).
+// Each copy remembers what it was read as; a save puts it together with
+// the file as it is now (ReviewMatch.mergeReview), so nothing another
+// computer or step added is written over, and the copy takes in theirs.
+const reviewBases = new WeakMap();
 async function reviewLoad(bookId) {
-  return reviewNormal(await window.neo.readJSON(bookId, 'review', null));
+  const data = reviewNormal(await window.neo.readJSON(bookId, 'review', null));
+  reviewBases.set(data, JSON.stringify(data));
+  return data;
 }
-async function reviewSave(bookId, data) {
-  await window.neo.writeJSON(bookId, 'review', data);
+const reviewSaving = {}; // bookId → the save before this one, so saves go one at a time
+function reviewSave(bookId, data) {
+  const prev = reviewSaving[bookId] || Promise.resolve();
+  const run = prev.catch(() => {}).then(async () => {
+    const disk = reviewNormal(await window.neo.readJSON(bookId, 'review', null));
+    const base = reviewBases.has(data) ? JSON.parse(reviewBases.get(data)) : reviewBlank();
+    const merged = ReviewMatch.mergeReview(base, data, disk);
+    Object.assign(data, merged);
+    await window.neo.writeJSON(bookId, 'review', data);
+    reviewBases.set(data, JSON.stringify(data));
+  });
+  reviewSaving[bookId] = run;
+  return run;
+}
+// another computer's changes to review.json, taken in while the book is
+// open (refreshFromDisk calls this): only where this window hasn't
+// changed the same thing since it last read or wrote it
+async function reviewRefresh() {
+  if (!book || !rvs.data || rvs.busy || rvs.bookId !== book.id || !window.neo.review) return;
+  const bookId = book.id;
+  const data = rvs.data;
+  let disk;
+  try { disk = reviewNormal(await window.neo.readJSON(bookId, 'review', null)); } catch { return; }
+  if (!book || book.id !== bookId || rvs.data !== data || rvs.busy) return;
+  const before = reviewBases.get(data);
+  if (JSON.stringify(disk) === before) return;
+  const base = before ? JSON.parse(before) : reviewBlank();
+  const mine = JSON.stringify(data) !== before;
+  Object.assign(data, ReviewMatch.mergeReview(base, data, disk));
+  // (what this window changed and hasn't saved yet is told apart from the
+  // old base at its next save)
+  if (!mine) reviewBases.set(data, JSON.stringify(data));
+  reviewTabShow();
+  if (currentTab === 'review') reviewRender();
 }
 
 // The editor's name, from the names this book was sent to before (the

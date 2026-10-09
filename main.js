@@ -2443,8 +2443,11 @@ const reviewFiles = new Map(); // token → the file's path
 async function reviewRead(fp) {
   if (!/\.docx$/i.test(fp || '')) return { error: t('That isn’t a Word file (.docx).') };
   try {
+    const RD = require('./review-docx.js');
+    // (a Word file with a novel in it is a few MB; pictures make it larger)
+    if (fs.statSync(fp).size > 512 * 1024 * 1024) return { error: t('{file} is too large to read as a review.', { file: path.basename(fp) }) };
     const bytes = new Uint8Array(fs.readFileSync(fp));
-    const model = await require('./review-docx.js').readDocx(bytes, require('./slog-zip.js'), (b) => require('zlib').inflateRawSync(b));
+    const model = await RD.readDocx(bytes, require('./slog-zip.js'), (b) => require('zlib').inflateRawSync(b, { maxOutputLength: RD.MAX_PART }));
     const token = require('crypto').randomBytes(12).toString('hex');
     reviewFiles.set(token, fp);
     return { token, name: path.basename(fp), model };

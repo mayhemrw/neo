@@ -51,6 +51,15 @@
 'use strict';
 
 (function (exports) {
+  // maps keyed by what a file says (ids, names): no prototype, so a key
+  // like __proto__ is only a key
+  const dict = () => Object.create(null);
+  // …handed out as an ordinary object, every key its own (even __proto__)
+  const plain = (d) => {
+    const o = {};
+    for (const k of Object.keys(d)) Object.defineProperty(o, k, { value: d[k], enumerable: true, writable: true, configurable: true });
+    return o;
+  };
   // -------------------------------------------------------------------------
   // The tokenizer
   // -------------------------------------------------------------------------
@@ -156,7 +165,7 @@
           scope[k === 'xmlns' ? '' : k.slice(6)] = v;
         }
       }
-      const attrs = {};
+      const attrs = dict();
       for (const [k, v] of raw) if (k !== 'xmlns' && !k.startsWith('xmlns:')) attrs[canon(k, scope, true)] = v;
       const name = canon(qname, scope, false);
       out.push({ t: 'open', name, attrs, empty, s: lt, e: i });
@@ -177,7 +186,7 @@
   };
 
   function readStyles(xml) {
-    const raw = {};
+    const raw = dict();
     if (xml) {
       const toks = tokens(xml);
       let cur = null;
@@ -204,7 +213,7 @@
         }
       }
     }
-    const out = {};
+    const out = dict();
     const resolve = (id, depth) => {
       if (out[id]) return out[id];
       const st = raw[id];
@@ -231,7 +240,7 @@
     const toks = tokens(xml);
     const paragraphs = [];
     const changes = [];
-    const ranges = {};          // comment id → { start, end, ref }
+    const ranges = dict();          // comment id → { start, end, ref }
     const notes = { textBoxes: 0, footnotes: 0, tableChanges: 0, sectionChanges: 0 };
     const openMoves = { from: [], to: [] };
     const pendingMarks = [];    // bookmarks and comment starts seen between paragraphs
@@ -528,7 +537,7 @@
       }
     }
 
-    const moves = {};
+    const moves = dict();
     for (const c of changes) {
       if ((c.type === 'moveFrom' || c.type === 'moveTo') && c.move) {
         const m = moves[c.move] || (moves[c.move] = { name: c.move, from: [], to: [] });
@@ -593,7 +602,7 @@
 
   // commentsExtended.xml: paraId → { parent (a paraId), done }
   function readCommentsExtended(xml) {
-    const out = {};
+    const out = dict();
     if (!xml) return out;
     for (const tk of tokens(xml)) {
       if (tk.t === 'open' && tk.name === 'w15:commentEx') {
@@ -606,7 +615,7 @@
 
   // commentsIds.xml: paraId → durableId
   function readCommentsIds(xml) {
-    const out = {};
+    const out = dict();
     if (!xml) return out;
     for (const tk of tokens(xml)) {
       if (tk.t === 'open' && tk.name === 'w16cid:commentId' && tk.attrs['w16cid:paraId']) out[tk.attrs['w16cid:paraId']] = tk.attrs['w16cid:durableId'] || '';
@@ -617,7 +626,7 @@
   // commentsExtensible.xml: durableId → the date in UTC (w:date is the
   // editor's local time with no zone)
   function readCommentsExtensible(xml) {
-    const out = {};
+    const out = dict();
     if (!xml) return out;
     for (const tk of tokens(xml)) {
       if (tk.t === 'open' && tk.name === 'w16cex:commentExtensible' && tk.attrs['w16cex:durableId']) out[tk.attrs['w16cex:durableId']] = tk.attrs['w16cex:dateUtc'] || '';
@@ -627,7 +636,7 @@
 
   // people.xml: author → { providerId, userId }
   function readPeople(xml) {
-    const out = {};
+    const out = dict();
     if (!xml) return out;
     let cur = null;
     for (const tk of tokens(xml)) {
@@ -644,7 +653,7 @@
 
   // docProps/custom.xml: { name: value }
   function readCustomProps(xml) {
-    const out = {};
+    const out = dict();
     if (!xml) return out;
     let cur = null;
     let inVal = false;
@@ -690,7 +699,7 @@
     const ids = readCommentsIds(get('commentsIds'));
     const utc = readCommentsExtensible(get('commentsExtensible'));
     const raw = readComments(get('comments'));
-    const byPara = {};
+    const byPara = dict();
     for (const c of raw) if (c.paraId) byPara[c.paraId] = c;
     const comments = raw.map((c) => {
       const e = ext[c.paraId] || { parent: '', done: false };
@@ -709,8 +718,8 @@
     const props = readCustomProps(get('custom'));
     return {
       round: props['NEO.ReviewRound'] || '',
-      props,
-      people: readPeople(get('people')),
+      props: plain(props),
+      people: plain(readPeople(get('people'))),
       paragraphs: doc.paragraphs,
       changes: doc.changes,
       moves: doc.moves,
@@ -764,7 +773,7 @@
   // { changes, comments } }, changes, comments, formatting, moves }. A
   // move counts once; a paragraph mark counts with the text change beside it.
   function summary(model) {
-    const authors = {};
+    const authors = dict();
     const who = (n) => authors[n] || (authors[n] = { changes: 0, comments: 0, formatting: 0 });
     let changes = 0;
     let formatting = 0;
@@ -776,16 +785,19 @@
       who(c.author).changes++;
     }
     for (const c of model.comments) who(c.author).comments++;
-    return { authors, changes, comments: model.comments.length, formatting, moves: model.moves.length };
+    return { authors: plain(authors), changes, comments: model.comments.length, formatting, moves: model.moves.length };
   }
 
   // Read a .docx's bytes: unzip (SlogZip's, inflate handed in or the
   // browser's own) and parse. Returns the parse with `problems` from the zip.
+  // Only the parts read are unpacked (never the pictures), each at most
+  // MAX_PART bytes.
+  const MAX_PART = 64 * 1024 * 1024;
   async function readDocx(bytes, zipLib, inflateRaw) {
     const Z = zipLib || (typeof globalThis !== 'undefined' && globalThis.SlogZip);
     if (!Z) throw new Error('No zip reader');
-    const { files, problems } = await Z.unzip(bytes, inflateRaw);
-    const parts = {};
+    const { files, problems } = await Z.unzip(bytes, inflateRaw, { only: Object.values(PART_NAMES), max: MAX_PART });
+    const parts = dict();
     for (const k of Object.keys(PART_NAMES)) if (files[PART_NAMES[k]]) parts[PART_NAMES[k]] = files[PART_NAMES[k]];
     const model = parse(parts);
     model.problems = problems;
@@ -1126,4 +1138,5 @@
   exports.readDocx = readDocx;
   exports.readStyles = readStyles;
   exports.PART_NAMES = PART_NAMES;
+  exports.MAX_PART = MAX_PART;
 })(typeof module !== 'undefined' && module.exports ? module.exports : (globalThis.ReviewDocx = {}));

@@ -30,6 +30,7 @@
   "{d} deleted, {n} remaining": "",
   "{device}, {when}: a session ended without closing (NEO quit unexpectedly, or the computer lost power)": "",
   "{device}: the writing after the last outside timestamp ({from} to {to}) is dated only by the computer's clock.": "",
+  "{file} is too large to read as a review.": "",
   "{h} am": "",
   "{h} h {m} min": "",
   "{h} pm": "",

@@ -417,3 +417,42 @@ describe('sending (a file for an editor)', () => {
     assert.throws(() => R.forReview(entries(), {}), /round/);
   });
 });
+
+test('a hostile file: ids and names like __proto__ are only keys, never the prototype', () => {
+  const body = `<w:p><w:commentRangeStart w:id="__proto__"/>${run('Hello')}<w:commentRangeEnd w:id="__proto__"/>`
+    + `<w:moveFrom ${who(1, '__proto__')} w:name="__proto__">${run('there')}</w:moveFrom>`
+    + `<w:ins ${who(2, 'constructor')}>${run(' you')}</w:ins></w:p>`;
+  const people = `<w15:people xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"><w15:person w15:author="__proto__"/></w15:people>`;
+  const custom = `<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><property name="__proto__"><vt:lpwstr>x</vt:lpwstr></property></Properties>`;
+  const m = parse(body, { 'word/people.xml': people, 'docProps/custom.xml': custom });
+  const s = R.summary(m);
+  assert.equal(({}).start, undefined);
+  assert.equal(({}).changes, undefined);
+  assert.equal(Object.getPrototypeOf(s.authors), Object.prototype);
+  assert.ok(Object.prototype.hasOwnProperty.call(s.authors, '__proto__'), 'the name is counted as a name');
+  assert.ok(Object.prototype.hasOwnProperty.call(m.people, '__proto__'));
+  assert.equal(m.round, '');
+});
+
+test('readDocx unpacks only the parts it reads, and refuses one too large before inflating it', async () => {
+  const big = new Uint8Array(200000);
+  const file = Z.zip([
+    { name: 'word/document.xml', data: doc(`<w:p>${run('Hello')}</w:p>`) },
+    { name: 'word/media/picture.bin', data: big }
+  ], { deflateRawSync: zlib.deflateRawSync });
+  const inflated = [];
+  const inflate = (b) => { const out = zlib.inflateRawSync(b); inflated.push(out.length); return out; };
+  const m = await R.readDocx(file, Z, inflate);
+  assert.equal(m.paragraphs[0].after, 'Hello');
+  assert.ok(!inflated.includes(big.length), 'the picture was never unpacked');
+  // a part that says it's larger than NEO reads: left out, said so, never inflated
+  const bytes = new Uint8Array(file);
+  const dv = new DataView(bytes.buffer, bytes.byteOffset);
+  let at = -1;
+  for (let i = 0; i < bytes.length - 4; i++) if (dv.getUint32(i, true) === 0x02014b50 && new TextDecoder().decode(bytes.slice(i + 46, i + 46 + 17)) === 'word/document.xml') { at = i; break; }
+  assert.ok(at > 0);
+  dv.setUint32(at + 24, R.MAX_PART + 1, true); // the central directory's unpacked size
+  inflated.length = 0;
+  await assert.rejects(R.readDocx(bytes, Z, inflate), /no word\/document\.xml/);
+  assert.equal(inflated.length, 0);
+});

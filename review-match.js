@@ -399,12 +399,20 @@
   // counts: { reviewer: { changes, comments, untracked, formatting } },
   // cancelled, unplaced (sections that matched no chapter) }. Suggestions
   // and threads carry `chapter` (an id, or null) but no ids of their own.
+  // an ordinary object from a prototype-free map, every key its own (even
+  // __proto__, a name a file could give)
+  const plain = (d) => {
+    const o = {};
+    for (const k of Object.keys(d)) Object.defineProperty(o, k, { value: d[k], enumerable: true, writable: true, configurable: true });
+    return o;
+  };
+
   function match(model, chapters, { fallback = '' } = {}) {
     const { how, sections } = sectionsOf(model);
     const ids = assignChapters(sections, chapters);
     const byId = new Map(chapters.map((c) => [c.id, c]));
     const suggestions = [];
-    const counts = {};
+    const counts = Object.create(null);
     const count = (name, k) => { const c = counts[name] || (counts[name] = { changes: 0, comments: 0, untracked: 0, formatting: 0 }); c[k]++; };
     let cancelled = 0;
     let unplaced = 0;
@@ -494,7 +502,7 @@
       }
       add(th, c);
     }
-    return { how, chapters: out, suggestions, threads, counts, cancelled, unplaced };
+    return { how, chapters: out, suggestions, threads, counts: plain(counts), cancelled, unplaced };
   }
 
   // -------------------------------------------------------------------------
@@ -523,13 +531,28 @@
       if (th.comments && th.comments[0]) byFirst.set(said(th.comments[0]), th);
     }
     const added = [];
-    const repeats = {};
+    const repeats = Object.create(null);
     let merged = 0;
+    // by the words alone (a file whose ids were all renewed) only over the
+    // same words, in the same chapter, once per import, and never into a
+    // thread the writer deleted: editors say "Cut?" more than once
+    const norm = (a) => String((a && a.exact) || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const samePlace = (th, f) => {
+      if (th.chapter && f.chapter && th.chapter !== f.chapter) return false;
+      const a = norm(th.anchor);
+      const b = norm(f.anchor);
+      return !a || !b || a === b || a.includes(b) || b.includes(a);
+    };
+    const paired = new Set();
     for (const f of found) {
       let th = null;
       for (const c of f.comments) { const hit = c.paraId && byId.get(c.paraId); if (hit) { th = hit; break; } }
-      if (!th && f.comments[0]) th = byFirst.get(said(f.comments[0])) || null;
+      if (!th && f.comments[0]) {
+        const k = byFirst.get(said(f.comments[0])) || null;
+        if (k && !paired.has(k) && !k.deleted && samePlace(k, f)) th = k;
+      }
       if (!th) { added.push(f); continue; }
+      paired.add(th);
       merged++;
       let fresh = 0;
       for (const c of f.comments) {
@@ -552,7 +575,7 @@
       // where it is now, from the file just read (a later version's text)
       if (f.anchor) { th.anchor = f.anchor; th.chapter = f.chapter; }
     }
-    return { added, merged, repeats };
+    return { added, merged, repeats: plain(repeats) };
   }
 
   // How close a file is to a version of the book, 0 to 1 (for choosing which
@@ -586,7 +609,62 @@
   // the next reviewer's number
   const nextNum = (reviewers) => (Array.isArray(reviewers) ? reviewers : []).reduce((m, r, i) => Math.max(m, r && Number.isSafeInteger(r.num) ? r.num : i + 1), 0) + 1;
 
+  // -------------------------------------------------------------------------
+  // review.json from two places at once: this window's copy and the file
+  // as another computer (or another of this window's own steps) left it.
+  // `base` is what this copy was read as. Nothing in review.json is ever
+  // taken out, only added or changed, so the two are put together item by
+  // item: one only one side has stays; one both have is this copy's if it
+  // changed it since `base`, else the file's; a thread keeps every comment
+  // either side has. Two editors numbered alike on two computers are
+  // numbered apart again, the same way on both (by name).
+  // -------------------------------------------------------------------------
+  const REVIEW_LISTS = { rounds: 'id', imports: 'id', suggestions: 'id', threads: 'id', reviewers: 'name' };
+  const commentKey = (c) => (c && c.paraId) || [(c && c.by) || '', (c && c.at) || '', (c && c.text) || ''].join('\u0000');
+  function mergeReview(base, local, remote) {
+    const J = (x) => JSON.stringify(x);
+    const out = Object.assign({}, local);
+    for (const [list, idk] of Object.entries(REVIEW_LISTS)) {
+      const L = Array.isArray(local && local[list]) ? local[list] : [];
+      const R = Array.isArray(remote && remote[list]) ? remote[list] : [];
+      const B = new Map((Array.isArray(base && base[list]) ? base[list] : []).filter((e) => e && e[idk] != null).map((e) => [e[idk], J(e)]));
+      const byR = new Map(R.filter((e) => e && e[idk] != null).map((e) => [e[idk], e]));
+      const inL = new Set();
+      const merged = L.map((e) => {
+        if (!e || e[idk] == null) return e;
+        inL.add(e[idk]);
+        const r = byR.get(e[idk]);
+        if (!r || J(r) === J(e)) return e;
+        if (B.has(e[idk]) && B.get(e[idk]) === J(e)) return r; // untouched here: the file's
+        if (list === 'threads') {
+          const have = new Set((e.comments || []).map(commentKey));
+          const more = (r.comments || []).filter((c) => !have.has(commentKey(c)));
+          return more.length ? Object.assign({}, e, { comments: [...(e.comments || []), ...more] }) : e;
+        }
+        return e;
+      });
+      for (const r of R) if (r && r[idk] != null && !inL.has(r[idk])) merged.push(r);
+      out[list] = merged;
+    }
+    const eds = [...(Array.isArray(local && local.editors) ? local.editors : [])];
+    for (const n of Array.isArray(remote && remote.editors) ? remote.editors : []) if (!eds.includes(n)) eds.push(n);
+    out.editors = eds.slice(0, 12);
+    // one number, one editor
+    const seen = new Map();
+    const again = [];
+    const revs = out.reviewers.map((r) => Object.assign({}, r));
+    revs.forEach((r, i) => { if (!Number.isSafeInteger(r.num) || r.num < 1) r.num = i + 1; });
+    for (const r of [...revs].sort((a, b) => a.num - b.num || String(a.name).localeCompare(String(b.name)))) {
+      if (seen.has(r.num)) again.push(r); else seen.set(r.num, r);
+    }
+    let top = Math.max(0, ...seen.keys());
+    for (const r of again) r.num = ++top;
+    out.reviewers = revs;
+    return out;
+  }
+
   exports.reviewerTag = reviewerTag;
+  exports.mergeReview = mergeReview;
   exports.reviewerNames = reviewerNames;
   exports.nextNum = nextNum;
   exports.PARA = PARA;
