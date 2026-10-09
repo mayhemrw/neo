@@ -39,6 +39,10 @@
 // file has no range for it. `parent` is the id of the comment it answers
 // (commentsExtended.xml's paraIdParent), `done` whether it was resolved.
 //
+// Sending (M2): `forReview(entries, { round })` makes NEO's own Word export
+// a file for an editor (an id on every paragraph, the round's id, Track
+// Changes on); `withBookmark` and `chapterMark` mark where chapters start.
+//
 // Also: `round` (NEO's round id, `NEO.ReviewRound` in docProps/custom.xml),
 // `people` (people.xml: { name: { providerId, userId } }), `props` (every
 // custom property), and `notes`: what was in the file but isn't read (text
