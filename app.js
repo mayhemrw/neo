@@ -16495,19 +16495,29 @@ async function importReview(filePath = null, already = null) {
     // the wrong book? NEO's own file says which book it came from, whatever
     // it's called now
     const home = await reviewHomeOf(model, bookId, review);
+    let forced = false;
     if (home) {
       const title = home.title || t('Untitled');
+      // (here anyway: a book duplicated after it was sent, or one no longer
+      // in this library; the writer knows, NEO only says what the file says)
       const go = await optionModal(escHtml(t('This file is from another book')),
-        escHtml(t('{file} was sent from “{title}”, not this book. Its changes belong there.', { file: got.name, title })),
-        home.there ? [{ label: escHtml(t('Open “{title}” and import it there', { title })), value: 'go' }] : []);
+        escHtml(home.there
+          ? t('{file} was sent from “{title}”, not this book. Its changes belong there.', { file: got.name, title })
+          : t('{file} was sent from another book, one that isn’t in this library.', { file: got.name })),
+        [
+          ...(home.there ? [{ label: escHtml(t('Open “{title}” and import it there', { title })), value: 'go' }] : []),
+          { label: escHtml(t('Import it into this book anyway')), desc: escHtml(t('NEO asks which version it was sent from. Nothing in the book changes until you accept a change.')), value: 'here', danger: true }
+        ]);
       if (go === 'go' && book && book.id === bookId) {
         reviewImporting = false;
         await openBook(home.id);
         if (book && book.id === home.id) await importReview(null, got);
-      } else if (!home.there) toast(t('That book isn’t in this library. Nothing was imported.'), 6000);
-      return;
+        return;
+      }
+      if (go !== 'here' || !book || book.id !== bookId) return;
+      forced = true;
     }
-    let round = model.round ? review.rounds.find((r) => r.id === model.round) || null : null;
+    let round = model.round && !forced ? review.rounds.find((r) => r.id === model.round) || null : null;
     let chapters = round ? await reviewSentChapters(bookId, round) : null;
     if (!chapters) {
       const choice = await reviewWhichVersion(bookId, review, model, !!round);
@@ -16518,7 +16528,7 @@ async function importReview(filePath = null, already = null) {
     // a file from somewhere else that hardly shares a passage with this
     // book is most likely another book's: asked, never taken quietly
     const ours = model.book === bookId || (!!model.round && review.rounds.some((r) => r.id === model.round));
-    const share = ours ? null : ReviewMatch.overlap(model, chapters);
+    const share = ours || forced ? null : ReviewMatch.overlap(model, chapters);
     if (share !== null && share < 0.25) {
       const go = await optionModal(escHtml(t('This file doesn’t look like this book')),
         escHtml(t('Only {n}% of {file} is in “{title}”. If it’s another book’s, open that book and import it there.', { n: Math.round(share * 100), file: got.name, title: book.title || t('Untitled') })),

@@ -1058,6 +1058,7 @@ test('a file from another book: NEO says which book it’s from and imports it t
   assert.match(await js(`LAST().textContent`), /was sent from “harbor”|was sent from “The Harbor”|was sent from “/);
   await tick(150);
   await shot('review-wrong-book');
+  assert.deepEqual(await js(`[...LAST().querySelectorAll('.fr-choice strong')].map((b) => b.textContent)`).then((l) => l.map((x) => x.replace(/“.*”/, '“…”'))), ['Open “…” and import it there', 'Import it into this book anyway']);
   await js(`LAST().querySelector('.fr-choice').click()`);
   await until(() => js(`!!${S}`));
   assert.equal(await js('book.id'), harbor, 'the harbor book opened');
@@ -1084,6 +1085,33 @@ test('a file from another book: NEO says which book it’s from and imports it t
   await js(`LAST().querySelector('.m-cancel').click()`);
   await js(`window.__ri`);
   assert.equal(JSON.stringify((await reviewJson()).imports), reviewsBefore, 'nothing imported into the wrong book');
+  // a file from a book no longer in this library (say, this book's own,
+  // duplicated since): said so, and it can still come in here
+  const gone = path.join(tmp, 'from-a-gone-book.docx');
+  {
+    const sentHere = path.join(tmp, 'this-book.docx');
+    await sendTo('Dana Editor', sentHere);
+    const zip = await JSZip.loadAsync(fs.readFileSync(sentHere));
+    const props = await zip.file('docProps/custom.xml').async('string');
+    zip.file('docProps/custom.xml', props.replace(/(name="NEO.Book"><vt:lpwstr>)[^<]*/, '$1book-gone-000000').replace(/(name="NEO.ReviewRound"><vt:lpwstr>)[^<]*/, '$1r20200101-000000'));
+    let doc = await zip.file('word/document.xml').async('string');
+    doc = splice(doc, 'foolishness', DEL('Dana Editor', 'foolishness') + INS('Dana Editor', 'folly'));
+    zip.file('word/document.xml', doc);
+    fs.writeFileSync(gone, await zip.generateAsync({ type: 'nodebuffer' }));
+  }
+  await js(`(() => { window.__ri = importReview(${JSON.stringify(gone)}); })()`);
+  await until(() => js(`!!LAST() && /another book/.test(LAST().textContent)`));
+  assert.match(await js(`LAST().textContent`), /isn’t in this library/);
+  assert.deepEqual(await js(`[...LAST().querySelectorAll('.fr-choice strong')].map((b) => b.textContent)`), ['Import it into this book anyway']);
+  await js(`LAST().querySelector('.fr-choice').click()`);
+  await until(() => js(`!!LAST() && /Which version/.test(LAST().textContent)`));
+  await js(`LAST().querySelector('.fr-choice').click()`);
+  await until(() => js(`!!${S}`));
+  assert.ok((await summaryLines()).some((l) => /^Dana Editor: /.test(l)), (await summaryLines()).join(' | '));
+  await js(`${S}.querySelector('.m-ok').click()`);
+  await js(`window.__ri`);
+  const after = (await reviewJson()).suggestions.filter((x) => x.del === 'foolishness' && x.ins === 'folly');
+  assert.equal(after.length, 1, 'imported here');
 });
 
 async function main() {
