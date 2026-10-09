@@ -515,6 +515,39 @@ class History {
     return this.text(dir, ref.dev, ref.n, V.chapterDoc(id), { h: ref.h || null });
   }
 
+  // The chapter titles in a version, as book.json had them then (phase 4):
+  // the book document rebuilt at the version's entry, or a copy's own
+  // titles. Returns { titles: { id: title }, ids: [id] } (ids: the
+  // chapters the version knows, in the book's order then; a chapter with no
+  // title has none in `titles`) or { error }.
+  versionTitles(dir, ref) {
+    if (!ref) return { error: 'no such version' };
+    if (ref.named) {
+      const v = readNamedFile(dir, ref.named);
+      if (!v) return { error: 'that version isn\'t there' };
+      ref = v.copy ? { copy: v.copy } : { dev: v.dev, n: v.n, h: v.h };
+    }
+    const pick = (titles, ids) => {
+      const out = {};
+      for (const id of ids) if (typeof titles[id] === 'string' && titles[id].trim()) out[id] = titles[id];
+      return { titles: out, ids };
+    };
+    if (ref.copy) {
+      const c = readCopy(dir, ref.copy);
+      if (!c) return { error: 'that version\'s copy can\'t be read' };
+      // (a session's copy holds only the chapters it changed; a named
+      // version's, every chapter)
+      const held = Object.keys(c.chapters);
+      return pick(c.titles, [...c.order.filter((id) => id in c.chapters), ...held.filter((id) => !c.order.includes(id))]);
+    }
+    if (typeof ref.dev !== 'string' || !Number.isSafeInteger(ref.n)) return { error: 'no such version' };
+    const r = this.rebuild(dir, ref.dev, ref.n, { h: ref.h || null });
+    if (r.error) return r;
+    const facts = typeof r.docs.book === 'string' ? bookFacts(r.docs.book) : null;
+    if (!facts) return { error: 'book' in r.docs ? 'the titles for this version aren\'t in the log' : 'the book\'s details weren\'t logged yet then' };
+    return pick(facts.titles, facts.order.filter((id) => typeof id === 'string' && facts.kinds[id] !== 'contents'));
+  }
+
   // One document after entry n of a chain: { text } or { error }
   text(dir, dev, n, doc, { h = null } = {}) {
     const r = this.rebuild(dir, dev, n, { h });

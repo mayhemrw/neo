@@ -1381,6 +1381,14 @@ body.full-screen.focus-mode #bottombar:not(:hover):not(.attn) { opacity: 0; }
 .fr-hit b { color: #f3ead6; font-weight: 700; }
 .fr-hit mark { background: rgba(201,168,106,0.35); color: inherit; border-radius: 2px; }
 .fr-tag { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--accent); margin-right: 6px; }
+/* Keep formatting / Plain on a hit that crosses formatting, and on its heading for all */
+.fr-acts { position: absolute; right: 8px; top: 3px; display: none; gap: 4px; background: #262626; padding-left: 8px; box-shadow: -10px 0 10px #262626; }
+.fr-group .fr-acts { top: auto; bottom: 3px; right: 34px; text-transform: none; letter-spacing: 0; }
+.fr-hit:hover .fr-acts, .fr-group:hover .fr-acts, .fr-scroll:focus .fr-hit.cur .fr-acts { display: flex; }
+#find-results .fr-acts button { padding: 1px 7px; font-size: 10.5px; line-height: 16px; background: #262626; }
+#find-results.docked .fr-acts { top: auto; bottom: 4px; }
+#find-results.docked .fr-acts, #find-results.docked .fr-acts button { background: var(--pane); box-shadow: -10px 0 10px var(--pane); }
+#find-results.docked .fr-acts button { box-shadow: none; }
 /* docked: the pane's own head and notes step aside while it's there */
 #side-pane.find-docked { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 0; }
 #side-pane.find-docked > :not(#find-results) { display: none; }
@@ -1531,6 +1539,14 @@ body.full-screen.focus-mode #bottombar:not(:hover):not(.attn) { opacity: 0; }
 .hv-compare-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 0 22px 10px; font-size: 13px; color: #bbb; }
 .hv-compare-row label { display: flex; align-items: center; gap: 8px; margin: 0; }
 .hv-summary { color: #9a9a9a; }
+.hv-titleline { padding: 0 22px 8px; font-size: 13px; color: #ccc; }
+.hv-titleline .hv-tl-k { font-size: 10.5px; text-transform: uppercase; letter-spacing: 1.5px; color: var(--muted); margin-right: 4px; }
+.hv-titleline .hv-tl-none, .hv-titleline .hv-tl-note { color: var(--muted); font-style: italic; }
+.hv-titleline del { color: #e08a80; text-decoration: line-through; }
+.hv-titleline ins { color: #8fd19e; text-decoration: underline; text-underline-offset: 2px; }
+body.light .hv-titleline { color: #3a3732; }
+body.light .hv-titleline del { color: #a3352c; }
+body.light .hv-titleline ins { color: #1f6a3c; }
 .hv-page {
   flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; margin: 0 22px 18px;
   background: var(--paper); color: var(--ink); border-radius: 6px; padding: 34px clamp(24px, 6%, 70px) 60px;
@@ -1895,6 +1911,8 @@ body.light .fr-hit b { color: #1c1a17; }
 body.light .fr-hit:hover { background: rgba(0,0,0,0.04); }
 body.light .fr-hit.at { background: rgba(124,93,38,0.10); }
 body.light .fr-hit mark { background: rgba(124,93,38,0.22); }
+body.light .fr-acts, body.light #find-results .fr-acts button { background: #fff; box-shadow: -10px 0 10px #fff; }
+body.light #find-results .fr-acts button { box-shadow: none; }
 body.light #searchbar #search-list[aria-pressed="true"] { background: rgba(124,93,38,0.12); }
 body.light #hint { background: #2b2926; color: #f0ede7; box-shadow: 0 3px 14px rgba(0,0,0,0.2); }
 

@@ -53,5 +53,9 @@
   "Sprint ended — {n} words in {min} min": {
     "one": "Sprint ended — {n} word in {min} min",
     "other": "Sprint ended — {n} words in {min} min"
+  },
+  "{n} chapter titles are back as they were in “{name}”.": {
+    "one": "{n} chapter title is back as it was in “{name}”.",
+    "other": "{n} chapter titles are back as they were in “{name}”."
   }
 }

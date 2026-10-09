@@ -11060,7 +11060,7 @@ function slogCauseOf(label) {
   if (l === 'replace' || l === 'replace all') return { src: 'typed', cause: 'replace' };
   if (l === 'darling' || l === 'darling restore' || l === 'chapter delete' || l === 'section delete' || l === 'scene delete' || l === 'cards delete') return { src: 'move', cause: 'darling' };
   if (l === 'darling delete') return { src: 'typed', cause: 'darling' };
-  if (l === 'restore' || l === 'restore chapter') return { src: 'move', cause: 'restore' };
+  if (l === 'restore' || l === 'restore chapter' || l === 'restore titles') return { src: 'move', cause: 'restore' };
   if (/^(card moved|card to chapter|card to loose|loose card placed|scene moved|chapter reorder|outline section to chapter)$/.test(l)) return { src: 'move', cause: 'outline' };
   if (/^(outline|card|scene|loose card) /.test(l)) return { src: 'typed', cause: 'outline' };
   return { src: 'typed' };
@@ -11400,14 +11400,18 @@ function historyCopied(bookId, text) {
 // Restore This Version: the chapter's words replaced by the version's, as
 // one structural step (⌘Z, even from inside the text, puts them back), all
 // of it one restore in the Scribe's Log
-async function historyRestoreChapter(chId, html, when, version) {
+// (title: the chapter's title in that version, put back too when it differs)
+async function historyRestoreChapter(chId, html, when, version, title = null) {
   if (!book || !book.chapterOrder.includes(chId)) return;
   if (currentTab !== 'manuscript') switchTab('manuscript');
+  const retitle = typeof title === 'string' && title.trim() !== ((book.chapterTitles || {})[chId] || '').trim();
   await slogWith({ src: 'move', cause: 'restore' }, async () => {
     snapshotStructure('restore');
     chapterHTML[chId] = html;
+    if (retitle) historySetTitle(chId, title);
     renderChapters();
     await persistChapter(chId);
+    if (retitle) await saveMeta();
   });
   breakRun++; // the engine never saw this change: ⌘Z goes to NEO's undo
   focusChapterStart(chId);
@@ -11416,9 +11420,38 @@ async function historyRestoreChapter(chId, html, when, version) {
   updateCounters();
   scheduleNavRefresh();
   const chapter = historyChapterLabel(chId);
-  toast(version
+  const titled = !retitle ? '' : ' ' + (title.trim() ? t('Its title is back to “{title}” too.', { title: title.trim() }) : t('Its title is off again, as it was then.'));
+  toast((version
     ? t('{chapter} is back to {when}. The text it replaced is the version “{name}”.', { chapter, when, name: version.name })
-    : t('{chapter} is back to {when}.', { chapter, when }), 9000);
+    : t('{chapter} is back to {when}.', { chapter, when })) + titled, 9000);
+}
+function historySetTitle(chId, title) {
+  book.chapterTitles = { ...(book.chapterTitles || {}) };
+  if (String(title).trim()) book.chapterTitles[chId] = String(title).trim();
+  else delete book.chapterTitles[chId];
+}
+// Restore Titles, on a named version: every chapter still in the book (and
+// in the version) gets its title as it was then, as one undoable step. A
+// "Before replacing…" version undoes a title replace this way after a
+// restart. got: history.titles' { titles, ids }. Returns how many changed.
+async function historyRestoreTitles(got, name) {
+  if (!book || !got || !Array.isArray(got.ids)) return 0;
+  const then = got.titles || {};
+  const now = book.chapterTitles || {};
+  const ids = book.chapterOrder.filter((id) => got.ids.includes(id) && chapterKind(id) !== 'contents' &&
+    String(then[id] || '').trim() !== String(now[id] || '').trim());
+  if (!ids.length) return 0;
+  if (currentTab !== 'manuscript') switchTab('manuscript');
+  await slogWith({ src: 'move', cause: 'restore' }, async () => {
+    snapshotStructure('restore titles');
+    for (const id of ids) historySetTitle(id, then[id] || '');
+    renderChapters();
+    await saveMeta();
+  });
+  breakRun++;
+  scheduleNavRefresh();
+  toast(t('{n} chapter titles are back as they were in “{name}”.', { n: ids.length, name }) + ' ' + t('{key} to undo.', { key: KZ }), 8000);
+  return ids.length;
 }
 // Restore as New Chapter: a chapter no longer in the book, back under its
 // own id (so its history carries on), with its title, in its old place:
@@ -11484,6 +11517,7 @@ async function showHistory(msg) {
               <button type="button" data-mode="play" aria-pressed="false" title="${escHtml(t('Watch the chapter being written, change by change'))}">${escHtml(t('Play'))}</button>
             </div>
             <span class="hv-named-tools" hidden>
+              <button type="button" class="btn-quiet hv-titles" title="${escHtml(t('Every chapter’s title as it was in this version'))}">${escHtml(t('Restore Titles'))}</button>
               <button type="button" class="btn-quiet hv-rename">${escHtml(t('Rename…'))}</button>
               <button type="button" class="btn-quiet hv-delete">${escHtml(t('Delete…'))}</button>
             </span>
@@ -11496,6 +11530,7 @@ async function showHistory(msg) {
             <label>${escHtml(t('Compare with'))} <select class="hv-against"></select></label>
             <span class="hv-summary"></span>
           </div>
+          <div class="hv-titleline" hidden></div>
           <div class="hv-page" tabindex="0" aria-label="${escHtml(t('The version'))}"></div>
           <div class="hv-play" hidden>
             <p class="hv-play-note"></p>
@@ -11517,6 +11552,7 @@ async function showHistory(msg) {
   const summary = bd.querySelector('.hv-summary');
   const note = bd.querySelector('.hv-problems');
   const restoreBtn = bd.querySelector('.hv-restore');
+  const titleLine = bd.querySelector('.hv-titleline');
   const copyBtn = bd.querySelector('.hv-copy');
   const playBox = bd.querySelector('.hv-play');
   const playNote = bd.querySelector('.hv-play-note');
@@ -11524,7 +11560,7 @@ async function showHistory(msg) {
   const P = globalThis.SlogPlayback;
   // what's shown: the chapter, its entries, the one selected, read or
   // compared, and with what ('now' or another entry's key)
-  const st = { data: null, chId: null, entries: [], sel: null, mode: 'view', against: null, seq: 0, texts: new Map(), player: null, play: null };
+  const st = { data: null, chId: null, entries: [], sel: null, mode: 'view', against: null, seq: 0, texts: new Map(), titles: new Map(), titleThen: null, player: null, play: null };
   const stopPlayer = () => { if (st.player) { st.player.destroy(); st.player = null; } };
   historyState.open = st;
 
@@ -11582,6 +11618,17 @@ async function showHistory(msg) {
     }
     return st.texts.get(k);
   };
+  // a version's chapter titles (the whole book's), asked of main.js once
+  const titlesOf = (e) => {
+    if (!h.titles) return Promise.resolve({ error: 'no titles' });
+    if (!st.titles.has(e.key)) {
+      st.titles.set(e.key, Promise.resolve(h.titles(bookId, e.ref)).catch((err) => ({ error: (err && err.message) || String(err) })));
+    }
+    return st.titles.get(e.key);
+  };
+  // this chapter's title in a version: a string ('' for none), or null when it can't be known
+  const titleIn = (got) => (got && !got.error && Array.isArray(got.ids) && got.ids.includes(st.chId) ? String((got.titles || {})[st.chId] || '').trim() : null);
+  const titleNow = () => (inBook() ? String((book.chapterTitles || {})[st.chId] || '').trim() : null);
   const inBook = () => (book.chapterOrder || []).includes(st.chId);
   const nowText = () => (book && book.id === bookId ? chapterHTML[st.chId] || '' : '');
 
@@ -11676,21 +11723,27 @@ async function showHistory(msg) {
       return;
     }
     page.classList.add('loading');
-    const mine = await textOf(e);
+    st.titleThen = null;
+    titleLine.hidden = true;
+    const [mine, mineTitles] = await Promise.all([textOf(e), titlesOf(e)]);
     let other = null;
     let otherEntry = null;
+    let otherTitle = null;
     if (st.mode === 'compare' && st.against) {
       otherEntry = st.against === 'now' ? null : entry(st.against);
       other = st.against === 'now' ? { text: nowText() } : otherEntry ? await textOf(otherEntry) : null;
+      otherTitle = st.against === 'now' ? titleNow() : otherEntry ? titleIn(await titlesOf(otherEntry)) : null;
     }
     if (seq !== st.seq || !bd.isConnected) return;
     page.classList.remove('loading');
+    st.titleThen = titleIn(mineTitles);
+    showTitleLine(e, st.titleThen, st.mode === 'compare' && other ? { entry: otherEntry, title: otherTitle } : null);
     if (mine.error) {
       page.innerHTML = `<p class="hv-error">${escHtml(t('This version can’t be shown: {why}', { why: mine.error }))}</p>`;
       copyBtn.hidden = true;
       return;
     }
-    restoreBtn.disabled = inBook() && mine.text === nowText();
+    restoreBtn.disabled = inBook() && mine.text === nowText() && (st.titleThen === null || st.titleThen === titleNow());
     if (restoreBtn.disabled) restoreBtn.title = t('The chapter is already this version.');
     if (st.mode !== 'compare' || !other) {
       page.innerHTML = D.viewHtml(mine.text) || `<p class="hv-wait">${escHtml(t('This version of the chapter is empty.'))}</p>`;
@@ -11729,11 +11782,30 @@ async function showHistory(msg) {
     page.scrollTop = 0;
   }
 
+  // The chapter's title in the version, above its text: as it was then, or
+  // compared (older first, as the text is) and marked when it differs
+  function showTitleLine(e, then, cmp) {
+    const label = `<span class="hv-tl-k">${escHtml(t('Title'))}</span> `;
+    const show = (x) => (x ? escHtml(x) : `<span class="hv-tl-none">${escHtml(t('none'))}</span>`);
+    let html = '';
+    if (cmp && then !== null && cmp.title !== null) {
+      const selFirst = e.at <= (cmp.entry ? cmp.entry.at : Infinity);
+      const [from, to] = selFirst ? [then, cmp.title] : [cmp.title, then];
+      if (from !== to) html = label + `<del>${show(from)}</del> <span aria-hidden="true">→</span> <ins>${show(to)}</ins>`;
+      else if (to) html = label + escHtml(to);
+    } else if (then !== null && (then || titleNow())) {
+      html = label + show(then) + (inBook() && then !== titleNow() ? ` <span class="hv-tl-note">${escHtml(t('(now: {title})', { title: titleNow() || t('none') }))}</span>` : '');
+    }
+    titleLine.innerHTML = html;
+    titleLine.hidden = !html;
+  }
+
   // Play: the chapter's changes from this version (or its start) to now,
   // built by the helper from the whole log, played here. The last one
   // asked for is kept, so going back to Play doesn't build it again.
   async function showPlay(e, seq) {
     copyBtn.hidden = true;
+    titleLine.hidden = true;
     restoreBtn.hidden = true; // (Read or Compare for that)
     const from = historyPlayFrom(st.entries, e);
     playNote.textContent = from
@@ -11846,14 +11918,30 @@ async function showHistory(msg) {
       return;
     }
     if (gone === book.chapterOrder.includes(chId)) { restoreBtn.disabled = false; return; } // the book changed meanwhile
-    const info = Object.values(st.data.chapters).find((c) => c.id === chId) || {};
+    const info = { ...(Object.values(st.data.chapters).find((c) => c.id === chId) || {}) };
+    const title = titleIn(await titlesOf(e));
+    if (title !== null) info.title = title;
     close();
     if (gone) await historyRestoreNew(chId, res.text, info);
-    else await historyRestoreChapter(chId, res.text, historyEntryName(e), res.version);
+    else await historyRestoreChapter(chId, res.text, historyEntryName(e), res.version, title);
   };
   against.onchange = () => { st.against = against.value; show(); };
   picker.onchange = () => openChapter(picker.value);
 
+  bd.querySelector('.hv-titles').onclick = async () => {
+    const e = entry(st.sel);
+    if (!e || !e.named) return;
+    const got = await titlesOf(e);
+    if (!bd.isConnected || !book || book.id !== bookId) return;
+    if (!got || got.error) { toast(t('The titles can’t be read from this version: {why}', { why: (got && got.error) || '?' }), 6000); return; }
+    const then = got.titles || {};
+    const now = book.chapterTitles || {};
+    const differ = book.chapterOrder.some((id) => got.ids.includes(id) && String(then[id] || '').trim() !== String(now[id] || '').trim());
+    if (!differ) { toast(t('The chapter titles are already as they were in “{name}”.', { name: e.name }), 5000); return; }
+    await slogSaveAll();
+    close();
+    await historyRestoreTitles(got, e.name);
+  };
   bd.querySelector('.hv-rename').onclick = async () => {
     const e = entry(st.sel);
     if (!e || !e.named) return;
@@ -13123,86 +13211,241 @@ function freshSearchIfStale() {
   if (searchState.query !== $('#search-input').value || searchState.tab !== currentTab || searchState.opts !== JSON.stringify(findOpts())) runSearch();
 }
 
-function replaceCurrent() {
+// ---- Replacing. Replace and Replace All stay in the manuscript (and its
+// chapter titles, when Include chapter titles is on). A hit that crosses
+// formatting ("the <i>old</i> house") is never replaced blind: Replace All
+// leaves it for the writer, and the list (or Replace, asking) puts it in
+// one of two ways: Keep formatting (each new word takes the formatting of
+// the word it replaces; the formatting where the hit starts when the
+// counts differ) or Plain (no bold, italic, underline or strikethrough;
+// the paragraph's own style stays).
+
+// [s, e) of a stretch replaced by rep, in the formatting of the text where
+// it starts: the first text node takes the new words, the rest of the
+// stretch is trimmed away. Several in one stretch go from the last back.
+// Returns where the new words end: { node, at }.
+function findSplice(block, s, e, rep) {
+  const { nodes } = block;
+  let i = 0;
+  while (i < nodes.length - 1 && nodes[i + 1].at <= s) i++;
+  let j = i;
+  while (j < nodes.length - 1 && nodes[j + 1].at < e) j++;
+  const a = nodes[i];
+  const z = nodes[j];
+  const a0 = s - a.at;
+  const z1 = e - z.at;
+  if (i === j) a.node.data = a.node.data.slice(0, a0) + rep + a.node.data.slice(z1);
+  else {
+    z.node.data = z.node.data.slice(z1);
+    for (let x = j - 1; x > i; x--) nodes[x].node.data = '';
+    a.node.data = a.node.data.slice(0, a0) + rep;
+  }
+  return { node: a.node, at: a0 + rep.length };
+}
+// an element that styles the words inside it (as findStyleOf reads them)
+function findStyled(el) {
+  if (FIND_STYLE_TAGS[el.tagName]) return true;
+  const st = el.getAttribute('style') || '';
+  return /font-style\s*:\s*italic|font-weight\s*:\s*(?:bold|[6-9]00)|text-decoration[^;]*(?:underline|line-through)/i.test(st);
+}
+// the paragraph a node sits in, within a root Find searched
+function findParaOf(node, root) {
+  for (let e = node.parentElement; e && e !== root; e = e.parentElement) if (FIND_BLOCKS.has(e.tagName)) return e;
+  return root;
+}
+// Keep formatting: word by word when the counts match, else all of it in
+// the formatting where the hit starts
+function findReplaceKeep(m, rep) {
+  const old = m.block.text.slice(m.start, m.end);
+  const words = [...old.matchAll(/\S+/g)].map((x) => [m.start + x.index, m.start + x.index + x[0].length]);
+  const neu = rep.match(/\S+/g) || [];
+  if (m.crosses && words.length > 1 && neu.length === words.length) {
+    for (let k = words.length - 1; k >= 0; k--) findSplice(m.block, words[k][0], words[k][1], neu[k]);
+  } else findSplice(m.block, m.start, m.end, rep);
+}
+// Plain: the hit taken out, and the new words put in outside every inline
+// style around that point (the styled element is split in two there)
+function findReplacePlain(m, rep) {
+  const { node, at } = findSplice(m.block, m.start, m.end, '');
+  if (!rep) return;
+  let top = null;
+  for (let el = node.parentElement; el && el !== m.block.root && !FIND_BLOCKS.has(el.tagName); el = el.parentElement) {
+    if (findStyled(el)) top = el;
+  }
+  const text = document.createTextNode(rep);
+  if (!top) { node.parentNode.insertBefore(text, node.splitText(at)); return; }
+  const r = document.createRange();
+  r.setStart(node, at);
+  r.setEndAfter(top);
+  const tail = r.extractContents();
+  top.after(tail);
+  top.after(text);
+}
+// styled elements a replacement emptied go (never a mark NEO keeps there)
+function findTidy(para) {
+  const empty = [...para.querySelectorAll('b, strong, i, em, u, s, strike, del, span[style]:not([class]):not([data-sid])')].reverse();
+  for (const el of empty) if (!el.textContent && !el.querySelector('br, img')) el.remove();
+}
+// a hit is still what was found: in the page, and the words still match
+function findStillThere(m) {
+  if (!m || !m.range.startContainer.isConnected || !m.range.endContainer.isConnected) return false;
+  const text = m.range.toString();
+  const again = findIn(text, findPattern(String(searchState.query || ''), { matchCase: findOpts().matchCase }));
+  return again.length === 1 && again[0][0] === 0 && again[0][1] === text.length;
+}
+
+// Hits replaced as one undoable step (label: 'replace' or 'replace all',
+// both logged as cause replace). how: 'keep' or 'plain', for those that
+// cross formatting. Titles go through NEO's own title change. Returns how
+// many were replaced.
+function replaceHits(ms, how, label) {
+  const rep = $('#replace-input').value;
+  const live = ms.filter(findStillThere);
+  if (!live.length) return 0;
+  snapshotStructure(label);
+  const byBlock = new Map();
+  for (const m of live) {
+    if (!byBlock.has(m.block)) byBlock.set(m.block, []);
+    byBlock.get(m.block).push(m);
+  }
+  const chapters = new Set();
+  const titles = new Set();
+  for (const [block, hits] of byBlock) {
+    hits.sort((a, b) => b.start - a.start);
+    const para = findParaOf(block.nodes[0].node, block.root);
+    for (const m of hits) {
+      if (m.crosses && how === 'plain') findReplacePlain(m, rep);
+      else findReplaceKeep(m, rep);
+    }
+    findTidy(para);
+    (hits[0].title ? titles : chapters).add(hits[0].chId);
+  }
+  for (const chId of chapters) {
+    const body = document.querySelector(`.chapter[data-id="${chId}"] .chapter-body`);
+    if (body) syncChapter(body, chId);
+  }
+  if (titles.size) {
+    book.chapterTitles = book.chapterTitles || {};
+    for (const chId of titles) {
+      const span = document.querySelector(`.chapter[data-id="${chId}"] .ch-title`);
+      if (!span) continue;
+      book.chapterTitles[chId] = span.textContent.trim();
+      span.closest('.chapter-head').classList.toggle('has-title', !!book.chapterTitles[chId]);
+    }
+    saveMeta();
+    renderNav();
+  }
+  breakRun++; // the engine never saw these changes: ⌘Z goes to NEO's undo
+  return live.length;
+}
+
+// Replace (the bar's, or Enter in Replace with): the hit gone to, or the
+// first. One that crosses formatting asks how.
+async function findAskHow(n) {
+  const ask = optionModal(escHtml(n === 1 ? t('This one crosses italics or bold') : t('These cross italics or bold')),
+    escHtml(t('How should the new words go in?')), [
+      { label: escHtml(t('Keep formatting')), desc: escHtml(t('Each new word takes the formatting of the word it replaces.')), value: 'keep' },
+      { label: escHtml(t('Plain')), desc: escHtml(t('No bold, italic, underline or strikethrough. The paragraph’s own style stays.')), value: 'plain' }
+    ]);
+  const first = [...document.querySelectorAll('.modal-backdrop .fr-choice')].pop();
+  if (first) first.parentElement.querySelector('.fr-choice').focus();
+  return ask;
+}
+async function replaceCurrent() {
   if (currentTab !== 'manuscript') return;
   freshSearchIfStale();
   if (!searchState.matches.length) { toast(t('No matches')); return; }
   if (searchState.idx < 0) searchState.idx = 0; // start from the very first match
   const m = searchState.matches[searchState.idx];
-  const rep = $('#replace-input').value;
   // the match may have been edited away by hand since it was found: look
   // again rather than put the replacement where it no longer is
-  const again = findIn(m.range.toString(), findPattern(String(searchState.query || ''), { matchCase: findOpts().matchCase }));
-  if (!(again.length === 1 && again[0][0] === 0 && again[0][1] === m.range.toString().length)) { runSearch(); return; }
-  // a title, or a match that crosses formatting, is left for later (phase
-  // 4's list: replace it by hand for now)
-  if (m.title || m.crosses) {
-    toast(m.title ? t('Chapter titles can be found, not replaced, for now.') : t('That one crosses italics or bold: replace it by hand for now.'), 5000);
-    return;
+  if (!findStillThere(m)) { runSearch(); return; }
+  let how = 'keep';
+  if (m.crosses) {
+    how = await findAskHow(1);
+    $('#search-input').focus({ preventScroll: true });
+    if (!how || !findStillThere(m)) return;
   }
-  let chapter = null;
-  try {
-    chapter = m.range.startContainer.parentElement.closest('.chapter');
-    snapshotStructure('replace');
-    breakRun++; // the engine never saw this change: ⌘Z goes to NEO's undo
-    m.range.deleteContents();
-    if (rep) m.range.insertNode(document.createTextNode(rep));
-  } catch {
-    runSearch();
-    return;
-  }
-  if (chapter) syncChapter(chapter.querySelector('.chapter-body'), chapter.dataset.id);
   const oldIdx = searchState.idx;
+  if (!replaceHits([m], how, 'replace')) { runSearch(); return; }
   runSearch();
   if (searchState.matches.length) gotoMatch(Math.min(oldIdx, searchState.matches.length - 1));
 }
 
-// Every chapter, front to back, as Find finds them (Match case and Whole
-// word too). A match that crosses formatting is left alone and counted
-// (phase 4 lets the writer decide those); so are chapter titles, for now.
-function replaceAllMatches() {
-  const q = $('#search-input').value;
-  if (!q || currentTab !== 'manuscript') return;
-  const re = findPattern(q, findOpts());
-  const rep = $('#replace-input').value;
-  snapshotStructure('replace all');
-  let n = 0;
-  let left = 0;
-  for (const chId of book.chapterOrder) {
-    const body = document.querySelector(`.chapter[data-id="${chId}"] .chapter-body`);
-    if (!body) continue;
-    // every match's place in its text nodes, worked out before anything
-    // changes, then put in from the last back, so the places stay right
-    const edits = [];
-    for (const block of findBlocks(body)) {
-      for (const [s, e] of findIn(block.text, re)) {
-        const m = findMatchAt(block, s, e);
-        if (m.crosses) { left++; continue; }
-        edits.push(m);
-      }
-    }
-    if (!edits.length) continue;
-    for (let k = edits.length - 1; k >= 0; k--) {
-      const { block, from, to, start, end } = edits[k];
-      const a = block.nodes[from];
-      const z = block.nodes[to];
-      const a0 = start - a.at;
-      const z1 = end - z.at;
-      if (from === to) a.node.data = a.node.data.slice(0, a0) + rep + a.node.data.slice(z1);
-      else {
-        z.node.data = z.node.data.slice(z1);
-        for (let x = to - 1; x > from; x--) block.nodes[x].node.data = '';
-        a.node.data = a.node.data.slice(0, a0) + rep;
-      }
-      n++;
-    }
-    syncChapter(body, chId);
-  }
-  if (n === 0) undoStack.pop(); // nothing changed, nothing to undo
-  else breakRun++; // ⌘Z from inside the text reaches this undo too
-  const done = n ? t('{n} replaced across the whole book — {key} to undo', { n, key: KZ }) : t('0 replaced');
-  toast(left ? done + ' ' + t('{n} left: they cross italics or bold.', { n: left }) : done, left ? 8000 : undefined);
+// A hit in the list that crosses formatting, decided (k: its row), or all
+// of them at once (the heading's buttons): one undoable step either way
+function findDecide(k, how) {
+  if (currentTab !== 'manuscript') return;
+  const r = findList.rows[k];
+  const ms = r && r.head === 'crosses' ? searchState.matches.filter((m) => m.crosses) : r && r.cross ? [searchState.matches[r.i]] : [];
+  if (!ms.length) return;
+  const n = replaceHits(ms, how, ms.length > 1 ? 'replace all' : 'replace');
   runSearch();
+  if (!n) return;
+  if (ms.length > 1) {
+    toast((how === 'plain' ? t('{n} replaced, as plain text.', { n }) : t('{n} replaced, keeping their formatting.', { n })) + ' ' + t('{key} to undo.', { key: KZ }), 6000);
+  }
+  // the list stays where it was, on the next hit
+  if (findList.open) {
+    const at = findListStep(Math.min(k, findList.rows.length) - 1, 1);
+    if (at >= 0) findListPlace(at);
+  }
+}
+
+// Replace All: every chapter, front to back, as Find finds them (Match
+// case, Whole word, titles when included). A version of the book is named
+// first, every time, so it can be taken back after a restart too ("Before
+// replacing ‘colour’ (Oct 8)"; with its titles). Hits that cross
+// formatting are left for the writer and the list opens on them.
+let replacingAll = false;
+async function replaceAllMatches() {
+  const q = $('#search-input').value;
+  if (!q || currentTab !== 'manuscript' || replacingAll || !book) return;
+  replacingAll = true;
+  try {
+    runSearch();
+    if (!searchState.matches.some((m) => !m.crosses)) {
+      const left = searchState.matches.length;
+      toast(left ? t('0 replaced.') + ' ' + t('{n} left: they cross italics or bold (see the list).', { n: left }) : t('0 replaced'), left ? 8000 : undefined);
+      if (left) findShowCrossing();
+      return;
+    }
+    const h = window.neo && window.neo.history;
+    const bookId = book.id;
+    let version = null;
+    if (h && h.mark) {
+      await slogSaveAll();
+      const day = new Date().toLocaleDateString(NeoI18n.getLocale(), { month: 'short', day: 'numeric' });
+      const what = [...q].length > 40 ? [...q].slice(0, 39).join('') + '…' : q;
+      let res;
+      try { res = await h.mark(bookId, t('Before replacing ‘{what}’ ({date})', { what, date: day }), 'replace'); } catch (err) { res = { error: (err && err.message) || String(err) }; }
+      if (!book || book.id !== bookId) return;
+      if (!res || res.error) { toast(t('Nothing was replaced: the version to go back to couldn’t be saved. {why}', { why: (res && res.error) || '' }), 9000); return; }
+      version = res;
+    }
+    // the page may have changed while the version was saved: find again
+    runSearch();
+    const ms = searchState.matches.filter((m) => !m.crosses);
+    const left = searchState.matches.length - ms.length;
+    const inTitles = ms.filter((m) => m.title).length;
+    const n = replaceHits(ms, 'keep', 'replace all');
+    const parts = [n ? t('{n} replaced across the whole book', { n }) + (inTitles ? ' ' + t('({n} in chapter titles)', { n: inTitles }) : '') + '.' : t('0 replaced.')];
+    if (left) parts.push(t('{n} left: they cross italics or bold (see the list).', { n: left }));
+    if (n) parts.push(version ? t('{key} to undo, or the version “{name}” in Chapter History.', { key: KZ, name: version.name }) : t('{key} to undo.', { key: KZ }));
+    toast(parts.join(' '), left || version ? 10000 : undefined);
+    runSearch();
+    if (left) findShowCrossing();
+  } finally {
+    replacingAll = false;
+  }
+}
+// the list opened (or kept) on the hits that cross formatting
+function findShowCrossing() {
+  if (!findList.open) toggleFindList(true);
+  const sc = $('#find-results .fr-scroll');
+  if (sc) sc.scrollTop = 0;
+  const k = findListStep(-1, 1);
+  if (k >= 0) findListPlace(k);
 }
 
 // ---- The results list: every hit in context, grouped by chapter, in a
@@ -13333,9 +13576,13 @@ function findListEl() {
   });
   // a click goes to the hit, like ↑ ↓ in the bar
   sc.addEventListener('click', (e) => {
+    const act = e.target.closest('.fr-acts button');
+    if (act) { e.stopPropagation(); findDecide(+act.closest('[id^="fr-row-"]').id.slice(7), act.dataset.how); return; }
     const row = e.target.closest('.fr-hit');
     if (row) findListGo(+row.dataset.k);
   });
+  // a button pressed keeps the focus in the list, where the keys are
+  sc.addEventListener('mousedown', (e) => { if (e.target.closest('.fr-acts button')) e.preventDefault(); });
   // focus arriving from Tab or a click lands on the hit last gone to
   sc.addEventListener('focus', () => {
     if (findList.cursor < 0) findListPlace(findList.rowOf[searchState.idx] ?? findListStep(-1, 1));
@@ -13462,6 +13709,7 @@ function findRowEl(k) {
     n.className = 'fr-gn';
     n.textContent = String(r.n);
     d.append(name, n);
+    if (r.head === 'crosses' && currentTab === 'manuscript') d.append(findActs(true));
     return d;
   }
   const m = searchState.matches[r.i];
@@ -13483,7 +13731,28 @@ function findRowEl(k) {
   }
   findLineInto(line, m, r.cross);
   d.append(line);
+  if (r.cross && currentTab === 'manuscript') d.append(findActs(false));
   return d;
+}
+// Keep formatting / Plain, on a hit that crosses formatting (K, P) or on
+// its heading for all of them (⇧K, ⇧P). Shown on hover and on the line
+// the keyboard is on.
+function findActs(all) {
+  const box = document.createElement('span');
+  box.className = 'fr-acts';
+  for (const [how, label, tip] of [
+    ['keep', t('Keep formatting'), all ? t('Replace them all, each new word in the formatting of the word it replaces (⇧K)') : t('Each new word takes the formatting of the word it replaces (K)')],
+    ['plain', t('Plain'), all ? t('Replace them all without bold, italic, underline or strikethrough (⇧P)') : t('No bold, italic, underline or strikethrough (P)')]
+  ]) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.tabIndex = -1;
+    b.dataset.how = how;
+    b.textContent = label;
+    b.title = tip;
+    box.append(b);
+  }
+  return box;
 }
 
 // A hit's line of context, the hit in bold. One that crosses formatting
@@ -13561,6 +13830,15 @@ function findListFocus() {
 // Esc back to the Find box
 function findListKeys(e) {
   if (e.altKey || e.metaKey || e.ctrlKey) return;
+  // K / P decide the hit the keyboard is on, if it crosses formatting;
+  // with Shift, every one that does
+  const how = e.code === 'KeyK' ? 'keep' : e.code === 'KeyP' ? 'plain' : null;
+  if (how && currentTab === 'manuscript') {
+    const r = findList.rows[findList.cursor];
+    const head = findList.rows.findIndex((x) => x.head === 'crosses');
+    if (e.shiftKey ? head >= 0 : r && r.cross) { e.preventDefault(); findDecide(e.shiftKey ? head : findList.cursor, how); }
+    return;
+  }
   const sc = e.currentTarget;
   const page = Math.max(1, Math.floor(sc.clientHeight / findList.hitH) - 1);
   const k = findList.cursor;

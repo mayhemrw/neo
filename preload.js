@@ -80,12 +80,13 @@ contextBridge.exposeInMainWorld('neo', {
 
   // versions (main.js and slog-history.js; Pocket has none)
   history: {
-    mark: (bookId, name) => ipcRenderer.invoke('history:mark', bookId, name),
+    mark: (bookId, name, auto) => ipcRenderer.invoke('history:mark', bookId, name, auto),
     named: (bookId) => ipcRenderer.invoke('history:named', bookId),
     rename: (bookId, file, name) => ipcRenderer.invoke('history:rename', bookId, file, name),
     remove: (bookId, file) => ipcRenderer.invoke('history:remove', bookId, file),
     list: (bookId) => ipcRenderer.invoke('history:list', bookId),
     text: (bookId, ref, chapterId) => ipcRenderer.invoke('history:text', bookId, ref, chapterId),
+    titles: (bookId, ref) => ipcRenderer.invoke('history:titles', bookId, ref),
     restore: (bookId, ref, chapterId, opts) => ipcRenderer.invoke('history:restore', bookId, ref, chapterId, opts),
     playback: (bookId, chapterId, from) => ipcRenderer.invoke('history:playback', bookId, chapterId, from)
   },

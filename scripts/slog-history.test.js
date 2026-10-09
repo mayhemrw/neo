@@ -14,6 +14,7 @@ const slog = require('../slog.js');
 const F = require('../slog-files.js');
 const H = require('../slog-history.js');
 const { History, chapterWords } = H;
+const plain = (x) => JSON.parse(JSON.stringify(x));
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'neo-history-'));
 let made = 0;
@@ -427,6 +428,36 @@ describe('Versions in the book', { concurrency: 1 }, () => {
     assert.deepEqual(ch3.was, { at: 2, after: 'ch-2' });
     assert.equal(h.versionText(env.dir, { copy: ch3.versions[0].file }, 'ch-3').text, '<p>Three, last words.</p>');
     assert.match(h.versionText(env.dir, { copy: first }, 'ch-3').error, /didn't exist then/);
+  });
+
+  test('a version\'s chapter titles: from the log at its entry, a named version, or a copy', async () => {
+    const env = setup({ chapters: { 'ch-1': '<p>One.</p>', 'ch-2': '<p>Two.</p>' }, titles: { 'ch-1': 'The Harbor' } });
+    const rec = env.recorder();
+    rec.open(env.dir, 'book-a');
+    save(rec, env, 'ch-1', '<p>One, longer.</p>');
+    const head = await rec.head(env.dir, 'book-a');
+    const named = H.writeNamed(env.dir, { name: 'Before replacing ‘Harbor’', auto: 'replace', at: env.clock, dev: head.dev, head });
+    assert.equal(named.auto, 'replace');
+    // titles change after: one replaced, one added
+    saveMeta(rec, env, { ...env.meta, chapterTitles: { 'ch-1': 'The Port', 'ch-2': 'Low Tide' } });
+    await rec.close('book-a');
+    const h = env.history();
+    assert.deepEqual(plain(h.versionTitles(env.dir, { named: named.file })), { titles: { 'ch-1': 'The Harbor' }, ids: ['ch-1', 'ch-2'] });
+    assert.deepEqual(plain(h.versionTitles(env.dir, { dev: head.dev, n: head.n })).titles, { 'ch-1': 'The Harbor' });
+    // the newest session version has the titles as they are now
+    const v = h.index(env.dir).chapters['ch-1'].versions;
+    const last = v[v.length - 1];
+    assert.deepEqual(plain(h.versionTitles(env.dir, { dev: last.dev, n: last.n })).titles, { 'ch-1': 'The Port', 'ch-2': 'Low Tide' });
+    assert.match(h.versionTitles(env.dir, { named: 'nope.json' }).error, /isn't there/);
+    assert.match(h.versionTitles(env.dir, { dev: head.dev, n: 9999 }).error, /isn't in that computer's chain/);
+    // with the log off: a whole-book copy's titles, and a session copy's (its chapters only)
+    const off = setup({ chapters: { 'ch-1': '<p>One.</p>', 'ch-2': '<p>Two.</p>' }, titles: { 'ch-2': 'Middle' } });
+    const copy = H.copyWholeBook(off.dir, { dev: DEV_A, at: Date.UTC(2026, 9, 8, 22, 0, 0) });
+    const whole = H.writeNamed(off.dir, { name: 'Whole', at: Date.UTC(2026, 9, 8, 22, 0, 0), dev: DEV_A, copy });
+    assert.deepEqual(plain(off.history().versionTitles(off.dir, { named: whole.file })), { titles: { 'ch-2': 'Middle' }, ids: ['ch-1', 'ch-2'] });
+    const part = H.writeCopy(off.dir, { dev: DEV_A, at: Date.UTC(2026, 9, 8, 23, 0, 0), chapters: { 'ch-2': '<p>Two!</p>' }, meta: off.meta });
+    assert.deepEqual(plain(off.history().versionTitles(off.dir, { copy: part })), { titles: { 'ch-2': 'Middle' }, ids: ['ch-2'] });
+    assert.deepEqual(env.errors, []);
   });
 
   test('a session left idle ends on its own; a dropped book copies nothing', async () => {

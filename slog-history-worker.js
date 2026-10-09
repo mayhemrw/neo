@@ -8,6 +8,7 @@
 //
 //   { id, type: 'list', home, dir }            History.list
 //   { id, type: 'text', home, dir, ref, chapter }  versionText
+//   { id, type: 'titles', home, dir, ref }      versionTitles
 //   { id, type: 'restore', home, dir, ref, chapter, me, at, logged }
 //                                              restoreSource
 //   { id, type: 'playback', home, dir, chapter, from }  playback (data)
@@ -29,6 +30,7 @@ function reply(msg) {
     let value;
     if (msg.type === 'list') value = history.list(msg.dir);
     else if (msg.type === 'text') value = history.versionText(msg.dir, msg.ref, msg.chapter);
+    else if (msg.type === 'titles') value = history.versionTitles(msg.dir, msg.ref);
     else if (msg.type === 'restore') value = history.restoreSource(msg.dir, msg.ref, msg.chapter, { me: msg.me, at: msg.at, logged: msg.logged });
     else if (msg.type === 'playback') value = history.playback(msg.dir, msg.chapter, { from: msg.from });
     else throw new Error('unknown request: ' + msg.type);

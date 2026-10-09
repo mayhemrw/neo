@@ -1017,11 +1017,12 @@ ipcMain.handle('slog:status', (_e, bookId) => slogTap((s) => s.status(bookDir(bo
 // Named versions. mark: File → Name This Version… (the window has saved
 // everything first). named: the book's named versions, oldest first, each
 // with whether this computer made it. rename / remove: one version's file.
-ipcMain.handle('history:mark', async (_e, bookId, name) => {
+// (auto: 'replace' when Replace All names one before it changes anything)
+ipcMain.handle('history:mark', async (_e, bookId, name, auto) => {
   const clean = slogHistory.cleanName(name);
   if (!clean) return { error: t('A version needs a name.') };
   try {
-    return await history.mark(bookId, clean);
+    return await history.mark(bookId, clean, auto === 'replace' ? 'replace' : null);
   } catch (err) {
     logError('versions', err);
     return { error: t('The version wasn\'t saved: {why}', { why: err.message }) };
@@ -1070,6 +1071,18 @@ ipcMain.handle('history:text', async (_e, bookId, ref, chapterId) => {
   if (!clean) return { error: t('No such version.') };
   try {
     return await historyAsk({ type: 'text', dir, ref: clean, chapter: chapterId });
+  } catch (err) {
+    logError('versions', err);
+    return { error: err.message };
+  }
+});
+// The chapter titles in a version (phase 4): { titles, ids } or { error }
+ipcMain.handle('history:titles', async (_e, bookId, ref) => {
+  const dir = bookDir(bookId);
+  const clean = historyRef(ref);
+  if (!clean) return { error: t('No such version.') };
+  try {
+    return await historyAsk({ type: 'titles', dir, ref: clean });
   } catch (err) {
     logError('versions', err);
     return { error: err.message };

@@ -58,6 +58,26 @@ const press = async (id) => { await js(`$('#${id}').click()`); await tick(60); }
 const pressed = () => js(`['find-case', 'find-word', 'find-titles'].map((id) => $('#' + id).getAttribute('aria-pressed'))`);
 const bodyText = (ch) => js(`document.querySelectorAll('.chapter-body')[${ch}].innerText`);
 const toastText = () => js(`$('#hint').textContent`);
+// a chapter's paragraph as markup
+const para = (ch, p) => js(`document.querySelectorAll('.chapter-body')[${ch}].querySelectorAll('p')[${p}].innerHTML`);
+// the book's named versions, as main.js lists them
+const versionsNamed = () => js(`window.neo.history.named(${JSON.stringify(bookId)})`);
+// the dialog on top (the first-run one is in the page too, hidden)
+const TOP = `[...document.querySelectorAll('.modal-backdrop:not([hidden])')].pop()`;
+async function until(cond, ms = 8000) {
+  const end = Date.now() + ms;
+  while (!(await cond())) {
+    if (Date.now() > end) throw new Error('timed out waiting: ' + cond);
+    await tick(50);
+  }
+}
+// a letter key as typed (e.code KeyK), with Shift when it's a capital asked for
+async function keyCode(k, shift = false) {
+  const modifiers = shift ? ['shift'] : [];
+  wc.sendInputEvent({ type: 'keyDown', keyCode: k, modifiers });
+  wc.sendInputEvent({ type: 'keyUp', keyCode: k, modifiers });
+  await tick(80);
+}
 
 const CH1 = [
   'Colour ran off the walls. The colour was gone.',
@@ -147,7 +167,7 @@ const key = async (keyCode, n = 1) => {
 // the rows drawn now: heads and hits, as the writer reads them
 const listRows = () => js(`[...document.querySelectorAll('#find-results .fr-space > div')].map((d) => ({
   head: d.classList.contains('fr-group'),
-  text: d.textContent,
+  text: [...d.childNodes].filter((c) => !(c.classList && c.classList.contains('fr-acts'))).map((c) => c.textContent).join(''),
   html: d.querySelector('.fr-line') ? d.querySelector('.fr-line').innerHTML : '',
   at: d.classList.contains('at'),
   cur: d.classList.contains('cur'),
@@ -380,11 +400,16 @@ test('Include chapter titles: found when asked, first in its chapter', async () 
   assert.deepEqual(await pressed(), ['false', 'false', 'true']);
   const r = await find('mill');
   assert.deepEqual(r.found.map((m) => [m.text, m.title, m.ch]), [['Mill', true, 1], ['mill', false, 1]]);
-  // a Replace on a title waits for the list (milestone 3)
-  await js(`gotoMatch(0); $('#replace-input').value = 'Forge'; replaceCurrent()`);
-  await tick(100);
-  assert.match(await toastText(), /Chapter titles can be found, not replaced/);
+  // Replace on a title changes it, the heading and the nav with it; ⌘Z puts it back
+  await js(`(async () => { gotoMatch(0); $('#replace-input').value = 'Forge'; await replaceCurrent(); })()`);
+  await tick(300);
+  assert.equal(await js(`book.chapterTitles[book.chapterOrder[1]]`), 'The Old Forge');
+  assert.equal(await js(`document.querySelectorAll('.ch-title')[1].textContent`), 'The Old Forge');
+  assert.ok(await js(`[...document.querySelectorAll('.nav-item')].some((n) => /The Old Forge/.test(n.textContent))`));
+  await js(`structuralUndo()`);
+  await tick(500);
   assert.equal(await js(`book.chapterTitles[book.chapterOrder[1]]`), 'The Old Mill');
+  assert.equal(await js(`document.querySelectorAll('.ch-title')[1].textContent`), 'The Old Mill');
   await press('find-titles');
 });
 
@@ -401,27 +426,44 @@ test('the titles option is only for the manuscript', async () => {
   assert.equal(await js(`$('#find-titles').hidden`), false);
 });
 
-test('Replace leaves a phrase across italics for the writer, and replaces a plain one', async () => {
+test('Replace on a phrase across italics asks how: Cancel leaves it, Keep formatting goes word by word', async () => {
   await find('the old house');
-  await js(`gotoMatch(0); $('#replace-input').value = 'the new home'; replaceCurrent()`);
-  await tick(100);
-  assert.match(await toastText(), /crosses italics or bold/);
-  assert.ok((await bodyText(0)).includes('the old house'));
+  const choices = () => js(`[...${TOP}.querySelectorAll('.fr-choice strong')].map((b) => b.textContent)`);
+  await js(`(() => { gotoMatch(0); $('#replace-input').value = 'the new home'; replaceCurrent(); })()`);
+  await tick(150);
+  assert.deepEqual(await choices(), ['Keep formatting', 'Plain']);
+  assert.equal(await js(`document.activeElement.textContent.trim().startsWith('Keep formatting')`), true, 'the first choice has the focus');
+  await js(`${TOP}.querySelector('.m-cancel').click()`);
+  await tick(150);
+  assert.ok((await bodyText(0)).includes('the old house'), 'nothing changed');
+  await js(`(() => { gotoMatch(0); replaceCurrent(); })()`);
+  await tick(150);
+  await js(`${TOP}.querySelector('.fr-choice').click()`);
+  await tick(300);
+  assert.ok((await para(0, 1)).includes('the <i>new</i> home at dusk'), await para(0, 1));
+  await js(`structuralUndo()`);
+  await tick(500);
+  assert.ok((await para(0, 1)).includes('the <i>old</i> house at dusk'), await para(0, 1));
+  // a plain one is replaced with no question
   await find('dusk');
-  await js(`gotoMatch(0); $('#replace-input').value = 'dawn'; replaceCurrent()`);
+  await js(`(async () => { gotoMatch(0); $('#replace-input').value = 'dawn'; await replaceCurrent(); })()`);
   await tick(200);
   assert.ok((await bodyText(0)).includes('at dawn.'));
+  assert.equal(await js(`document.querySelectorAll('.modal-backdrop:not([hidden])').length`), 0);
 });
 
 test('Replace All honors Match case and Whole word, and leaves what crosses italics', async () => {
   await press('find-case');
   await press('find-word');
   await find('cat');
-  await js(`$('#replace-input').value = 'dog'; replaceAllMatches()`);
+  await js(`(async () => { $('#replace-input').value = 'dog'; await replaceAllMatches(); })()`);
   await tick(300);
   const one = await bodyText(0);
   assert.ok(one.includes('The dog scattered the other cats. A dog watched.'), one);
-  assert.match(await toastText(), /^2 replaced across the whole book/);
+  assert.match(await toastText(), /^2 replaced across the whole book\. .+ to undo, or the version “Before replacing ‘cat’ \(\w+ \d+\)” in Chapter History\.$/);
+  // the version was named first, as NEO's own (auto: replace)
+  const named = await versionsNamed();
+  assert.deepEqual(named.map((v) => [v.auto, /^Before replacing ‘cat’ \(/.test(v.name)]), [['replace', true]]);
   await press('find-case');
   await press('find-word');
   // across chapters: the plain one replaced, the one across italics left alone
@@ -429,11 +471,16 @@ test('Replace All honors Match case and Whole word, and leaves what crosses ital
   notes.before = before;
   const r = await find('the old house');
   assert.deepEqual(r.found.map((m) => [m.ch, m.crosses]), [[0, true], [1, false]]);
-  await js(`$('#replace-input').value = 'the new home'; replaceAllMatches()`);
+  await js(`(async () => { $('#replace-input').value = 'the new home'; await replaceAllMatches(); })()`);
   await tick(300);
   const toast = await toastText();
-  assert.match(toast, /^1 replaced across the whole book/);
-  assert.match(toast, /1 left: they cross italics or bold\./);
+  assert.match(toast, /^1 replaced across the whole book\./);
+  assert.match(toast, /1 left: they cross italics or bold \(see the list\)\./);
+  assert.equal((await versionsNamed()).length, 2, 'a version every time');
+  // the list opens on the one left, under Crosses formatting
+  const rows = await listRows();
+  assert.equal(rows[0].text.startsWith('Crosses formatting'), true, rows[0].text);
+  assert.equal(rows.find((x) => x.cur).k, 1);
   assert.ok((await bodyText(0)).includes('to the old house'), 'the phrase across italics kept as it was');
   assert.ok((await bodyText(1)).includes('since the new home burned.'));
   assert.equal(await js(`JSON.stringify(book.chapterTitles)`), before.titles, 'titles untouched');
@@ -450,7 +497,7 @@ test('Replace All across a paragraph split into several text nodes', async () =>
   })()`);
   await find('mill wheel');
   assert.equal(await js(`searchState.matches[0].crosses`), false);
-  await js(`$('#replace-input').value = 'water wheel'; replaceAllMatches()`);
+  await js(`(async () => { $('#replace-input').value = 'water wheel'; await replaceAllMatches(); })()`);
   await tick(300);
   assert.ok((await bodyText(1)).startsWith('The water wheel was still.'), await bodyText(1));
 });
@@ -462,6 +509,121 @@ test('⌘Z takes a Replace All back', async () => {
   await tick(500);
   assert.equal(await bodyText(0), notes.before.one);
   assert.equal(await bodyText(1), notes.before.two);
+});
+
+test('in the list: K keeps formatting, P goes plain, each one step; the heading does them all', async () => {
+  // a second phrase across italics, in chapter 2
+  await js(`(() => {
+    const body = document.querySelectorAll('.chapter-body')[1];
+    body.focus();
+    const p = body.querySelectorAll('p')[1];
+    const at = p.firstChild.data.indexOf('old');
+    const r = document.createRange();
+    r.setStart(p.firstChild, at);
+    r.setEnd(p.firstChild, at + 3);
+    getSelection().removeAllRanges();
+    getSelection().addRange(r);
+    document.execCommand('italic');
+  })()`);
+  await tick(1400);
+  await js(`openSearch()`);
+  await find('the old house');
+  if (!(await listPlace()).shown) await press('search-list');
+  await js(`$('#replace-input').value = 'the new home'; findListFocus()`);
+  let rows = await listRows();
+  assert.deepEqual(rows.filter((r) => r.head).map((r) => r.text), ['Crosses formatting2']);
+  // the buttons are there on the line the keyboard is on
+  assert.equal(await js(`getComputedStyle(document.querySelector('#find-results .fr-hit.cur .fr-acts')).display`), 'flex');
+  await shot('list-crossing');
+  // K on the first: word by word, the italic word stays italic
+  await keyCode('K');
+  await tick(200);
+  assert.ok((await para(0, 1)).includes('the <i>new</i> home at dawn'), await para(0, 1));
+  rows = await listRows();
+  assert.equal(rows.filter((r) => !r.head).length, 1, 'that hit left the list');
+  assert.equal(rows.find((r) => r.cur).k, 1, 'on the next one');
+  // P on the next: no italics in the new words
+  await keyCode('P');
+  await tick(200);
+  assert.ok((await para(1, 1)).includes('since the new home burned.'), await para(1, 1));
+  assert.ok(!/<(i|em)>/.test(await para(1, 1)), await para(1, 1));
+  assert.equal(await js(`searchState.matches.length`), 0);
+  // each was one step: ⌘Z twice brings both back
+  await js(`structuralUndo()`);
+  await tick(500);
+  await js(`structuralUndo()`);
+  await tick(500);
+  await find('the old house');
+  assert.deepEqual(await js(`searchState.matches.map((m) => m.crosses)`), [true, true]);
+  // the heading's Plain: both at once, one step
+  await js(`document.querySelector('#find-results .fr-group.fr-crosses .fr-acts [data-how="plain"]').click()`);
+  await tick(300);
+  assert.ok((await para(0, 1)).includes('to the new home at dawn'), await para(0, 1));
+  assert.ok((await para(1, 1)).includes('since the new home burned.'));
+  assert.match(await toastText(), /^2 replaced, as plain text\./);
+  await js(`structuralUndo()`);
+  await tick(500);
+  assert.ok((await para(0, 1)).includes('the <i>old</i> house'), await para(0, 1));
+  assert.ok((await para(1, 1)).includes('the <i>old</i> house'), await para(1, 1));
+});
+
+test('Replace All with titles included: the title and the text, and the version keeps the titles', async () => {
+  await press('find-titles');
+  await find('mill');
+  await js(`(async () => { $('#replace-input').value = 'Forge'; await replaceAllMatches(); })()`);
+  await tick(400);
+  assert.match(await toastText(), /^2 replaced across the whole book \(1 in chapter titles\)\./);
+  assert.equal(await js(`book.chapterTitles[book.chapterOrder[1]]`), 'The Old Forge');
+  assert.ok((await bodyText(1)).startsWith('The Forge wheel was still.'), await bodyText(1));
+  await press('find-titles');
+  await js(`closeSearch()`);
+  // as after a restart: no ⌘Z to go back with
+  await js(`undoStack = []; slogSaveAll()`);
+  await tick(600);
+});
+
+test('Chapter History: the version shows its title, and Restore This Version puts it back too', async () => {
+  const ch2 = await js(`book.chapterOrder[1]`);
+  await js(`showHistory({ chapterId: ${JSON.stringify(ch2)} })`);
+  await until(() => js(`!!document.querySelector('#chapter-history .hv-item.named')`));
+  await js(`[...document.querySelectorAll('#chapter-history .hv-item.named')].find((x) => /Before replacing ‘mill’/.test(x.textContent)).click()`);
+  await until(() => js(`!document.querySelector('#chapter-history .hv-titleline').hidden`));
+  assert.equal(await js(`document.querySelector('#chapter-history .hv-titleline').textContent`), 'Title The Old Mill (now: The Old Forge)');
+  await js(`document.querySelector('#chapter-history [data-mode="compare"]').click()`);
+  await until(() => js(`!!document.querySelector('#chapter-history .hv-titleline del')`));
+  assert.equal(await js(`document.querySelector('#chapter-history .hv-titleline del').textContent`), 'The Old Mill');
+  assert.equal(await js(`document.querySelector('#chapter-history .hv-titleline ins').textContent`), 'The Old Forge');
+  await shot('history-title');
+  await until(() => js(`!document.querySelector('#chapter-history .hv-restore').disabled`));
+  await js(`document.querySelector('#chapter-history .hv-restore').click()`);
+  await until(() => js(`!document.querySelector('#chapter-history')`));
+  await tick(600);
+  assert.equal(await js(`book.chapterTitles[book.chapterOrder[1]]`), 'The Old Mill');
+  assert.ok((await bodyText(1)).startsWith('The mill wheel was still.'), await bodyText(1));
+  assert.match(await toastText(), /Its title is back to “The Old Mill” too\./);
+  // one step: ⌘Z takes the text and the title back together
+  await js(`structuralUndo()`);
+  await tick(500);
+  assert.equal(await js(`book.chapterTitles[book.chapterOrder[1]]`), 'The Old Forge');
+  assert.ok((await bodyText(1)).startsWith('The Forge wheel'));
+  await js(`undoStack = []`);
+});
+
+test('Restore Titles on a named version sets every title back as it was then', async () => {
+  const ch2 = await js(`book.chapterOrder[1]`);
+  await js(`showHistory({ chapterId: ${JSON.stringify(ch2)} })`);
+  await until(() => js(`!!document.querySelector('#chapter-history .hv-item.named')`));
+  await js(`[...document.querySelectorAll('#chapter-history .hv-item.named')].find((x) => /Before replacing ‘mill’/.test(x.textContent)).click()`);
+  await until(() => js(`!document.querySelector('#chapter-history .hv-named-tools').hidden`));
+  await js(`document.querySelector('#chapter-history .hv-titles').click()`);
+  await until(() => js(`!document.querySelector('#chapter-history')`));
+  await tick(600);
+  assert.equal(await js(`book.chapterTitles[book.chapterOrder[1]]`), 'The Old Mill');
+  assert.equal(await js(`book.chapterTitles[book.chapterOrder[0]]`), 'The House', 'a title that hadn\'t changed stays');
+  assert.ok((await bodyText(1)).startsWith('The Forge wheel'), 'the text stays as it is');
+  assert.match(await toastText(), /^1 chapter title is back as it was in “Before replacing ‘mill’/);
+  // on disk too
+  assert.equal(JSON.parse(fs.readFileSync(path.join(LIB, bookId, 'book.json'), 'utf8')).chapterTitles[ch2], 'The Old Mill');
 });
 
 test('the log: replacements logged, nothing unlogged, and it checks', async () => {
@@ -476,6 +638,9 @@ test('the log: replacements logged, nothing unlogged, and it checks', async () =
   const d = res.devices[res.devices.length - 1];
   assert.equal(d.sources.unlogged || 0, 0, 'nothing unlogged');
   assert.ok(d.chainEntries.some((e) => e.kind === 'edit' && e.cause === 'replace'), 'a replace in the log');
+  assert.ok(d.chainEntries.some((e) => e.kind === 'edit' && e.doc === 'book' && e.cause === 'replace' && (e.keys || []).includes('chapterTitles')), 'a title replaced, as a book edit');
+  assert.ok(d.chainEntries.some((e) => e.kind === 'edit' && e.doc === 'book' && e.cause === 'restore' && (e.keys || []).includes('chapterTitles')), 'titles restored, as a book edit');
+  assert.ok((await versionsNamed()).filter((v) => v.auto === 'replace').length >= 3);
   let errors = '';
   try { errors = fs.readFileSync(path.join(LIB, 'neo-errors.log'), 'utf8'); } catch { /* none */ }
   assert.equal(errors, '');
