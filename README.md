@@ -83,6 +83,15 @@ Bring in existing .docx, .txt, and .md manuscripts; chapters and scene breaks ar
 
 Continuous autosave, daily zip backups kept for two weeks, everything stored as plain files. Set up your NEO library folder on your iCloud if you want for extra safety. You can also email copies of your WIP to yourself with a keystroke: ⌘E.
 
+## Guides
+
+Two short guides cover the newer things: the Scribe's Log (a record of how your book was written that anyone can check), versions and Chapter History, Find and Replace, the command palette, manuscript format, and sending a book to an editor in Word and bringing their changes back.
+
+- **[How-To Guide](docs/HOW-TO.md)**: a few steps for each job, with the exact menu names.
+- **[FAQ](docs/FAQ.md)**: plain answers. Can it prove I didn't use AI? Who can see my log? What do my editor's words show as?
+
+Both are inside NEO too, offline: **Help → How-To Guide…** and **Help → FAQ…**.
+
 ## Your files
 
 Everything lives in `~/Documents/NEO Library` — one folder per book, chapters as readable HTML, metadata as JSON. Open them in your favorite text editor.

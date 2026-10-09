@@ -20,6 +20,7 @@
     "test:palette": "electron scripts/palette.e2e.js",
     "test:manuscript": "electron scripts/manuscript.e2e.js",
     "test:review": "electron scripts/review.e2e.js",
+    "test:guide": "electron scripts/guide.e2e.js",
     "build:verifier": "node scripts/build-verifier.js",
     "test": "node --test \"scripts/*.test.js\"",
     "test:coverage": "node --test --experimental-test-coverage \"scripts/*.test.js\"",
@@ -145,7 +146,8 @@
       "!dictionaries/**",
       "!locales/_template.json",
       "!node_modules/koffi/build/koffi/{freebsd,linux,musl,openbsd,win32}_*/**",
-      "!node_modules/koffi/{src,vendor,doc}/**"
+      "!node_modules/koffi/{src,vendor,doc}/**",
+      "docs/*.md"
     ],
     "toolsets": {
       "appimage": "1.0.3"

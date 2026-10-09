@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { Buffer } = require('buffer');
+const { GUIDES: GUIDE_FILES } = require('./guide.js');
 
 // Every disk request from the page passes through here: a write the system
 // refuses (see reportBlockedWrite) is explained to the writer, then the error
@@ -3384,6 +3385,9 @@ function buildMenu() {
           label: t('NEO Shortcuts'),
           click: () => sendToWindow({ type: 'help' })
         },
+        // docs/HOW-TO.md and docs/FAQ.md, shown in the window (guide.js)
+        { label: t('How-To Guide…'), click: () => sendToWindow({ type: 'guide', name: 'how-to' }) },
+        { label: t('FAQ…'), click: () => sendToWindow({ type: 'guide', name: 'faq' }) },
         { type: 'separator' },
         {
           label: t('About NEO'),
@@ -3565,6 +3569,13 @@ function compareVersions(a, b) {
 // toggling at the session level forces the engine to re-scan visible text —
 // newer Chromium ignores attribute changes on text it has already looked at
 ipcMain.handle('app:version', () => app.getVersion());
+// Help → How-To Guide… and Help → FAQ…: the guides that ship with NEO,
+// read from its own folder (never the library), by name only
+ipcMain.handle('help:guide', (_e, name) => {
+  const file = Object.prototype.hasOwnProperty.call(GUIDE_FILES, name) ? GUIDE_FILES[name] : null;
+  if (!file) return null;
+  try { return fs.readFileSync(path.join(__dirname, 'docs', file), 'utf8'); } catch (err) { logError('guide', err); return null; }
+});
 
 // Updating
 //

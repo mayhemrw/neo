@@ -15664,6 +15664,113 @@ function showHelp() {
   content.focus();
 }
 
+// Help → How-To Guide… and Help → FAQ…: docs/HOW-TO.md and docs/FAQ.md as
+// NEO ships them (main.js reads them, guide.js turns them into markup with
+// every word escaped), in a window like the shortcuts sheet: the two
+// guides as tabs, their headings down the side, links between them
+// followed here. English only for now (TRANSLATING.md). Desktop only:
+// Pocket's bridge has no guide.
+const guideState = { cache: {} };
+async function showGuide(name = 'how-to', anchor = '') {
+  if (!window.NeoGuide || !window.neo || !window.neo.guide) return;
+  if (!NeoGuide.GUIDES[name]) name = 'how-to';
+  let bd = $('#neo-guide');
+  if (!bd) {
+    const previousFocus = document.activeElement;
+    const selection = window.getSelection();
+    const previousRange = previousFocus && previousFocus.isContentEditable && selection.rangeCount
+      ? selection.getRangeAt(0).cloneRange() : null;
+    bd = document.createElement('div');
+    bd.id = 'neo-guide';
+    bd.className = 'modal-backdrop';
+    bd.innerHTML = `
+      <div class="modal shortcuts-modal guide-modal" role="dialog" aria-modal="true" aria-labelledby="guide-title">
+        <header class="shortcuts-header guide-header">
+          <h2 id="guide-title">${escHtml(t('Help'))}</h2>
+          <div class="guide-tabs" role="tablist">
+            <button type="button" role="tab" data-guide="how-to">${escHtml(t('How-To Guide'))}</button>
+            <button type="button" role="tab" data-guide="faq">${escHtml(t('FAQ'))}</button>
+          </div>
+        </header>
+        <div class="guide-body">
+          <nav class="guide-toc" aria-label="${escAttr(t('Contents'))}"></nav>
+          <article class="guide-content" tabindex="0"></article>
+        </div>
+        <footer class="shortcuts-footer" role="none">
+          <span>${escHtml(t('The guides are in English for now.'))}</span>
+          <button class="m-ok btn-gold">${escHtml(t('Done'))}</button>
+        </footer>
+      </div>`;
+    const close = () => {
+      document.removeEventListener('keydown', onKey, true);
+      bd.remove();
+      if (previousFocus && previousFocus.isConnected) previousFocus.focus({ preventScroll: true });
+      if (previousRange && previousRange.startContainer.isConnected && previousRange.endContainer.isConnected) {
+        selection.removeAllRanges();
+        selection.addRange(previousRange);
+      }
+    };
+    const onKey = (e) => {
+      const tops = document.querySelectorAll('.modal-backdrop:not([hidden])');
+      if (tops[tops.length - 1] !== bd) return; // a dialog over it has the keys
+      e.stopPropagation(); // the page must not take keys while a guide is open
+      if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+      if (e.key === 'Tab') {
+        const stops = [...bd.querySelectorAll('.guide-tabs button, .guide-toc a, .guide-content, .guide-content a, .m-ok')];
+        const at = stops.indexOf(document.activeElement);
+        e.preventDefault();
+        const next = at < 0 ? (e.shiftKey ? stops.length - 1 : 0) : (at + (e.shiftKey ? stops.length - 1 : 1)) % stops.length;
+        stops[next].focus();
+      }
+    };
+    bd.querySelector('.m-ok').onclick = close;
+    bd.addEventListener('click', (e) => {
+      const a = e.target.closest('[data-guide], [data-anchor]');
+      if (!a || !bd.contains(a)) return;
+      e.preventDefault();
+      if (a.dataset.guide) showGuide(a.dataset.guide, a.dataset.anchor || '');
+      else guideScroll(bd, a.dataset.anchor);
+    });
+    document.addEventListener('keydown', onKey, true);
+    document.body.appendChild(bd);
+  }
+  const content = bd.querySelector('.guide-content');
+  const toc = bd.querySelector('.guide-toc');
+  if (bd.dataset.guide !== name) {
+    let md = guideState.cache[name];
+    if (md == null) {
+      try { md = await window.neo.guide(name); } catch { md = null; }
+      if (md) guideState.cache[name] = md;
+    }
+    if (!bd.isConnected) return;
+    bd.dataset.guide = name;
+    bd.querySelectorAll('.guide-tabs button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.guide === name)));
+    if (!md) {
+      content.innerHTML = `<p>${escHtml(t('This guide couldn’t be read.'))}</p>`;
+      toc.innerHTML = '';
+    } else {
+      const doc = NeoGuide.render(md);
+      content.innerHTML = doc.html;
+      // the side shows the guide's sections (the FAQ's questions under its headings)
+      toc.classList.toggle('grouped', doc.toc.some((h) => h.level > 2));
+      toc.innerHTML = doc.toc.filter((h) => h.level > 1)
+        .map((h) => `<a href="#" class="guide-toc-l${h.level}" data-anchor="${escAttr(h.id)}">${escHtml(h.text)}</a>`).join('');
+    }
+    content.scrollTop = 0;
+    toc.scrollTop = 0;
+  }
+  if (anchor) guideScroll(bd, anchor);
+  else content.focus({ preventScroll: true });
+}
+function guideScroll(bd, id) {
+  const content = bd.querySelector('.guide-content');
+  const target = id && content.querySelector(`[id="${CSS.escape(id)}"]`);
+  if (!target) return;
+  content.scrollTop = target.offsetTop - content.offsetTop - 12;
+  bd.querySelectorAll('.guide-toc a').forEach((a) => a.classList.toggle('on', a.dataset.anchor === id));
+  content.focus({ preventScroll: true });
+}
+
 /* ================================================================== */
 /*  EXPORT + EMAIL                                                     */
 /* ================================================================== */
@@ -19518,11 +19625,13 @@ window.neo.onMenu(async (msg) => {
   // (styles.css); the window says when it goes in and out, whatever is open
   if (msg.type === 'fullScreen') { document.body.classList.toggle('full-screen', !!msg.value); return; }
   if ($('#keyboard-shortcuts') && msg.type !== 'help') return;
+  if ($('#neo-guide') && msg.type !== 'guide') return;
   if (msg.type === 'palette') { await togglePalette(); return; }
   // a window the menu opens (⌘, for Goals, say) never stacks on one that's
   // already open: pressing it again used to pile up overlays
-  const WINDOWS = ['stats', 'about', 'emailSettings', 'coverArt', 'reshelve', 'checkUpdate', 'nameVersion', 'history'];
+  const WINDOWS = ['stats', 'about', 'emailSettings', 'coverArt', 'reshelve', 'checkUpdate', 'nameVersion', 'history', 'guide'];
   if (WINDOWS.includes(msg.type) && document.querySelector('.modal-backdrop:not([hidden])')) {
+    if (msg.type === 'guide' && $('#neo-guide')) showGuide(msg.name); // already open: the other guide
     if (msg.type === 'checkUpdate' && updateDialog) updateDialog.focus();
     if (msg.type === 'history' && $('#chapter-history')) showHistory(msg); // already open: back to it
     return;
@@ -19535,6 +19644,7 @@ window.neo.onMenu(async (msg) => {
   if (msg.type === 'nameVersion') await nameVersion(msg);
   if (msg.type === 'history') await showHistory(msg);
   if (msg.type === 'help') showHelp();
+  if (msg.type === 'guide') await showGuide(msg.name);
   if (msg.type === 'about') showAbout();
   if (msg.type === 'checkUpdate') checkForUpdate();
   if (msg.type === 'update') updateMessage(msg);

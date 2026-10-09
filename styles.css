@@ -2458,3 +2458,45 @@ body.light .rv-swatches { background: #f1eee8; }
   .rv-thread, .rv-deleted { position: static; }
 }
 @media (max-width: 900px) { .rv-cols { grid-template-columns: 1fr; } .rv-list { position: static; max-height: none; } .rv-margin { grid-column: 1; } }
+
+/* --- The guides (Help → How-To Guide… and Help → FAQ…, app.js showGuide) --- */
+.guide-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.guide-tabs { display: flex; gap: 6px; }
+.guide-tabs button {
+  background: none; border: 1px solid #444; border-radius: 6px; color: #bbb;
+  padding: 5px 12px; font-size: 13px; cursor: pointer;
+}
+.guide-tabs button[aria-selected="true"] { border-color: var(--accent); color: var(--accent); }
+.guide-body { flex: 1; min-height: 0; display: flex; }
+.guide-toc {
+  width: 230px; flex-shrink: 0; overflow-y: auto; overscroll-behavior: contain;
+  padding: 18px 12px 24px 22px; border-right: 1px solid #373737;
+}
+.guide-toc a {
+  display: block; color: #bbb; text-decoration: none; font-size: 12.5px; line-height: 1.35;
+  padding: 4px 8px; border-radius: 5px;
+}
+.guide-toc a:hover, .guide-toc a.on { color: #eee; background: #2c2c2c; }
+.guide-toc.grouped a.guide-toc-l2 { color: var(--accent); font-weight: 600; margin-top: 8px; }
+.guide-toc.grouped a.guide-toc-l3 { padding-left: 16px; }
+.guide-content {
+  flex: 1; min-width: 0; overflow-y: auto; overscroll-behavior: contain;
+  padding: 18px 34px 40px; font-size: 14px; line-height: 1.6; color: #ddd;
+}
+.guide-content:focus { outline: none; }
+.guide-content::-webkit-scrollbar-thumb, .guide-toc::-webkit-scrollbar-thumb { background: #555; }
+.guide-content h1 { font-size: 22px; margin: 6px 0 10px; }
+.guide-content h2 { font-size: 17px; color: var(--accent); margin: 30px 0 8px; padding-top: 14px; border-top: 1px solid #303030; }
+.guide-content h3 { font-size: 14.5px; margin: 20px 0 6px; color: #f2f2f2; }
+.guide-content p { margin: 0 0 10px; }
+.guide-content ol, .guide-content ul { margin: 0 0 12px; padding-left: 24px; }
+.guide-content li { margin: 3px 0; }
+.guide-content li > ul { margin: 4px 0 2px; }
+.guide-content strong { color: #f4f4f4; }
+.guide-content code { font-size: 12.5px; background: #2c2c2c; padding: 1px 5px; border-radius: 4px; }
+.guide-content a { color: var(--accent); }
+.guide-modal button:focus-visible, .guide-toc a:focus-visible, .guide-content a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 760px) {
+  .guide-toc { display: none; }
+  .guide-content { padding: 16px 20px 32px; }
+}

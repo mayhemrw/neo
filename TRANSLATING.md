@@ -95,3 +95,7 @@ toast(t('Chapter removed — its words are in Darlings, or {key} to undo', { key
 - After adding or changing strings, run `node scripts/i18n.js template` to refresh `locales/_template.json`, and `node scripts/i18n.js check fr` (for each language) to see what needs translating.
 
 The window receives its language once, before any of its code runs (see `preload.js`); changing the language saves the open book and reloads the window.
+
+## Not translated yet
+
+The guides under **Help** (`docs/HOW-TO.md` and `docs/FAQ.md`, shown by `guide.js`) are English only for now: the window around them is translated, the guides themselves aren't. Translating them is a later job; it will need one copy of each guide per language and `help:guide` in `main.js` picking the one for the interface language.
