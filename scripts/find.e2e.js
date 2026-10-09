@@ -626,6 +626,44 @@ test('Restore Titles on a named version sets every title back as it was then', a
   assert.equal(JSON.parse(fs.readFileSync(path.join(LIB, bookId, 'book.json'), 'utf8')).chapterTitles[ch2], 'The Old Mill');
 });
 
+test('Replace after an edit earlier in the same paragraph: the right words change', async () => {
+  await js(`openSearch()`);
+  await find('said Don');
+  await js(`gotoMatch(0)`);
+  // a comma typed after "I", before the hit, with the list closed (nothing searches again)
+  await js(`(() => {
+    const p = document.querySelectorAll('.chapter-body')[0].querySelectorAll('p')[3];
+    p.closest('.chapter-body').focus();
+    const r = document.createRange();
+    r.setStart(p.firstChild, 1);
+    r.collapse(true);
+    getSelection().removeAllRanges();
+    getSelection().addRange(r);
+  })()`);
+  wc.insertText(',');
+  await tick(200);
+  await js(`(async () => { $('#replace-input').value = 'whispered Don'; await replaceCurrent(); })()`);
+  await tick(300);
+  assert.equal(await js(`document.querySelectorAll('.chapter-body')[0].querySelectorAll('p')[3].textContent`), "I, don't know, whispered Don. Don't ask.");
+});
+
+test('Replace All stays in the manuscript, even if the tab changes while its version is saved', async () => {
+  const notesBefore = await js(`(async () => { switchTab('notes'); await new Promise((r) => setTimeout(r, 400)); const t = $('#aux-editor').innerHTML; switchTab('manuscript'); return t; })()`);
+  assert.match(notesBefore, /colour/);
+  await tick(400);
+  await find('colour');
+  const before = await bodyText(0);
+  await js(`(() => { $('#replace-input').value = 'color'; window.__replacing = replaceAllMatches(); switchTab('notes'); })()`);
+  await js(`window.__replacing`);
+  await tick(300);
+  assert.match(await toastText(), /^Nothing was replaced: the manuscript wasn’t showing any more\./);
+  assert.equal(await js(`$('#aux-editor').innerHTML`), notesBefore, 'Notes untouched');
+  await js(`switchTab('manuscript')`);
+  await tick(400);
+  assert.equal(await bodyText(0), before, 'the manuscript untouched');
+  await js(`closeSearch()`);
+});
+
 test('the log: replacements logged, nothing unlogged, and it checks', async () => {
   await js(`closeSearch(); slogSaveAll()`);
   await tick(500);

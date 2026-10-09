@@ -2894,10 +2894,11 @@ function paletteItems(menu = Menu.getApplicationMenu(), platform = process.platf
   return out;
 }
 // One command chosen: the item found where it was (and still named the
-// same: the menu may have been rebuilt since), clicked as the menu would.
+// same: the menu may have been rebuilt since), or else by its name and
+// place together, clicked as the menu would.
 // The window has closed the palette and given the page its caret back, so
 // Copy, Paste and Undo act on the page.
-function paletteRun(win, key, label) {
+function paletteRun(win, key, label, path) {
   const menu = Menu.getApplicationMenu();
   if (!menu || typeof key !== 'string') return false;
   const find = (items, path, idx) => {
@@ -2908,7 +2909,8 @@ function paletteRun(win, key, label) {
   };
   let item = /^\d+(\.\d+)*$/.test(key) ? find(menu.items, [], key.split('.').map(Number)) : null;
   if (!item || String(item.label || '').replace(/&&/g, '&').split('\t')[0].trim() !== label) {
-    const hit = paletteItems(menu).find((x) => x.label === label);
+    const where = Array.isArray(path) ? path.map(String).join('\n') : null;
+    const hit = where === null ? null : paletteItems(menu).find((x) => x.label === label && x.path.join('\n') === where);
     item = hit ? find(menu.items, [], hit.key.split('.').map(Number)) : null;
   }
   if (!item || item.enabled === false || item.visible === false || item.submenu) return false;
@@ -2916,7 +2918,7 @@ function paletteRun(win, key, label) {
   return true;
 }
 ipcMain.handle('palette:items', () => paletteItems());
-ipcMain.handle('palette:run', (e, key, label) => paletteRun(BrowserWindow.fromWebContents(e.sender), key, String(label || '')));
+ipcMain.handle('palette:run', (e, key, label, path) => paletteRun(BrowserWindow.fromWebContents(e.sender), key, String(label || ''), path));
 
 function buildMenu() {
   const isMac = process.platform === 'darwin';

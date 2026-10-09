@@ -128,3 +128,30 @@ test('the menu walked: commands with their place, what the menu hides or greys',
   ]);
   assert.deepEqual(paletteItems(null), []);
 });
+
+test('a command chosen after the menu was rebuilt: found again by its name and place, never by name alone', () => {
+  const clicked = [];
+  const item = (label, o = {}) => ({ type: 'normal', visible: true, enabled: true, label, click: () => clicked.push(label + (o.tag || '')), ...o });
+  const menus = {
+    items: [
+      { label: 'File', type: 'normal', visible: true, enabled: true, submenu: { items: [item('Name This Version…'), item('Undo', { tag: ' (a chapter so titled)' })] } },
+      { label: 'Edit', type: 'normal', visible: true, enabled: true, submenu: { items: [item('Undo', { tag: ' (Edit)' }), item('Greyed', { enabled: false })] } }
+    ]
+  };
+  const ctx = vm.createContext({ Menu: { getApplicationMenu: () => menus }, process: { platform: 'linux' }, logError: () => {} });
+  vm.runInContext(slice('main.js', 'const ACCEL_MAC', "ipcMain.handle('palette:items'"), ctx);
+  const run = (...a) => vm.runInContext('paletteRun', ctx)(null, ...a);
+  // where it was, named the same: clicked
+  assert.equal(run('1.0', 'Undo', ['Edit']), true);
+  assert.deepEqual(clicked.splice(0), ['Undo (Edit)']);
+  // the menu moved: found by name and place, not the first "Undo" anywhere
+  assert.equal(run('0.0', 'Undo', ['Edit']), true);
+  assert.deepEqual(clicked.splice(0), ['Undo (Edit)']);
+  // a name in no place it's known by, or no place given: nothing runs
+  assert.equal(run('0.0', 'Undo', ['View']), false);
+  assert.equal(run('0.0', 'Undo'), false);
+  assert.deepEqual(clicked, []);
+  // greyed: never clicked
+  assert.equal(run('1.1', 'Greyed', ['Edit']), false);
+  assert.deepEqual(clicked, []);
+});

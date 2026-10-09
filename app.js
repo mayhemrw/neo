@@ -9688,8 +9688,10 @@ function beginCardDrag(st) {
   st.float = float;
   st.src.cell.classList.add('ob-lifted');
   document.body.classList.add('ob-dragging');
-  // the loose pane opens to take a card
+  // the loose pane opens to take a card (not while Find's list is docked
+  // over it: the loose cards are out of sight then)
   const c = st.src.cell;
+  if ($('#side-pane').classList.contains('find-docked')) return;
   if ((st.src.kind === 'section' && (c.dataset.written || c.dataset.sec)) || st.src.kind === 'scene' ||
       (st.src.kind === 'chapter' && canSetChapterAside(c.dataset.ch))) $('#side-pane').classList.add('drop-ready');
 }
@@ -13286,12 +13288,35 @@ function findTidy(para) {
   const empty = [...para.querySelectorAll('b, strong, i, em, u, s, strike, del, span[style]:not([class]):not([data-sid])')].reverse();
   for (const el of empty) if (!el.textContent && !el.querySelector('br, img')) el.remove();
 }
-// a hit is still what was found: in the page, and the words still match
+// a hit is still what was found, where it was found: in the page, its
+// stretch's text unchanged since the search (the replacement goes in by
+// those offsets, so an edit earlier in the paragraph makes it stale), and
+// the words still matching
 function findStillThere(m) {
   if (!m || !m.range.startContainer.isConnected || !m.range.endContainer.isConnected) return false;
+  if (m.block.nodes.some((n) => !n.node.isConnected) || m.block.nodes.map((n) => n.node.data).join('') !== m.block.text) return false;
   const text = m.range.toString();
   const again = findIn(text, findPattern(String(searchState.query || ''), { matchCase: findOpts().matchCase }));
   return again.length === 1 && again[0][0] === 0 && again[0][1] === text.length;
+}
+
+// The hits asked for, as Find finds them now: when the page changed under
+// any of them, the tab is searched again and each is found again where its
+// (live) range now starts. Those no longer there are dropped.
+function findFresh(ms) {
+  if (ms.every(findStillThere)) return ms;
+  const starts = ms.filter((m) => m && m.range.startContainer.isConnected).map((m) => m.range.cloneRange());
+  const idx = searchState.idx;
+  runSearch();
+  const out = [];
+  for (const r of starts) {
+    const m = searchState.matches.find((x) => {
+      try { return x.range.compareBoundaryPoints(Range.START_TO_START, r) === 0; } catch { return false; }
+    });
+    if (m && !out.includes(m)) out.push(m);
+  }
+  if (idx >= 0 && searchState.matches.length) searchState.idx = Math.min(idx, searchState.matches.length - 1);
+  return out;
 }
 
 // Hits replaced as one undoable step (label: 'replace' or 'replace all',
@@ -13299,6 +13324,7 @@ function findStillThere(m) {
 // cross formatting. Titles go through NEO's own title change. Returns how
 // many were replaced.
 function replaceHits(ms, how, label) {
+  if (currentTab !== 'manuscript' || !book) return 0; // Replace stays in the manuscript
   const rep = $('#replace-input').value;
   const live = ms.filter(findStillThere);
   if (!live.length) return 0;
@@ -13356,15 +13382,18 @@ async function replaceCurrent() {
   freshSearchIfStale();
   if (!searchState.matches.length) { toast(t('No matches')); return; }
   if (searchState.idx < 0) searchState.idx = 0; // start from the very first match
-  const m = searchState.matches[searchState.idx];
-  // the match may have been edited away by hand since it was found: look
-  // again rather than put the replacement where it no longer is
-  if (!findStillThere(m)) { runSearch(); return; }
+  // the page may have changed since the search: the hit is found again
+  // where it now is (or, edited away, not replaced at all)
+  let m = findFresh([searchState.matches[searchState.idx]])[0];
+  if (!m) { toast(t('That one changed since it was found: look again.'), 4000); return; }
+  searchState.idx = searchState.matches.indexOf(m);
   let how = 'keep';
   if (m.crosses) {
     how = await findAskHow(1);
     $('#search-input').focus({ preventScroll: true });
-    if (!how || !findStillThere(m)) return;
+    if (!how) return;
+    m = findFresh([m])[0];
+    if (!m || currentTab !== 'manuscript') return;
   }
   const oldIdx = searchState.idx;
   if (!replaceHits([m], how, 'replace')) { runSearch(); return; }
@@ -13377,7 +13406,8 @@ async function replaceCurrent() {
 function findDecide(k, how) {
   if (currentTab !== 'manuscript') return;
   const r = findList.rows[k];
-  const ms = r && r.head === 'crosses' ? searchState.matches.filter((m) => m.crosses) : r && r.cross ? [searchState.matches[r.i]] : [];
+  const ms = findFresh(r && r.head === 'crosses' ? searchState.matches.filter((m) => m.crosses) : r && r.cross ? [searchState.matches[r.i]] : [])
+    .filter((m) => m.crosses);
   if (!ms.length) return;
   const n = replaceHits(ms, how, ms.length > 1 ? 'replace all' : 'replace');
   runSearch();
@@ -13422,6 +13452,8 @@ async function replaceAllMatches() {
       if (!book || book.id !== bookId) return;
       if (!res || res.error) { toast(t('Nothing was replaced: the version to go back to couldn’t be saved. {why}', { why: (res && res.error) || '' }), 9000); return; }
       version = res;
+      // (the writer may have gone to another tab meanwhile: Replace stays in the manuscript)
+      if (currentTab !== 'manuscript') { toast(t('Nothing was replaced: the manuscript wasn’t showing any more.'), 6000); return; }
     }
     // the page may have changed while the version was saved: find again
     runSearch();
@@ -14066,7 +14098,7 @@ async function showPalette() {
     paletteRemember(x);
     close(true);
     let ok = false;
-    try { ok = await P.run(x.key, x.label); } catch { ok = false; }
+    try { ok = await P.run(x.key, x.label, x.path || []); } catch { ok = false; }
     if (!ok) toast(t('“{name}” can’t be used right now.', { name: x.label }), 3000);
   };
   // it owns the keyboard while it's the topmost dialog

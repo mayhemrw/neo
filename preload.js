@@ -81,7 +81,7 @@ contextBridge.exposeInMainWorld('neo', {
   // the command palette: the menu's commands, and one clicked (main.js; Pocket has none)
   palette: {
     items: () => ipcRenderer.invoke('palette:items'),
-    run: (key, label) => ipcRenderer.invoke('palette:run', key, label)
+    run: (key, label, path) => ipcRenderer.invoke('palette:run', key, label, path)
   },
   // versions (main.js and slog-history.js; Pocket has none)
   history: {
