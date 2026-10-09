@@ -17403,6 +17403,9 @@ function reviewRender() {
   host.innerHTML = `${bar}<div class="rv-cols"><div class="rv-list" role="listbox" tabindex="0" aria-label="${escAttr(t('Changes'))}">${list}</div><div class="rv-page">${page}</div>` +
     `<div class="rv-margin" aria-label="${escAttr(t('Comments'))}">${reviewMarginHtml(threads)}</div></div>`;
   for (const box of host.querySelectorAll('.rv-replybox, .rv-ownbox')) if (box.value) box.style.height = box.scrollHeight + 'px';
+  // the bar stays at the top as the page scrolls; the list sits under it
+  const rvBar = host.querySelector('.rv-bar');
+  if (rvBar) host.style.setProperty('--rv-bar-h', rvBar.offsetHeight + 'px');
   reviewPlaceCards();
   requestAnimationFrame(reviewPlaceCards);
 }

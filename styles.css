@@ -2342,7 +2342,14 @@ body.light #nav-pane.script .nav-item.sp-scene .n-num { color: #8f8a80; }
 }
 #editor-view.review-on #aux-paper h2 { color: var(--muted); }
 #review-view { font-size: 13px; }
-.rv-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 0 auto 16px; max-width: calc(320px + var(--page-w) + 280px + 48px); }
+.rv-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 0 auto 16px; max-width: calc(320px + var(--page-w) + 280px + 48px);
+  /* stays at the top as the book scrolls under it */
+  position: sticky; top: 0; z-index: 6; background: var(--bg); padding: 10px 0; box-shadow: 0 8px 10px -10px rgba(0, 0, 0, 0.5);
+}
+/* the Review tab's own list and margin are by the edges: the panes don't
+   slide out over them, nor over the scroll bar (pin them to keep them) */
+#editor-view.review-on #nav-hotzone, #editor-view.review-on #side-hotzone { display: none; }
 .rv-sum { color: var(--muted); margin-right: 4px; }
 .rv-who { display: inline-flex; align-items: center; gap: 6px; padding: 3px 4px 3px 10px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--rv) 55%, transparent); color: inherit; }
 .rv-who > i, .rv-head > i { width: 9px; height: 9px; border-radius: 50%; background: var(--rv); display: inline-block; flex: none; }
@@ -2353,7 +2360,7 @@ body.light #nav-pane.script .nav-item.sp-scene .n-num { color: #8f8a80; }
 .rv-mini:hover:not([disabled]), .rv-mini:focus-visible { border-color: var(--accent); outline: none; }
 .rv-mini[disabled] { opacity: 0.4; cursor: default; }
 .rv-cols { display: grid; grid-template-columns: minmax(220px, 320px) minmax(0, var(--page-w)) minmax(220px, 280px); gap: 24px; justify-content: center; align-items: start; }
-.rv-list { position: sticky; top: 12px; max-height: calc(100vh - 150px); overflow: auto; outline: none; padding-right: 4px; }
+.rv-list { position: sticky; top: calc(var(--rv-bar-h, 48px) + 8px); max-height: calc(100vh - 150px - var(--rv-bar-h, 48px)); overflow: auto; outline: none; padding-right: 4px; }
 .rv-ch { display: flex; align-items: center; gap: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin: 14px 0 6px; color: var(--muted); }
 .rv-ch:first-child { margin-top: 0; }
 .rv-ch .rv-mini, .rv-who .rv-mini, .rv-item .rv-acts { opacity: 0; transition: opacity 0.12s; }

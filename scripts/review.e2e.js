@@ -1067,6 +1067,24 @@ test('on the Review tab the left edge doesn’t slide the Chapters pane over the
   })()`);
   assert.equal(await hover('review'), false);
   assert.equal(await hover('manuscript'), true, 'the page still has it');
+  // on the Review tab neither edge is a hover zone, so the scroll bar is free
+  await js(`goToTab('review')`);
+  assert.deepEqual(await js(`['#nav-hotzone', '#side-hotzone'].map((q) => getComputedStyle($(q)).display)`), ['none', 'none']);
+  const sb = await js(`(() => { const r = $('#paper-scroll').getBoundingClientRect(); return document.elementFromPoint(r.right - 4, r.top + 200).closest('#paper-scroll') ? true : document.elementFromPoint(r.right - 4, r.top + 200).id; })()`);
+  assert.equal(sb, true, 'the scroll bar is what’s at the right edge');
+  // the bar with the counts and Accept All stays in view as the book scrolls
+  const bar = await js(`(async () => {
+    const sc = $('#paper-scroll');
+    sc.scrollTop = 0;
+    const top0 = sc.querySelector('.rv-bar').getBoundingClientRect().top;
+    sc.scrollTop = 1200;
+    await new Promise((r) => requestAnimationFrame(r));
+    return { scrolled: sc.scrollTop, top0, top: sc.querySelector('.rv-bar').getBoundingClientRect().top, scTop: sc.getBoundingClientRect().top };
+  })()`);
+  assert.ok(bar.scrolled > 100, JSON.stringify(bar));
+  assert.ok(Math.abs(bar.top - bar.scTop) < 2, 'stuck at the top: ' + JSON.stringify(bar));
+  await shot('review-bar-sticky');
+  await js(`$('#paper-scroll').scrollTop = 0`);
 });
 
 test('Import Review… is in the palette, and does nothing on the shelf', async () => {
