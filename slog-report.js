@@ -27,8 +27,12 @@
   // Where text came from, in the order the report lists them
   const CATS = ['typed', 'paste', 'paste revised', 'import', 'baseline', 'arrived', 'other book', 'move', 'while off', 'unlogged'];
   // …and the few the timeline draws, everything else folded into "other"
-  const GROUPS = ['typed', 'paste', 'paste revised', 'import', 'baseline', 'other'];
-  const groupOf = (cat) => (GROUPS.includes(cat) ? cat : 'other');
+  // (an editor's accepted changes come after these, one category per
+  // reviewer: "editor:Reviewer 1", or "editor" when the log doesn't say)
+  const GROUPS = ['typed', 'paste', 'paste revised', 'import', 'baseline', 'editor', 'other'];
+  const groupOf = (cat) => (GROUPS.includes(cat) ? cat : V.editorOf(cat) !== null ? 'editor' : 'other');
+  // the categories present, in the report's order
+  const catsIn = (counts) => CATS.filter((c) => counts[c]).concat(Object.keys(counts).filter((c) => V.editorOf(c) !== null && counts[c]).sort());
 
   const isChapter = (doc) => typeof doc === 'string' && V.docChapter(doc) !== null;
   const add = (o, k, n) => { if (n) o[k] = (o[k] || 0) + n; };
@@ -72,7 +76,7 @@
   function catOf(o, revised) {
     const p = V.parseOrigin(o);
     if (p.cat === 'paste' && p.paste && revised.has(p.paste)) return 'paste revised';
-    return CATS.includes(p.cat) ? p.cat : 'unlogged';
+    return CATS.includes(p.cat) || V.editorOf(p.cat) !== null ? p.cat : 'unlogged';
   }
 
   // The book's chapters in order, with titles: from the book's own record
@@ -386,7 +390,7 @@
 
   // Series colors: the timeline's groups, in a fixed order (checked for
   // color-blind separation between neighbors), and a blue ramp for the calendar
-  const COLORS = { typed: '#2a78d6', paste: '#eb6834', 'paste revised': '#1baf7a', import: '#eda100', baseline: '#e87ba4', other: '#008300' };
+  const COLORS = { typed: '#2a78d6', paste: '#eb6834', 'paste revised': '#1baf7a', import: '#eda100', baseline: '#e87ba4', editor: '#7d55c7', other: '#008300' };
   const RAMP = ['#ebeae6', '#b7d3f6', '#6da7ec', '#2a78d6', '#1c5cab', '#0d366b'];
 
   // stats: reportStats'. opts: { privacy: 'exact' | 'dates' | 'weeks', tz,
@@ -427,7 +431,18 @@
       move: t('Moved within the book, place not recorded'),
       'while off': t('Changed while the log was off'),
       unlogged: t('Not logged'),
+      editor: t('From an editor'),
       other: t('Everything else')
+    };
+    // an editor's category: "From an editor (Reviewer 1)", or with the name
+    // the writer chose to show (opts.editorNames, from review.json; never
+    // in the log)
+    const names = opts.editorNames && typeof opts.editorNames === 'object' ? opts.editorNames : {};
+    const label = (c) => {
+      const by = V.editorOf(c);
+      if (by === null || c === 'editor') return LABEL[c] || c;
+      const name = typeof names[by] === 'string' && names[by].trim() ? names[by].trim() : by;
+      return t('From an editor ({name})', { name });
     };
     const s = stats;
     const chTitle = (c) => c.title || t('Chapter {n}', { n: c.index });
@@ -520,12 +535,12 @@
     }
 
     /* -------- origins -------- */
-    const cats = CATS.filter((c) => s.counts[c]);
+    const cats = catsIn(s.counts);
     function originTable() {
       if (!s.total) return `<p class="muted">${esc(t('The manuscript is empty.'))}</p>`;
       const rows = cats.map((c) => {
         const w = Math.max(0.5, 100 * s.counts[c] / s.total);
-        return `<tr><td><i class="sw" style="background:${COLORS[groupOf(c)]}"></i>${esc(LABEL[c])}</td><td class="num">${n(s.counts[c])}</td><td class="num">${pct(s.counts[c], s.total)}</td><td class="barcell"><span class="bar" style="width:${w.toFixed(1)}%;background:${COLORS[groupOf(c)]}"></span></td></tr>`;
+        return `<tr><td><i class="sw" style="background:${COLORS[groupOf(c)]}"></i>${esc(label(c))}</td><td class="num">${n(s.counts[c])}</td><td class="num">${pct(s.counts[c], s.total)}</td><td class="barcell"><span class="bar" style="width:${w.toFixed(1)}%;background:${COLORS[groupOf(c)]}"></span></td></tr>`;
       }).join('');
       return `<table class="origins"><thead><tr><th>${esc(t('Where it came from'))}</th><th class="num">${esc(t('Characters'))}</th><th class="num">${esc(t('Share'))}</th><th></th></tr></thead><tbody>${rows}</tbody>
 <tfoot><tr><td>${esc(t('The manuscript'))}</td><td class="num">${n(s.total)}</td><td class="num">100%</td><td></td></tr></tfoot></table>`;
@@ -534,7 +549,7 @@
       if (!s.chapters.length) return '';
       const cols = cats.slice(0, 6);
       const rest = cats.slice(6);
-      const head = cols.map((c) => `<th class="num" title="${esc(LABEL[c])}"><i class="sw" style="background:${COLORS[groupOf(c)]}"></i>${esc(LABEL[c])}</th>`).join('') + (rest.length ? `<th class="num">${esc(t('Everything else'))}</th>` : '');
+      const head = cols.map((c) => `<th class="num" title="${esc(label(c))}"><i class="sw" style="background:${COLORS[groupOf(c)]}"></i>${esc(label(c))}</th>`).join('') + (rest.length ? `<th class="num">${esc(t('Everything else'))}</th>` : '');
       const rows = s.chapters.map((c) => {
         const cells = cols.map((k) => `<td class="num">${c.counts[k] ? pct(c.counts[k], c.total) : ''}</td>`).join('') +
           (rest.length ? `<td class="num">${pct(rest.reduce((a, k) => a + (c.counts[k] || 0), 0), c.total)}</td>` : '');

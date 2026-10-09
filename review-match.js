@@ -495,6 +495,33 @@
     return likeness(file, chapters.map((c) => c.text).join(' '));
   }
 
+  // -------------------------------------------------------------------------
+  // How the Scribe's Log names a reviewer (decision 2, kept in this one
+  // place so it's easy to change): never by name, only "Reviewer 1",
+  // "Reviewer 2", numbered per book in the order they were first imported
+  // (review.json's `reviewers`, each with its `num`). The names stay in
+  // review.json; the Verification Report shows them only when asked.
+  // -------------------------------------------------------------------------
+
+  const numOf = (reviewers, r) => (Number.isSafeInteger(r.num) && r.num > 0 ? r.num : reviewers.indexOf(r) + 1);
+  function reviewerTag(reviewers, name) {
+    const list = Array.isArray(reviewers) ? reviewers : [];
+    const r = list.find((x) => x && x.name === name);
+    return r ? 'Reviewer ' + numOf(list, r) : null;
+  }
+  // { "Reviewer 1": "Dana", … }
+  function reviewerNames(reviewers) {
+    const list = Array.isArray(reviewers) ? reviewers : [];
+    const out = {};
+    for (const r of list) if (r && typeof r.name === 'string' && r.name.trim()) out['Reviewer ' + numOf(list, r)] = r.name.trim();
+    return out;
+  }
+  // the next reviewer's number
+  const nextNum = (reviewers) => (Array.isArray(reviewers) ? reviewers : []).reduce((m, r, i) => Math.max(m, r && Number.isSafeInteger(r.num) ? r.num : i + 1), 0) + 1;
+
+  exports.reviewerTag = reviewerTag;
+  exports.reviewerNames = reviewerNames;
+  exports.nextNum = nextNum;
   exports.PARA = PARA;
   exports.htmlParas = htmlParas;
   exports.htmlText = htmlText;

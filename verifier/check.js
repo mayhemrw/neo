@@ -198,6 +198,16 @@
       if (d.copiedFrom && d.copiedFrom.length) item('copied-' + d.dev, 'info', `${d.name}: the book began as a copy of another book`, [`Copied from the book whose log is ${d.copiedFrom.join(', ')}; that text counts as another book's, not as typed.`]);
     }
 
+    // an editor's changes, accepted from a Word review: theirs, not typed
+    const editors = Object.keys(stats.counts || {}).filter((c) => V.editorOf(c) !== null);
+    if (editors.length) {
+      const n = editors.reduce((a, c) => a + stats.counts[c], 0);
+      const who = editors.map((c) => V.editorOf(c) || 'an editor');
+      item('editors', 'info', `${fmt(n)} characters of the manuscript are an editor's changes`, [
+        `Changes from a Word review (${who.join(', ')}) that the writer accepted in NEO. They're counted as the editor's, not as typed; the log numbers editors and never holds their names.`
+      ]);
+    }
+
     // text from another device
     if (devs.length > 1) {
       const a = devs.reduce((x, d) => ({ recorded: x.recorded + d.arrivals.recorded, matched: x.matched + d.arrivals.matched, unlinked: x.unlinked + d.arrivals.unlinked }), { recorded: 0, matched: 0, unlinked: 0 });

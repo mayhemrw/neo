@@ -1625,11 +1625,13 @@ body.night .hv-page ins { color: #8fd19e; }
 .pb-o-pasted { background: rgba(235, 104, 52, 0.3); }
 .pb-o-moved { background: rgba(27, 175, 122, 0.26); }
 .pb-o-imported { background: rgba(237, 161, 0, 0.3); }
+.pb-o-editor { background: rgba(125, 85, 199, 0.24); }
 .pb-o-other { background: rgba(128, 128, 128, 0.28); }
 .pb-key.pb-o-typed { background: #9cc0ec; }
 .pb-key.pb-o-pasted { background: #f3b293; }
 .pb-key.pb-o-moved { background: #93d6bc; }
 .pb-key.pb-o-imported { background: #f2cf7f; }
+.pb-key.pb-o-editor { background: #c3aee6; }
 .pb-key.pb-o-other { background: #c4c2bc; }
 @media (prefers-reduced-motion: reduce) { .pb-new { animation: none; } .pb-session { transition: none; } }
 @media (max-width: 760px) {

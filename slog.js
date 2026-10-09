@@ -712,8 +712,12 @@ const MAX_CHUNK = 8 * 1024 * 1024;
 const IMPORT_MS = 2 * 60 * 1000;   // how long a new imported book's first writes count as the import
 const RETRY_MS = 30 * 1000;        // after a write fails, how long before the log tries the disk again
 const OBSERVED_KEEP = 16;          // described-but-unsaved versions kept per document, for saves landing late
-const WINDOW_SRC = new Set(['typed', 'paste', 'drop', 'move', 'import', 'arrived']);
-const CAUSES = new Set(['undo', 'redo', 'replace', 'outline', 'split', 'join', 'spell', 'darling', 'placeholder', 'restore']);
+const WINDOW_SRC = new Set(['typed', 'paste', 'drop', 'move', 'import', 'arrived', 'editor']);
+const CAUSES = new Set(['undo', 'redo', 'replace', 'outline', 'split', 'join', 'spell', 'darling', 'placeholder', 'restore', 'review']);
+// who an editor's text is from, as the log names them: never a person's
+// name, only the book's own numbering ("Reviewer 1"), which review.json
+// maps to names. Anything else is left off.
+const EDITOR_BY = /^Reviewer [1-9]\d{0,3}$/;
 const PAST_MAX = 16 * 1024 * 1024; // units of a restore's earlier deletions kept to match against, per book
 
 const wholeAtLeast = (v, min) => Number.isSafeInteger(v) && v >= min;
@@ -729,6 +733,7 @@ function cleanLabel(label) {
   if (wholeAtLeast(l.ev, 0)) how.ev = l.ev;
   if (how.src === 'move' && typeof l.book === 'string' && /^[\w.-]{1,200}$/.test(l.book)) how.book = l.book;
   if (how.src === 'move' && l.copy === true) how.copy = true;
+  if (how.src === 'editor' && typeof l.by === 'string' && EDITOR_BY.test(l.by)) how.by = l.by;
   return how;
 }
 
@@ -1210,7 +1215,7 @@ class Recorder {
     const before = s.docs[doc];
     const { ops, ins } = diff(before, text);
     const fields = { doc, src: how.src || 'unlogged', ops: recordOps(ops, ins) };
-    for (const k of ['cause', 'dur', 'ev']) if (how[k] !== undefined) fields[k] = how[k];
+    for (const k of ['cause', 'by', 'dur', 'ev']) if (how[k] !== undefined) fields[k] = how[k];
     // a move's other half, the text leaving: nothing came from anywhere
     if (fields.src === 'move' && !ins.some((t) => t)) fields.src = 'typed';
     if (this._ready(s)) {
@@ -1244,6 +1249,7 @@ class Recorder {
     if (old) {
       const fields = { doc, src: how.src || 'unlogged', ops: [[0, old.length, 0]] };
       if (how.cause) fields.cause = how.cause;
+      if (how.by) fields.by = how.by;
       if (this._ready(s)) this._moved(s, doc, old, fields.ops, [''], how, s.chain.n + 1);
       this._append(s, 'edit', fields);
     }

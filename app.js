@@ -11300,6 +11300,9 @@ async function slogReport(msg) {
     { value: 'dates', label: t('Dates only'), desc: t('Which days you wrote, not when in the day.') },
     { value: 'weeks', label: t('Weeks only'), desc: t('Which weeks you wrote, nothing finer.') }
   ];
+  // (a book with editors' changes in it offers to name them, off unless ticked)
+  let editors = false;
+  try { editors = !!(window.neo.review && (await reviewLoad(book.id)).reviewers.length); } catch { /* none */ }
   const picked = await new Promise((resolve) => {
     let privacy = 'dates';
     const bd = document.createElement('div');
@@ -11311,6 +11314,7 @@ async function slogReport(msg) {
         <p>${escHtml(t('How should it show the times?'))}</p>
         ${choices.map((c) => `<button type="button" class="fr-choice${c.value === privacy ? ' sel' : ''}" data-v="${c.value}" aria-pressed="${c.value === privacy}" style="width:100%;margin-bottom:8px"><strong>${escHtml(c.label)}</strong><span>${escHtml(c.desc)}</span></button>`).join('')}
         <label class="pm-check" style="margin:6px 0 4px"><input id="sr-pdf" type="checkbox"/> ${escHtml(t('Also save it as a PDF'))}</label>
+        ${editors ? `<label class="pm-check" style="margin:2px 0 4px" title="${escAttr(t('The log calls them Reviewer 1, Reviewer 2. Ticked, this report shows their names instead; the log itself never holds them.'))}"><input id="sr-names" type="checkbox"/> ${escHtml(t('Name the editors'))}</label>` : ''}
         <p class="muted" style="font-size:12px">${escHtml(t('The report is only a summary. To let someone check the log itself, use Export for Verification…, which always carries exact times.'))}</p>
         <div style="text-align:right;margin-top:10px">
           <button class="m-cancel btn-quiet">${t('Cancel')}</button>
@@ -11326,7 +11330,7 @@ async function slogReport(msg) {
       };
     });
     bd.querySelector('.m-cancel').onclick = () => done(null);
-    bd.querySelector('.m-ok').onclick = () => done({ privacy, pdf: bd.querySelector('#sr-pdf').checked });
+    bd.querySelector('.m-ok').onclick = () => done({ privacy, pdf: bd.querySelector('#sr-pdf').checked, nameEditors: !!(bd.querySelector('#sr-names') && bd.querySelector('#sr-names').checked) });
     bd.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); done(null); } });
     bd.querySelector('.m-ok').focus();
   });
@@ -16263,7 +16267,7 @@ async function importReview(filePath = null) {
     } catch (err) { window.neo.logError('review copy: ' + (err && err.stack || err)); }
     // reviewers keep their color from round to round
     for (const n of names) {
-      if (!review.reviewers.some((r) => r.name === n)) review.reviewers.push({ name: n, color: REVIEW_COLORS[review.reviewers.length % REVIEW_COLORS.length] });
+      if (!review.reviewers.some((r) => r.name === n)) review.reviewers.push({ name: n, num: ReviewMatch.nextNum(review.reviewers), color: REVIEW_COLORS[review.reviewers.length % REVIEW_COLORS.length] });
     }
     for (const s of found.suggestions) {
       review.suggestions.push(Object.assign({ id: reviewNewId('s'), round: round ? round.id : null, import: importId, status: 'open' }, s));

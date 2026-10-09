@@ -1305,7 +1305,13 @@ ipcMain.handle('slog:report', async (_e, bookId, opts = {}) => {
   if (canceled || !filePath) return null;
   rememberExportFolder(filePath);
   try {
-    const html = await slogReportHtml(dir, meta, privacy);
+    // the editors' names, only when the writer asked (never in the log)
+    let editorNames = null;
+    if (opts.nameEditors) {
+      const review = readJSON(path.join(dir, 'review.json'), null);
+      if (review && Array.isArray(review.reviewers)) editorNames = require('./review-match.js').reviewerNames(review.reviewers);
+    }
+    const html = await slogReportHtml(dir, meta, privacy, editorNames);
     const file = /\.html?$/i.test(filePath) ? filePath : filePath + '.html';
     fs.writeFileSync(file, html, 'utf8');
     let pdf = null;
@@ -1320,7 +1326,7 @@ ipcMain.handle('slog:report', async (_e, bookId, opts = {}) => {
   }
 });
 // The report's page, from the book's log as it stands
-async function slogReportHtml(dir, meta, privacy) {
+async function slogReportHtml(dir, meta, privacy, editorNames = null) {
   const V = require('./slog-verify.js');
   const R = require('./slog-report.js');
   const { anchors, certs } = slogTrust();
@@ -1329,7 +1335,7 @@ async function slogReportHtml(dir, meta, privacy) {
   let tz = 'UTC';
   try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { /* UTC */ }
   return R.renderReport(stats, {
-    privacy, tz, locale: NeoI18n.getLocale(), t, canShow: slogCanShow(),
+    privacy, tz, locale: NeoI18n.getLocale(), t, canShow: slogCanShow(), editorNames,
     generator: 'NEO ' + app.getVersion(), generated: Date.now()
   });
 }
