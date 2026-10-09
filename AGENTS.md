@@ -143,6 +143,17 @@ The FIND & REPLACE section of `app.js` (⌘F, `#searchbar`, at the top of the wi
 - The bar: Tab and Shift+Tab go round it and its list (`findTabStops`), never into the book; Esc is the way to the page. Each box has a ✕ that shows while it has something in it (`findShowClears`; not a Tab stop). A hit gone to lands two lines below the list while it's open under the bar (`findHitTop`), else a little above the middle.
 - `scripts/find.test.js` (the pattern, the context, the rows and the drawing window, in `vm`); `npm run test:find` (`scripts/find.e2e.js`, Electron) drives the bar, the options, a phrase across italics, titles, the results list in both places (grouping, keys, docking and the pane put back, a 5,000-hit book), Replace and Replace All (the version named first, Keep formatting and Plain from the bar and the list, titles), titles in Chapter History and Restore Titles after a "restart", and checks the log.
 
+## Word round-trip
+
+Phase 6: the book goes to an editor as Word and their tracked changes and comments come back as suggestions (the REVIEW section of `app.js`; `review-docx.js` reads and writes the Word side, `review-match.js` matches a file to the book). Desktop only; a script can't be sent or reviewed.
+
+- **Sending** (File → Export → Word for an Editor…, `exportForEditor`): the editor's name, then NEO's regular Word file (`buildDocxEntries(data, { marks: true })`: a hidden bookmark `_NEO_ch_<n>` at each section's start) through `ReviewDocx.forReview` (a `w14:paraId` on every paragraph, the round id `NEO.ReviewRound` in `docProps/custom.xml`, Track Changes on) and `withComments` (the threads not deleted, replies through `paraIdParent`, resolved as `done`). After the save, a version "Sent to Dana (Oct 9)" (`auto: 'word'`) and a round in `review.json`.
+- **Bringing it back** (File → Import Review…, or one .docx dropped on the open book's page, `importReview`): main reads the file (`review:pick`, `review:read`; a token per file, so `review:keep` copies it to `reviews/` without the window naming a path; only the parts read are unpacked, each at most `ReviewDocx.MAX_PART`), the window matches it to the round's version (`history:text`) or asks which version, and keeps suggestions and threads in `review.json`. Nothing in a chapter changes at import.
+- **`review.json`** (`json:write`): `editors`, `rounds`, `imports`, `reviewers` (`name`, `num`, `color`), `suggestions` (`status` open, accepted, rejected; anchors as quotes found again by `findAnchor`), `threads`. Nothing is ever taken out of it. Every computer shares it, so `reviewSave` puts the copy it's given together with the file as it is now (`ReviewMatch.mergeReview`, three-way against what that copy was read as, `reviewBases`) and `refreshFromDisk` takes in another computer's changes (`reviewRefresh`). Never write it without going through `reviewSave`. It isn't a log document: it holds the editors' names.
+- **The Review tab** (decision 1a; View → Review, Ctrl+Alt+R): shown only while something waits. Accept and Reject (A, R; J, K to step) go through the page (`reviewSplice`, `reviewStyle`) as one `snapshotStructure('review')` each, logged as `{ src: 'editor', by: 'Reviewer <n>', cause: 'review' }`; accepting more than one at once names a version first. Comments sit in the margin (Reply, Resolve, Resolve and Delete, Deleted comments with Put back). Two editors' changes to one passage are one item with each wording (1, 2, W for the writer's own, logged as typed). The reviewer filter and colors are on the bar's chips.
+- **Names never enter the log** (decision 2): `ReviewMatch.reviewerTag` numbers editors per book; the Recorder takes only `Reviewer <n>`. The Verification Report's Name the editors puts names from `review.json` into that report only.
+- `scripts/review-docx.test.js`, `scripts/review-match.test.js`, `scripts/slog-editor.test.js`; `npm run test:review` (`scripts/review.e2e.js`); `scripts/devices.e2e.js` imports a review on one computer and accepts it on the other. Fixtures in `scripts/fixtures/review/` are public-domain text or made by LibreOffice, never a writer's own.
+
 ## Guides
 
 Help → How-To Guide… and Help → FAQ… (`showGuide` in `app.js`, after the shortcuts sheet) show `docs/HOW-TO.md` and `docs/FAQ.md` in a window like the shortcuts sheet: the two as tabs, their `##` headings (and the FAQ's questions) down the side, links between them followed in place, Esc puts the caret back. `help:guide` in `main.js` reads them from NEO's own folder by name only (`GUIDES` in `guide.js`). English only for now (TRANSLATING.md); Pocket's bridge has no `guide`.
@@ -216,6 +227,8 @@ NEO Library/
     art-<ts>.<ext>      painted image, plus art.json
     scribes-log/        the Scribe's Log (SLOG-FORMAT.md)
     versions/           named versions and log-off copies (see Versions)
+    review.json         editors' changes and comment threads (see Word round-trip)
+    reviews/            a copy of each editor's .docx as it came back
 ```
 
 App settings and the cover-art API key live in Electron `userData` (`settings.json`, `secrets.json`), not in the library. The key is encrypted with `safeStorage` when the OS allows it. Do not write secrets into the library.
@@ -279,6 +292,7 @@ npm run test:history       # the History window, in Electron (xvfb-run without a
 npm run test:find          # Find and Replace, in Electron (xvfb-run without a display)
 npm run test:palette       # the command palette, in Electron (xvfb-run without a display)
 npm run test:manuscript    # Manuscript Format export, in Electron (xvfb-run without a display)
+npm run test:review        # the Word round-trip, in Electron (xvfb-run without a display)
 npm run test:guide         # the guides under Help, in Electron (xvfb-run without a display)
 npm run build:verifier     # writes verifier/verifier.html
 npm run bundle             # Hugh: brings in the newest .bundle from ~/Downloads and pushes main

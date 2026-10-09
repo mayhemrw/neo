@@ -82,13 +82,51 @@ Each is about one builder session. Every milestone ends with `npm test`, `npm ru
 
 Running the Electron tests in the cloud: `timeout 600 xvfb-run -a -s "-screen 0 1400x900x24" npx electron --no-sandbox scripts/<name>.e2e.js` (Electron needs `--no-sandbox` as root). The devices test is plain Node: `node scripts/devices.e2e.js`. Screenshots: `NEO_TEST_SHOTS=<folder>`. A .docx to pictures: `soffice --headless --convert-to pdf`, then `pdftoppm -png -r 60`. Commits end with the attribution lines the session's instructions give. Never commit Ryan's own writing or anything from his clients as a fixture.
 
+## The PC check (for Ryan, at the PC)
+
+About 30 minutes, real Word on Windows, you as the editor. Use a test book with public-domain text (a Gutenberg chapter pasted in), not your own writing or a client's, so the Word file you make can become a test fixture.
+
+**Get the branch** (this run couldn't reach your PC, so it's yours to do; in a terminal at D:\neo):
+
+1. `git fetch origin`
+2. `git checkout word-roundtrip`
+3. `git pull`
+4. `npm install`, then `npm start`
+
+**In NEO:**
+
+1. Open the test book, File → Export → Word for an Editor…, type "Ryan as editor", save.
+2. Chapter History (Ctrl+Shift+H): the version "Sent to Ryan as editor (date)" is there.
+
+**In Word** (open the file you just saved):
+
+1. Track Changes should already be on (Review tab).
+2. Replace a word, delete a sentence, add a sentence, split one paragraph in two, join two others, make a word bold, and move a paragraph (cut and paste it elsewhere).
+3. Add two comments; reply to one; resolve the other.
+4. Turn Track Changes off and change one word; turn it back on.
+5. Save and close.
+
+**Back in NEO:**
+
+1. Write a sentence in chapter 1 first (so the book has moved on), then File → Import Review… and pick the file. The summary should count your changes and comments, plus "1 made without Track Changes".
+2. The Review tab: each change in color, the comments in the margin. Try A, R, J, K, Accept All, Ctrl+Z, a reply (Ctrl+Enter), Resolve, Resolve and Delete, Put back.
+3. The writing page shows none of the markup.
+4. File → Export → Word for an Editor… again; open it in Word: your reply under the editor's comment, the resolved one marked done.
+5. Add a reply in Word, save, Import Review… again: the summary says the threads are the same ones, and only the new reply comes in.
+6. File → Scribe's Log → Verification Report…: "From an editor (Reviewer 1)". Tick Name the editors and make another: your editor name shows.
+7. Help → How-To Guide… and Help → FAQ…; Ctrl+K, type "faq".
+
+**Tell me:** anything that looked wrong or confusing, and attach the Word file from step 5 of "In Word" (public-domain text only) so it becomes a real-Word fixture.
+
 ## Claim
 
 - Scheduled task: `trig_01G2ZxJvq3EbmHSLDeaCnd9t` ("NEO phase 6 builder", hourly at :36 Pacific, automatic approval, push notifications). A session may also start the next one at once with `fire_trigger` on this id once its milestone is pushed and the claim cleared.
-- Claimed: M8, session start 2026-10-09T16:29Z, heartbeat 2026-10-09T16:43Z
+- Claimed: none
 
 ## Open questions
 
+- (M8, default taken) **review.json on two computers**: every save now puts the window's copy together with the file as it is now (item by item; nothing ever taken out), and an open book takes in the other computer's changes every 30 seconds. If both computers import a *new* editor before syncing, both may first call their editor "Reviewer 1"; once they sync, NEO numbers them apart (by name), but words accepted before that on the second computer stay logged as "Reviewer 1". Rare; say if you want NEO to refuse an import until the other computer's changes have synced.
+- (M8, not changed) A .docx dropped on the page is read by the path the drop gives the window (the review found this is the one place the window names a path). It can only read a .docx and keep a copy in the book's `reviews/`; left as is.
 - (M7, default taken) The guides are written plainly in the second person ("you"), not in Hugh's first-person README voice, since they're about the fork's additions and answer serious questions (proof, privacy). Say if you'd like them chattier.
 - (M7, default taken) Help → How-To Guide… and Help → FAQ… open one window with both guides as tabs and their sections down the side, English only.
 - (M6, default taken) **Accept All leaves alone any passage two editors both changed**: those wait for you to pick a wording (the toast says how many). A reviewer's own **Accept** (on their chip) does take their side there; the other editor's wording then waits, marked out of date.
@@ -111,6 +149,8 @@ Running the Electron tests in the cloud: `timeout 600 xvfb-run -a -s "-screen 0 
 - (M1, small, default taken) Footnotes and text boxes in an editor's file aren't read as text; the import will count them and say so ("2 footnotes weren't read"). NEO has no footnotes, so this seems right; say if editors you work with put notes in footnotes rather than comments.
 
 ## Progress log
+
+- Oct 9, 9:50 AM PT (M8 done, except your PC): **Checks.** Every suite run: `npm test` 432 pass; lint at baseline (31); e2e all green: words 18, tabs 7, caret 14, slog 44, verifier 12, history 18, find 34, palette 10, manuscript 6, guide 8, review 32, devices 24. **The two-computer test** now takes a review: A sends the book to "Dana Editor" and imports her file (a word replaced, a sentence added); B accepts both in its Review tab; on both computers the words trace to "editor:Reviewer 1", nothing is unlogged, and "Dana" is in no log file or export. **An independent review** (a separate agent over the whole phase) found five things; four fixed: (1, the serious one) review.json was last-write-wins, so a second computer, or an import's own awaits, could write over an import, replies or a round: saves now merge three-way with the file (`ReviewMatch.mergeReview`, one save at a time) and an open book takes in the other computer's changes (`reviewRefresh` in `refreshFromDisk`); (2) a hostile .docx with ids or names like `__proto__` could tamper with JavaScript's objects in NEO's main process: file-keyed maps have no prototype now; (3) a zip bomb in a .docx could freeze and crash NEO: only the parts read are unpacked, each capped at 64 MB; (4) an editor's repeated short comment ("Cut?") could be hidden in an old deleted thread: matching by words alone now needs the same words, chapter, and isn't done into deleted threads. (5) left as is, noted above. New tests for each (review-docx 36, review-match 27, review.e2e +1). AGENTS.md has a Word round-trip section and the book folder's new files; SLOG-FORMAT.md already had `editor`; i18n template refreshed. **The PC check** steps are above. This run couldn't reach your PC (scheduled runs are cloud only), so bringing D:\neo to the branch is the first of those steps. The scheduled builder is switched off.
 
 - Oct 9, 9:30 AM PT (M7 done): **The guides.** `docs/HOW-TO.md` (14 short recipes: prove you wrote your book, send a log, check one in the verifier, watch a chapter being written, go back to an earlier version, name a version, replace across the book, manuscript format, send to an editor and bring it back, two editors, the command palette, two computers, turning the log off, merging the log) and `docs/FAQ.md` (about 30 plain answers in four parts: the Scribe's Log, versions, editors and Word, other). Linked from README's new "Guides" section. Inside NEO, offline: **Help → How-To Guide…** and **Help → FAQ…** (so also in Ctrl+K) open one window with both as tabs, the sections down the side, links between them followed in place, Esc back to the caret (`showGuide`; new `guide.js` renders the Markdown with every word escaped; `help:guide` reads them by name from NEO's folder; `docs/*.md` added to the packaged files). English only, noted in TRANSLATING.md. A separate agent fact-checked every claim against the code (about 80 confirmed; fixed the "made without Track Changes" label, the log-off line, a deleted chapter's place, exports always carrying exact times, and a few more). AGENTS.md has the file rows and a Guides section (keep the guides in step with menu changes). Tests: new `scripts/guide.test.js` (10: rendering, escaping, links, every menu name against main.js, no em dashes, packaged and linked); `npm test` 426 pass; lint at baseline (31); new `npm run test:guide` 8 (every menu name in both guides is a real menu item at that place, both open from Help, sections scroll, tabs and links switch, the palette lists them, the caret comes back over a book); `test:palette` 10 and `test:tabs` 7 pass. i18n template refreshed. Next: M8 (checks, and the PC).
 
