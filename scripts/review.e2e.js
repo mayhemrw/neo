@@ -16,6 +16,10 @@
 // Resolve and Delete (Deleted comments, ⌘Z, Put back), the threads sent back
 // in the next file as Word comments with replies and done, and read back
 // from it as the same threads.
+// M6: two editors sent the book side by side (one passage, two wordings,
+// picked or the writer's own), the reviewer filter, a file passed from one
+// editor to the next (each one's changes under their name, accepted in
+// any order), a reviewer's color, and the log.
 // NEO_TEST_SHOTS=<folder> saves pictures, and the sample file for review.
 
 'use strict';
@@ -53,6 +57,7 @@ const JSZip = require('jszip');
 const RD = require('../review-docx.js');
 const RM = require('../review-match.js');
 const Z = require('../slog-zip.js');
+const ReviewMatchPARA = '\u2029';
 
 let wc;
 const js = (code) => wc.executeJavaScript(code, true);
@@ -703,6 +708,228 @@ test('a second round reads them back as the same threads, with the editor’s ne
   assert.deepEqual(after.reviewers.map((r) => r.name), before.reviewers.map((r) => r.name), 'the writer is not a reviewer');
   await until(() => js(`currentTab === 'review' && !!${card(hillId)}`));
   assert.equal(await js(`${card(hillId)}.querySelectorAll('.rv-cm').length`), 3);
+  let errors = '';
+  try { errors = fs.readFileSync(path.join(LIB, 'neo-errors.log'), 'utf8'); } catch { /* none */ }
+  assert.equal(errors, '');
+});
+
+// ---- M6: more than one editor ----
+let wid = 3000;
+const W = (who) => `w:id="${wid++}" w:author="${who}" w:date="2026-10-10T10:00:00Z"`;
+const INS = (who, text) => `<w:ins ${W(who)}><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:ins>`;
+const DEL = (who, text) => `<w:del ${W(who)}><w:r><w:delText xml:space="preserve">${text}</w:delText></w:r></w:del>`;
+// one person's insertion that the next person took out (a file passed on)
+const INSDEL = (a, b, text) => `<w:ins ${W(a)}><w:del ${W(b)}><w:r><w:delText xml:space="preserve">${text}</w:delText></w:r></w:del></w:ins>`;
+// `find`, in one run's text, replaced by tracked changes (as Word writes them)
+function splice(doc, find, xml) {
+  const i = doc.indexOf(find);
+  assert.ok(i >= 0, 'in the file: ' + find);
+  const open = doc.lastIndexOf('<w:t', i);
+  assert.ok(doc.lastIndexOf('</w:t>', i) < open && doc.indexOf('</w:t>', i) >= i + find.length, 'in one run: ' + find);
+  return doc.slice(0, i) + '</w:t></w:r>' + xml + '<w:r><w:t xml:space="preserve">' + doc.slice(i + find.length);
+}
+async function sendTo(name, file) {
+  dialog.showSaveDialog = async () => ({ canceled: false, filePath: file });
+  await js(`(() => { window.__rv = doExport('review'); })()`);
+  await until(() => js(`!!${D}`));
+  await js(`${D}.querySelector('.rv-name').value = ${JSON.stringify(name)}; ${D}.querySelector('.rv-go').click()`);
+  await js(`window.__rv`);
+  assert.ok(fs.existsSync(file), file);
+}
+async function edited(file, out, edit) {
+  const zip = await JSZip.loadAsync(fs.readFileSync(file));
+  zip.file('word/document.xml', edit(await zip.file('word/document.xml').async('string')));
+  fs.writeFileSync(out, await zip.generateAsync({ type: 'nodebuffer' }));
+  return out;
+}
+async function importIt(file) {
+  await js(`(() => { window.__ri = importReview(${JSON.stringify(file)}); })()`);
+  await until(() => js(`!!${S}`));
+  // (the comment threads sent back with every file come back the same)
+  const lines = (await summaryLines()).filter((l) => !/are the same threads/.test(l));
+  const notes = await summaryNotes();
+  await js(`${S}.querySelector('.m-ok').click()`);
+  await js(`window.__ri`);
+  await until(() => js(`currentTab === 'review' && !rvs.busy`));
+  return { lines, notes };
+}
+const c1Text = async () => js(`ReviewMatch.htmlText(chapterHTML[book.chapterOrder[0]])`);
+const groupId = () => js(`(${R}.querySelector('.rv-group') || {}).dataset?.sid || null`);
+const m6 = {};
+
+test('two editors at once: their changes to one passage are one item, the wordings side by side', async () => {
+  const fd = await sendTo('Dana Editor', path.join(tmp, 'm6-dana.docx')).then(() => path.join(tmp, 'm6-dana.docx'));
+  const fl = await sendTo('Lee Copyeditor', path.join(tmp, 'm6-lee.docx')).then(() => path.join(tmp, 'm6-lee.docx'));
+  const back1 = await edited(fd, path.join(tmp, 'm6-dana-back.docx'), (doc) => {
+    doc = splice(doc, 'conceded', DEL('Dana Editor', 'conceded') + INS('Dana Editor', 'granted'));
+    return splice(doc, 'favoured', DEL('Dana Editor', 'favoured') + INS('Dana Editor', 'favored'));
+  });
+  const back2 = await edited(fl, path.join(tmp, 'm6-lee-back.docx'), (doc) => {
+    doc = splice(doc, 'conceded to England', DEL('Lee Copyeditor', 'conceded') + INS('Lee Copyeditor', 'vouchsafed') + '<w:r><w:t xml:space="preserve"> to England</w:t></w:r>');
+    return splice(doc, 'Our Lord', DEL('Lee Copyeditor', 'Our') + INS('Lee Copyeditor', 'our') + '<w:r><w:t xml:space="preserve"> Lord</w:t></w:r>');
+  });
+  assert.deepEqual((await importIt(back1)).lines, ['Dana Editor: 2 changes']);
+  assert.deepEqual((await importIt(back2)).lines, ['Lee Copyeditor: 2 changes']);
+  const review = await reviewJson();
+  const lee = review.reviewers.find((r) => r.name === 'Lee Copyeditor');
+  assert.ok(lee && new Set(review.reviewers.map((r) => r.color)).size === review.reviewers.length, 'every reviewer has a color of their own');
+  // the list: Dana's "favored", Lee's "our", and the passage both changed
+  const gid = await groupId();
+  assert.ok(gid, 'a passage two editors changed');
+  assert.equal((await items()).length, 3);
+  const alts = await js(`[...${R}.querySelectorAll('.rv-group .rv-alt')].map((a) => [a.querySelector('.rv-alt-by').textContent, a.querySelector('ins').textContent, a.querySelector('del').textContent])`);
+  assert.deepEqual(alts, [['Dana Editor', 'granted', 'conceded'], ['Lee Copyeditor', 'vouchsafed', 'conceded']]);
+  // on the page: today's words, marked in both colors
+  const mark = await js(`(() => { const m = ${R}.querySelector('.rv-page .rv-clash[data-sid="${gid}"]'); return m && [m.textContent, m.style.getPropertyValue('--rv'), m.style.getPropertyValue('--rv2')]; })()`);
+  assert.deepEqual(mark, ['conceded', review.reviewers.find((r) => r.name === 'Dana Editor').color, lee.color]);
+  await js(`reviewSelect(${JSON.stringify(gid)}); $('#paper-scroll').scrollTop = 0`);
+  await tick(200);
+  await shot('review-two-editors');
+  m6.gid = gid;
+});
+
+test('the reviewer filter: a chip hides or shows its editor; Alt-click shows only theirs', async () => {
+  const chip = (name) => `${R}.querySelector('.rv-who[data-who="${name}"] [data-act="filter"]')`;
+  await js(`${chip('Lee Copyeditor')}.click()`);
+  assert.equal(await groupId(), null, 'one editor shown: no passage to pick between');
+  let shown = await js(`[...${R}.querySelectorAll('.rv-item .rv-by')].map((x) => x.textContent)`);
+  assert.deepEqual(shown, ['Dana Editor', 'Dana Editor']);
+  assert.equal(await js(`${R}.querySelector('[data-act="accept-all"]').textContent`), 'Accept Shown');
+  assert.match(await js(`${R}.querySelector('.rv-sum').textContent`), /\(2 hidden\)/);
+  assert.equal(await js(`${R}.querySelector('.rv-who[data-who="Lee Copyeditor"]').classList.contains('rv-off')`), true);
+  await tick(150);
+  await shot('review-filter');
+  // Alt-click: only Lee's
+  await js(`${chip('Lee Copyeditor')}.dispatchEvent(new MouseEvent('click', { bubbles: true, altKey: true }))`);
+  shown = await js(`[...${R}.querySelectorAll('.rv-item .rv-by')].map((x) => x.textContent)`);
+  assert.deepEqual(shown, ['Lee Copyeditor', 'Lee Copyeditor']);
+  // only Dana's comment threads go with her
+  assert.equal(await js(`[...${R}.querySelectorAll('.rv-thread')].length`), 0);
+  await js(`${R}.querySelector('[data-act="show-all"]').click()`);
+  assert.equal(await groupId(), m6.gid);
+  assert.ok(await js(`${R}.querySelectorAll('.rv-thread').length > 0`));
+});
+
+test('Accept All leaves the passage two editors changed for the writer to pick', async () => {
+  await js(`${R}.querySelector('[data-act="accept-all"]').click()`);
+  await until(() => js(`!rvs.busy && ${R}.querySelectorAll('.rv-item').length === 1`));
+  const text = await c1Text();
+  assert.ok(text.includes('our Lord') && text.includes('that favored period') && text.includes('were conceded to England'), text);
+  assert.match(await js(`$('#hint').textContent`), /^2 accepted\. 1 passages two editors both changed wait/);
+  assert.equal(await groupId(), m6.gid);
+});
+
+test('picking one: 2 takes Lee’s wording and sets Dana’s aside; ⌘Z puts both back', async () => {
+  await js(`reviewSelect(${JSON.stringify(m6.gid)}); reviewFocus()`);
+  await keyDown('2');
+  await until(async () => (await sug((x) => x.ins === 'vouchsafed'))[0].status === 'accepted');
+  assert.equal((await sug((x) => x.ins === 'granted'))[0].status, 'rejected');
+  assert.ok((await c1Text()).includes('were vouchsafed to England'));
+  assert.equal(await groupId(), null);
+  await js(`document.activeElement && document.activeElement.blur && document.activeElement.blur(); 0`);
+  await keyDown('z', ', ctrlKey: true');
+  await until(async () => (await sug((x) => x.ins === 'granted'))[0].status === 'open');
+  assert.equal((await sug((x) => x.ins === 'vouchsafed'))[0].status, 'open');
+  await until(async () => (await c1Text()).includes('were conceded to England'));
+  await until(async () => (await groupId()) === m6.gid);
+});
+
+test('or the writer’s own words: W opens a box with the passage; ⌘Enter puts them in, logged as typed', async () => {
+  await js(`reviewSelect(${JSON.stringify(m6.gid)}); reviewFocus()`);
+  await keyDown('w');
+  const box = `${R}.querySelector('.rv-ownbox')`;
+  await until(() => js(`!!${box}`));
+  assert.equal(await js(`${box}.value`), 'conceded');
+  assert.equal(await js(`document.activeElement === ${box}`), true);
+  await js(`${box}.value = 'granted, by grace,'; ${box}.dispatchEvent(new Event('input', { bubbles: true }))`);
+  await tick(100);
+  await shot('review-own-words');
+  // a redraw keeps what's typed
+  await js(`reviewRender()`);
+  assert.equal(await js(`${box}.value`), 'granted, by grace,');
+  await js(`${box}.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }))`);
+  await until(async () => (await sug((x) => x.ins === 'granted'))[0].status === 'rejected');
+  assert.equal((await sug((x) => x.ins === 'vouchsafed'))[0].status, 'rejected');
+  assert.ok((await c1Text()).includes('were granted, by grace, to England'), await c1Text());
+  assert.equal(await groupId(), null);
+});
+
+test('a file passed from one editor to the next: each person’s changes under their own name, taken in any order', async () => {
+  const f = path.join(tmp, 'm6-ann.docx');
+  await sendTo('Ann Editor', f);
+  const back = await edited(f, path.join(tmp, 'm6-ann-bo.docx'), (doc) => {
+    // Ann put in "bright and ", Bo took her "and " out and put in "early "
+    doc = splice(doc, 'spring of hope', INS('Ann Editor', 'bright ') + INSDEL('Ann Editor', 'Bo Proofreader', 'and ') + INS('Bo Proofreader', 'early ') + '<w:r><w:t xml:space="preserve">spring of hope</w:t></w:r>');
+    return splice(doc, 'winter of despair', DEL('Bo Proofreader', 'winter') + INS('Bo Proofreader', 'season') + '<w:r><w:t xml:space="preserve"> of despair</w:t></w:r>');
+  });
+  const want = (await readDocx(back)).paragraphs.find((p) => p.after.includes('bright early spring')).after;
+  const { lines, notes } = await importIt(back);
+  assert.deepEqual(lines, ['Ann Editor: 1 change', 'Bo Proofreader: 2 changes']);
+  assert.ok(notes.some((n) => /took back/.test(n)), notes.join(' | '));
+  assert.equal(await groupId(), null, 'one file, not two editors side by side');
+  const ann = (await sug((x) => x.reviewer === 'Ann Editor' && x.status === 'open'))[0];
+  const [early, season] = ['early ', 'season'].map(async (w) => (await sug((x) => x.reviewer === 'Bo Proofreader' && x.ins === w))[0]);
+  const bo1 = await early;
+  const bo2 = await season;
+  assert.deepEqual([ann.ins, bo1.ins], ['bright ', 'early ']);
+  // Bo's first: Ann's, right beside it, still has its place
+  await js(`reviewSelect(${JSON.stringify(bo1.id)}); reviewFocus()`);
+  await keyDown('a');
+  await until(async () => (await sug((x) => x.id === bo1.id))[0].status === 'accepted');
+  assert.ok((await c1Text()).includes('the early spring of hope'));
+  assert.equal(await js(`!!${R}.querySelector('.rv-item[data-sid="${ann.id}"] .rv-stale')`), false, 'not out of date');
+  await js(`reviewSelect(${JSON.stringify(ann.id)}); reviewFocus()`);
+  await keyDown('a');
+  await until(async () => (await sug((x) => x.id === ann.id))[0].status === 'accepted');
+  await js(`reviewDecideOne(${JSON.stringify(bo2.id)}, 'accept')`);
+  const text = await c1Text();
+  assert.ok(text.split(ReviewMatchPARA).includes(want), text);
+  // ⌘Z three times, then all at once: the same
+  await js(`document.activeElement && document.activeElement.blur && document.activeElement.blur(); 0`);
+  for (const id of [bo2.id, ann.id, bo1.id]) {
+    await keyDown('z', ', ctrlKey: true');
+    await until(async () => (await sug((x) => x.id === id))[0].status === 'open');
+  }
+  await until(async () => (await c1Text()).includes('the spring of hope, it was the winter'));
+  await js(`${R}.querySelector('.rv-who[data-who="Bo Proofreader"] [data-act="accept-who"]').click()`);
+  await until(async () => (await sug((x) => x.id === bo2.id))[0].status === 'accepted');
+  await js(`${R}.querySelector('.rv-item[data-sid="${ann.id}"] [data-act="accept"]').click()`);
+  await until(async () => (await sug((x) => x.id === ann.id))[0].status === 'accepted');
+  assert.ok((await c1Text()).split(ReviewMatchPARA).includes(want), await c1Text());
+});
+
+test('a reviewer’s color is theirs to change: the dot on their chip', async () => {
+  // something of Lee's waiting, so Lee has a chip
+  await js(`(() => { const s = rvs.data.suggestions.find((x) => x.ins === 'vouchsafed'); s.status = 'open'; reviewRender(); })()`);
+  await js(`${R}.querySelector('.rv-who[data-who="Lee Copyeditor"] [data-act="color"]').click()`);
+  const sw = await js(`[...${R}.querySelectorAll('.rv-swatch')].map((b) => b.dataset.color)`);
+  assert.equal(sw.length, 8);
+  const was = (await reviewJson()).reviewers.find((r) => r.name === 'Lee Copyeditor').color;
+  const pick = sw.find((c) => c !== was);
+  await js(`${R}.querySelector('.rv-swatch[data-color="${pick}"]').click()`);
+  await until(async () => (await reviewJson()).reviewers.find((r) => r.name === 'Lee Copyeditor').color === pick);
+  assert.equal(await js(`${R}.querySelector('.rv-who[data-who="Lee Copyeditor"]').style.getPropertyValue('--rv')`), pick);
+  assert.equal(await js(`${R}.querySelectorAll('.rv-swatch').length`), 0, 'the swatches close');
+  await js(`(() => { const s = rvs.data.suggestions.find((x) => x.ins === 'vouchsafed'); s.status = 'rejected'; reviewSave(book.id, rvs.data); reviewRender(); })()`);
+});
+
+test('the log: each editor’s words numbered, the writer’s own typed; nothing unlogged, no names', async () => {
+  await js(`slogSaveAll()`);
+  await tick(600);
+  const dir = path.join(await bookDirOf(), 'scribes-log');
+  const slog = require('../slog.js');
+  const entries = fs.readdirSync(dir).filter(slog.isChunkName).sort().flatMap((n) => slog.parseChunk(fs.readFileSync(path.join(dir, n), 'utf8')).entries);
+  const review = await reviewJson();
+  const tag = (name) => RM.reviewerTag(review.reviewers, name);
+  const by = new Set(entries.filter((e) => e.src === 'editor').map((e) => e.by));
+  for (const name of ['Dana Editor', 'Lee Copyeditor', 'Ann Editor', 'Bo Proofreader']) assert.ok(by.has(tag(name)), name + ' as ' + tag(name) + ': ' + [...by]);
+  assert.ok(entries.some((e) => e.src === 'typed' && e.cause === 'review'), 'the writer’s own wording, typed');
+  assert.deepEqual(entries.filter((e) => e.src === 'unlogged').map((e) => e.doc), []);
+  for (const n of fs.readdirSync(dir)) {
+    if (!fs.statSync(path.join(dir, n)).isFile()) continue;
+    const body = fs.readFileSync(path.join(dir, n), 'utf8');
+    for (const name of ['Dana', 'Lee', 'Ann', 'Bo Proof']) assert.ok(!body.includes(name), n + ' names no one');
+  }
   let errors = '';
   try { errors = fs.readFileSync(path.join(LIB, 'neo-errors.log'), 'utf8'); } catch { /* none */ }
   assert.equal(errors, '');

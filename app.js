@@ -17095,7 +17095,7 @@ function reviewRender() {
     const n = all.filter((r) => r.s.reviewer === w.name).length;
     bar += `<span class="rv-who${off ? ' rv-off' : ''}" data-who="${escAttr(w.name)}" style="--rv:${escAttr(w.color)}">` +
       `<button type="button" class="rv-dot" data-act="color" title="${escAttr(t('{name}’s color', { name: w.name }))}" aria-label="${escAttr(t('{name}’s color', { name: w.name }))}"><i></i></button>` +
-      `<button type="button" class="rv-name" data-act="filter" aria-pressed="${off ? 'false' : 'true'}" title="${escAttr(off ? t('Show {name}’s changes and comments (Alt-click: only theirs)', { name: w.name }) : t('Hide {name}’s changes and comments (Alt-click: only theirs)', { name: w.name }))}">${escHtml(w.name)} <span class="rv-n">${w.n + w.c}</span></button>` +
+      `<button type="button" class="rv-name" data-act="filter" aria-pressed="${off ? 'false' : 'true'}" title="${escAttr(off ? t('Show {name}’s changes and comments (Alt-click: only theirs)', { name: w.name }) : t('Hide {name}’s changes and comments (Alt-click: only theirs)', { name: w.name }))}">${escHtml(w.name)}${w.n ? ` <span class="rv-n">${w.n}</span>` : ''}</button>` +
       (n && !off ? `<button type="button" class="rv-mini" data-act="accept-who" data-who="${escAttr(w.name)}" title="${escAttr(t('Accept all of {name}’s changes', { name: w.name }))}">${escHtml(t('Accept'))}</button>` +
       `<button type="button" class="rv-mini" data-act="reject-who" data-who="${escAttr(w.name)}" title="${escAttr(t('Reject all of {name}’s changes', { name: w.name }))}">${escHtml(t('Reject'))}</button>` : '') + '</span>';
     if (rvs.colors === w.name) {

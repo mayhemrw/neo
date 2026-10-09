@@ -313,3 +313,23 @@ describe('a file NEO sent with comments, saved again by LibreOffice (an outside 
     assert.equal(known[0].comments.length, 2);
   });
 });
+
+describe('more than one editor (M6)', () => {
+  test('a file passed from one editor to the next: each person’s changes under their name, in the file’s order, at one point side by side', () => {
+    const insdel = (t, a, b) => `<w:ins w:id="80" w:author="${a}" w:date="2026-10-09T10:00:00Z"><w:del w:id="81" w:author="${b}" w:date="2026-10-10T10:00:00Z"><w:r><w:delText xml:space="preserve">${t}</w:delText></w:r></w:del></w:ins>`;
+    const p1 = para(run('It was the ') + ins('bright ', 70, 'Ann') + insdel('and ', 'Ann', 'Bo') + ins('early ', 71, 'Bo') + run('spring of hope.'));
+    const p2 = para(run('The mail ') + del('lumbered', 72, 'Bo') + ins('laboured', 73, 'Bo') + run(' up Shooter’s Hill.'));
+    const m = file([{ title: 'Chapter 1', paras: [{ xml: p1 }, { xml: p2 }] }]);
+    const r = M.match(m, sent([{ id: 'c1', title: 'Chapter 1', paras: ['It was the spring of hope.', 'The mail lumbered up Shooter’s Hill.'] }]), { fallback: 'Ann' });
+    assert.deepEqual(r.suggestions.map((s) => [s.kind, s.reviewer, s.del, s.ins]), [
+      ['insert', 'Ann', '', 'bright '],
+      ['insert', 'Bo', '', 'early '],
+      ['replace', 'Bo', 'lumbered', 'laboured']
+    ]);
+    assert.equal(r.cancelled, 1, 'Ann’s "and " that Bo took out');
+    // the two insertions are at one point; which goes first is the file's order
+    assert.equal(r.suggestions[0].anchor.o, r.suggestions[1].anchor.o);
+    assert.deepEqual(Object.keys(r.counts).sort(), ['Ann', 'Bo']);
+    assert.equal(r.suggestions.filter((s) => s.untracked).length, 0, 'nothing untracked');
+  });
+});
