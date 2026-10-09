@@ -16112,7 +16112,8 @@ async function exportForEditor() {
     const round = ReviewDocx.roundId(at);
     const data = bookExportData();
     if (!data.sections.length) { toast(t('There’s nothing in this book to export yet')); return; }
-    const entries = ReviewDocx.forReview(buildDocxEntries(data, { marks: true }), { round });
+    const out = reviewWithThreads(ReviewDocx.forReview(buildDocxEntries(data, { marks: true }), { round }), data, review);
+    const entries = out.entries;
     const day = new Date(at).toLocaleDateString(NeoI18n.getLocale(), { month: 'short', day: 'numeric' });
     const defaultName = safeName(book.title) + '-' + safeName(to);
     let saved;
@@ -16132,6 +16133,12 @@ async function exportForEditor() {
       if (res && !res.error) version = res; else why = (res && res.error) || '';
     } catch (err) { why = plainError(err); }
     review.editors = [to, ...review.editors.filter((n) => n !== to)].slice(0, 12);
+    // the ids the threads went with, so the file finds them again; what they
+    // said about resolved, so the editor's own change shows
+    for (const { th, ids } of out.sent) {
+      th.comments.forEach((c, i) => { if (ids[i] && !(c.sent || []).includes(ids[i])) c.sent = [...(c.sent || []), ids[i]].slice(-4); });
+      th.fileResolved = !!th.resolved;
+    }
     review.rounds.push({
       id: round, at, to,
       file: saved.split(/[\\/]/).pop(),
@@ -16143,12 +16150,66 @@ async function exportForEditor() {
       window.neo.logError('review: ' + (err && err.stack || err));
       why = why || plainError(err);
     }
+    if (book && book.id === bookId && rvs.bookId === bookId) { rvs.data = review; reviewTabShow(); }
     const file = saved.split(/[\\/]/).pop();
+    if (out.left) toast(t('{n} comment threads aren’t on a chapter in the book, so they stayed out of the file. They’re still in the Review tab.', { n: out.left }), 6000);
     if (version && !why) toast(t('Saved {file} for {name}. The book as it was sent is the version “{version}” in Chapter History.', { file, name: to, version: version.name }), 8000);
     else toast(t('Saved {file} for {name}, but NEO couldn’t keep a note of what was sent ({why}). The file still comes back; NEO will ask which version it was.', { file, name: to, why }), 10000);
   } finally {
     reviewSending = false;
   }
+}
+
+// The comment threads going back with a file for an editor (decision 6b):
+// open ones, and resolved ones marked done; deleted ones stay home. Each
+// goes over its words as the file has them (found again by its quote), or
+// at its chapter's start when they've been rewritten since. Returns
+// { entries, sent: [{ th, ids }], left } (left: threads on chapters not in
+// the file).
+function reviewWithThreads(entries, data, review) {
+  const threads = review.threads.filter((th) => !th.deleted && th.comments && th.comments.length);
+  if (!threads.length) return { entries, sent: [], left: 0 };
+  const docx = entries.find((e) => e.path === 'word/document.xml');
+  const styles = entries.find((e) => e.path === 'word/styles.xml');
+  const model = ReviewDocx.parse({ 'word/document.xml': docx.content, 'word/styles.xml': styles ? styles.content : '' });
+  const secs = new Map();
+  for (const sec of ReviewMatch.sectionsOf(model).sections) if (sec.num !== null) secs.set(sec.num, sec);
+  const numOf = new Map(data.sections.filter((x) => x.chId).map((x) => [x.chId, x.num]));
+  const me = book.author && book.author !== t('Anonymous') ? book.author : t('Author');
+  const list = [];
+  const kept = [];
+  let left = 0;
+  for (const th of threads) {
+    const sec = numOf.has(th.chapter) ? secs.get(numOf.get(th.chapter)) : null;
+    if (!sec) { left++; continue; }
+    const st = ReviewMatch.streamOf(sec);
+    const f = th.anchor ? ReviewMatch.findAnchor(st.before, th.anchor) : null;
+    // an offset in the section's text → a paragraph of the file
+    const at = (o, end) => {
+      let i = 0;
+      for (let k = 0; k < st.startsB.length; k++) if (end ? st.startsB[k] < o || k === 0 : st.startsB[k] <= o) i = k;
+      return { p: sec.paras[i] ? sec.paras[i].index : (sec.heading ? sec.heading.index : 0), o: Math.max(0, o - (st.startsB[i] || 0)) };
+    };
+    let start;
+    let end;
+    if (f && sec.paras.length) {
+      start = at(f.o, false);
+      end = f.len ? at(f.o + f.len, true) : start;
+    } else if (sec.heading) {
+      // on the title, or rewritten since: over the chapter's heading
+      start = { p: sec.heading.index, o: 0 };
+      end = { p: sec.heading.index, o: sec.heading.before.length };
+    } else {
+      start = end = { p: sec.paras.length ? sec.paras[0].index : 0, o: 0 };
+    }
+    list.push({
+      start, end, resolved: !!th.resolved,
+      comments: th.comments.map((c) => ({ author: c.mine ? (c.by || me) : (c.by || ''), date: c.at, text: c.text || '' }))
+    });
+    kept.push(th);
+  }
+  const res = ReviewDocx.withComments(entries, list);
+  return { entries: res.entries, sent: kept.map((th, i) => ({ th, ids: res.paraIds[i] || [] })), left };
 }
 
 // Reviewers' colors, in the order they first appear in a book (the same
@@ -16272,6 +16333,16 @@ async function importReview(filePath = null) {
     const authors = [...new Set(model.changes.map((c) => c.author).concat(model.comments.map((c) => c.author)).filter(Boolean))];
     const fallback = (round && round.to) || authors[0] || t('Editor');
     const found = ReviewMatch.match(model, chapters, { fallback });
+    // threads sent back and returned are the threads they were: only what's
+    // new in them counts as come in
+    const merged = ReviewMatch.mergeThreads(review.threads, found.threads);
+    for (const [who, n] of Object.entries(merged.repeats)) {
+      if (found.counts[who]) found.counts[who].comments = Math.max(0, found.counts[who].comments - n);
+    }
+    for (const who of Object.keys(found.counts)) {
+      const c = found.counts[who];
+      if (!c.changes && !c.comments && !c.untracked && !c.formatting) delete found.counts[who];
+    }
     const names = Object.keys(found.counts);
     const at = Date.now();
     const importId = reviewNewId('i');
@@ -16287,7 +16358,7 @@ async function importReview(filePath = null) {
     for (const s of found.suggestions) {
       review.suggestions.push(Object.assign({ id: reviewNewId('s'), round: round ? round.id : null, import: importId, status: 'open' }, s));
     }
-    for (const th of found.threads) {
+    for (const th of merged.added) {
       review.threads.push(Object.assign({ id: reviewNewId('t'), round: round ? round.id : null, import: importId }, th));
     }
     const imp = {
@@ -16305,7 +16376,9 @@ async function importReview(filePath = null) {
     if (model.notes.textBoxes) notes.push(t('{n} text boxes weren’t read.', { n: model.notes.textBoxes }));
     if (model.notes.tableChanges) notes.push(t('{n} changes to tables weren’t read.', { n: model.notes.tableChanges }));
     if (!round) notes.push(t('Compared with the book as it is now: changes made without Track Changes include anything you wrote since.'));
-    const lines = names.length ? names.map((n) => reviewCountLine(n, found.counts[n])) : [t('No tracked changes or comments in this file.')];
+    const said = names.filter((n) => found.counts[n]);
+    const lines = said.length ? said.map((n) => reviewCountLine(n, found.counts[n])) : [t('No new tracked changes or comments in this file.')];
+    if (merged.merged) lines.push(t('{n} comment threads you sent back are the same threads; only what’s new in them is added.', { n: merged.merged }));
     await reviewSummaryDialog(got.name, lines, notes);
     // on to the Review tab, if anything came in to take or leave
     if (book && book.id === bookId && reviewWaiting(review)) {
@@ -16328,7 +16401,7 @@ async function importReview(filePath = null) {
 /* Nothing here touches the writing page's look: the tab shows only while */
 /* something waits.                                                       */
 
-const rvs = { bookId: null, data: null, cur: null, busy: false };
+const rvs = { bookId: null, data: null, cur: null, curT: null, busy: false, unfold: new Set(), showDeleted: false, drafts: new Map() };
 
 const reviewOpen = (d) => (d ? d.suggestions.filter((s) => s.status === 'open') : []);
 const reviewOpenThreads = (d) => (d ? d.threads.filter((th) => !th.resolved && !th.deleted) : []);
@@ -16351,6 +16424,8 @@ async function reviewOpened(bookId) {
   rvs.bookId = bookId;
   rvs.data = null;
   rvs.cur = null;
+  rvs.curT = null;
+  rvs.unfold.clear();
   reviewTabShow();
   if (!window.neo.review || !window.ReviewMatch) return;
   let d = null;
@@ -16732,11 +16807,19 @@ async function reviewDecide(list, how, what = '') {
     if (currentTab === 'review') reviewRender();
   }
 }
-// ⌘Z took a decision back: the suggestions it decided wait again
+// ⌘Z took a decision back: the suggestions it decided wait again (and a
+// thread resolved, deleted or put back is as it was)
 function reviewUndone(r) {
   if (!r || !reviewMine() || rvs.bookId !== r.bookId) return;
+  const tById = new Map(rvs.data.threads.map((th) => [th.id, th]));
+  for (const { id, resolved, deleted } of r.threads || []) {
+    const th = tById.get(id);
+    if (!th) continue;
+    th.resolved = resolved;
+    if (deleted) th.deleted = th.deleted || Date.now(); else delete th.deleted;
+  }
   const byId = new Map(rvs.data.suggestions.map((s) => [s.id, s]));
-  for (const { id, status } of r.before) {
+  for (const { id, status } of r.before || []) {
     const s = byId.get(id);
     if (!s) continue;
     s.status = status;
@@ -16793,7 +16876,7 @@ function reviewRender() {
   const placed = rows.filter((r) => !r.place.why).length;
 
   // the bar: how many, each reviewer's, all
-  let bar = `<div class="rv-bar"><span class="rv-sum">${escHtml(rows.length ? t('{n} changes waiting', { n: rows.length }) : t('Nothing left to review.'))}</span>`;
+  let bar = `<div class="rv-bar"><span class="rv-sum">${escHtml(rows.length ? t('{n} changes waiting', { n: rows.length }) : reviewOpenThreads(rvs.data).length ? t('No changes waiting') : t('Nothing left to review.'))}</span>`;
   for (const [who, n] of byWho) {
     bar += `<span class="rv-who" style="--rv:${escAttr(reviewColor(who))}"><i></i>${escHtml(who)} <span class="rv-n">${n}</span>` +
       `<button type="button" class="rv-mini" data-act="accept-who" data-who="${escAttr(who)}" title="${escAttr(t('Accept all of {name}’s changes', { name: who }))}">${escHtml(t('Accept'))}</button>` +
@@ -16804,6 +16887,9 @@ function reviewRender() {
       `<button type="button" class="btn-quiet rv-btn" data-act="reject-all">${escHtml(t('Reject All'))}</button></span>`;
   }
   bar += '</div>';
+  // (the comments waiting, said in the bar too)
+  const openTh = reviewOpenThreads(rvs.data).length;
+  if (openTh) bar = bar.replace('</span>', ' · ' + escHtml(t('{n} comments open', { n: openTh })) + '</span>');
 
   // the list, by chapter
   let list = '';
@@ -16857,6 +16943,7 @@ function reviewRender() {
     } else list2.push({ o: r.place.ops[0].o, len: r.place.ops[0].len, s: r.s, part: '' });
   }
   const titles = new Map(rows.filter((r) => r.s.kind === 'title' && r.chId).map((r) => [r.chId, r.s]));
+  const { notes, threads } = reviewThreadPlaces(textOf);
   let page = '';
   for (const chId of book.chapterOrder) {
     if (chapterKind(chId) === 'contents') continue;
@@ -16865,22 +16952,59 @@ function reviewRender() {
     const head = ts
       ? `<span class="rv-s${ts.id === rvs.cur ? ' cur' : ''}" data-sid="${escAttr(ts.id)}" style="--rv:${escAttr(reviewColor(ts.reviewer))}"><del>${escHtml(ts.del)}</del><ins>${escHtml(ts.ins)}</ins></span>`
       : escHtml(chapterHeading(chId));
-    page += `<section class="rv-chapter" data-ch="${escAttr(chId)}"><h3>${head}</h3>${reviewMarkup(text || '', marks.get(chId) || [])}</section>`;
+    page += `<section class="rv-chapter" data-ch="${escAttr(chId)}"><h3>${head}</h3>${reviewMarkup(text || '', marks.get(chId) || [], notes.get(chId) || [])}</section>`;
   }
-  host.innerHTML = `${bar}<div class="rv-cols"><div class="rv-list" role="listbox" tabindex="0" aria-label="${escAttr(t('Changes'))}">${list}</div><div class="rv-page">${page}</div></div>`;
+  host.innerHTML = `${bar}<div class="rv-cols"><div class="rv-list" role="listbox" tabindex="0" aria-label="${escAttr(t('Changes'))}">${list}</div><div class="rv-page">${page}</div>` +
+    `<div class="rv-margin" aria-label="${escAttr(t('Comments'))}">${reviewMarginHtml(threads)}</div></div>`;
+  for (const box of host.querySelectorAll('.rv-replybox')) if (box.value) box.style.height = box.scrollHeight + 'px';
+  reviewPlaceCards();
+  requestAnimationFrame(reviewPlaceCards);
 }
 
 // A chapter's text as paragraphs, with its marks: a deletion struck, an
-// insertion underlined, a formatting change dotted, in the reviewer's color
-function reviewMarkup(text, marks) {
+// insertion underlined, a formatting change dotted, in the reviewer's color;
+// and the words each comment thread is about, lit faintly (notes: [{ o,
+// len, th }]; a thread on no words is a small mark where it is)
+function reviewMarkup(text, marks, notes = []) {
   const PARA = ReviewMatch.PARA;
   marks = marks.slice().sort((a, b) => a.o - b.o || a.len - b.len);
+  const spans = notes.filter((n) => n.len > 0);
+  const points = notes.filter((n) => !n.len).sort((a, b) => a.o - b.o);
+  const shown = new Set();
   let html = '<p>';
   let pos = 0;
   const plain = (s) => escHtml(s).replace(/\n/g, '<br>');
+  const pt = (n) => `<span class="rv-cpt${n.th.id === rvs.curT ? ' curc' : ''}" data-tid="${escAttr(n.th.id)}" style="--rv:${escAttr(reviewThreadColor(n.th))}" aria-hidden="true"></span>`;
+  // text[a, b) (no paragraph mark in it), cut where comments start and end
+  const rich = (a, b) => {
+    const cuts = new Set([a, b]);
+    for (const n of spans) { if (n.o > a && n.o < b) cuts.add(n.o); if (n.o + n.len > a && n.o + n.len < b) cuts.add(n.o + n.len); }
+    for (const n of points) if (n.o > a && n.o < b) cuts.add(n.o);
+    const at = [...cuts].sort((x, y) => x - y);
+    let out = '';
+    for (let k = 0; k < at.length; k++) {
+      const x = at[k];
+      for (const n of points) if (!shown.has(n) && n.o >= a && n.o <= b && n.o <= x) { shown.add(n); out += pt(n); }
+      if (k === at.length - 1) break;
+      const y = at[k + 1];
+      const over = spans.filter((n) => n.o <= x && n.o + n.len >= y);
+      const t = plain(text.slice(x, y));
+      if (!over.length) { out += t; continue; }
+      const cur = over.some((n) => n.th.id === rvs.curT);
+      out += `<span class="rv-c${over.length > 1 ? ' rv-c2' : ''}${cur ? ' curc' : ''}" data-tid="${escAttr(over.map((n) => n.th.id).join(' '))}" style="--rv:${escAttr(reviewThreadColor(over[0].th))}">${t}</span>`;
+    }
+    return out;
+  };
   const textUpTo = (end, wrapOpen = '', wrapClose = '') => {
-    const chunk = text.slice(pos, end);
-    html += chunk.split(PARA).map((x) => wrapOpen + plain(x) + wrapClose).join('</p><p>');
+    const pieces = [];
+    let a = pos;
+    for (;;) {
+      const k = text.indexOf(PARA, a);
+      if (k < 0 || k >= end) { pieces.push([a, end]); break; }
+      pieces.push([a, k]);
+      a = k + 1;
+    }
+    html += pieces.map(([x, y]) => wrapOpen + rich(x, y) + wrapClose).join('</p><p>');
     pos = end;
   };
   for (const m of marks) {
@@ -16896,7 +17020,7 @@ function reviewMarkup(text, marks) {
     const insHtml = ins ? '<ins>' + ins.split(PARA).map(plain).join('<span class="rv-pilcrow">¶</span>') + '</ins>' : '';
     // (one mark for both halves, unless what goes runs over a paragraph's end)
     if (m.len && !text.slice(m.o, m.o + m.len).includes(PARA)) {
-      html += open + '<del>' + plain(text.slice(m.o, m.o + m.len)) + '</del>' + insHtml + '</span>';
+      html += open + '<del>' + rich(m.o, m.o + m.len) + '</del>' + insHtml + '</span>';
       pos = m.o + m.len;
       continue;
     }
@@ -16904,7 +17028,183 @@ function reviewMarkup(text, marks) {
     if (insHtml) html += open + insHtml + '</span>';
   }
   textUpTo(text.length);
+  for (const n of points) if (!shown.has(n)) html += pt(n);
   return html + '</p>';
+}
+
+/* -- comments (M5): threads in the margin, replies, resolved, deleted -- */
+/* Each thread sits beside the words it's about, as Word showed it: the   */
+/* editor's comment and the replies under it. The writer answers (typed   */
+/* here, sent back as a Word reply on the next File → Export → Word for   */
+/* an Editor…), resolves it (folded, sent back marked done), or resolves  */
+/* and deletes it (out of the margin and every later file, kept under     */
+/* Deleted comments at the margin's foot, where it can be put back; ⌘Z    */
+/* undoes it too). review.json holds them all; the book never changes.    */
+
+// the writer, as replies name them
+const reviewMe = () => (book && book.author && book.author !== t('Anonymous') ? book.author : t('Author'));
+// a thread's color: its first commenter's (the writer's own in gold)
+function reviewThreadColor(th) {
+  const c = th.comments && th.comments[0];
+  if (!c) return '#7d55c7';
+  return c.mine ? 'var(--accent)' : reviewColor(c.by);
+}
+
+// Where each thread is today: { notes: Map(chId → [{ o, len, th }]),
+// threads: [{ th, chId, why, at }] } in book order. why: 'gone' (its words
+// were rewritten since), 'missing' (its chapter isn't in the book),
+// 'unplaced' (it matched no chapter), '' (on a title, or found).
+function reviewThreadPlaces(textOf) {
+  const notes = new Map();
+  const out = [];
+  const order = new Map(book.chapterOrder.map((id, i) => [id, i]));
+  for (const th of rvs.data.threads) {
+    if (th.deleted || !th.comments || !th.comments.length) continue;
+    let why = '';
+    let at = -1;
+    const chId = th.chapter && order.has(th.chapter) ? th.chapter : null;
+    if (!th.chapter) why = 'unplaced';
+    else if (!chId) why = 'missing';
+    else if (th.anchor) {
+      const text = textOf(chId);
+      const f = text === null ? null : ReviewMatch.findAnchor(text, th.anchor);
+      if (!f) why = 'gone';
+      else {
+        at = f.o;
+        if (!notes.has(chId)) notes.set(chId, []);
+        notes.get(chId).push({ o: f.o, len: f.len, th });
+      }
+    }
+    out.push({ th, chId, why, at });
+  }
+  out.sort((a, b) => (a.chId === null) - (b.chId === null) || (order.get(a.chId) ?? 0) - (order.get(b.chId) ?? 0) || a.at - b.at);
+  return { notes, threads: out };
+}
+
+const reviewWhen = (at) => {
+  const d = new Date(at);
+  return Number.isFinite(d.getTime()) ? d.toLocaleDateString(NeoI18n.getLocale(), { month: 'short', day: 'numeric' }) : '';
+};
+function reviewCommentHtml(c, i) {
+  const color = c.mine ? 'var(--accent)' : reviewColor(c.by);
+  return `<div class="rv-cm${i ? ' rv-reply' : ''}${c.mine ? ' rv-mine' : ''}" style="--rv:${escAttr(color)}"><div class="rv-cm-by"><i></i>${escHtml(c.mine ? reviewMe() : c.by || '')}<span class="rv-cm-at">${escHtml(reviewWhen(c.at))}</span></div>` +
+    `<div class="rv-cm-text">${escHtml(c.text || '').replace(/\n/g, '<br>')}</div></div>`;
+}
+function reviewMarginHtml(threads) {
+  let html = '';
+  for (const { th, why } of threads) {
+    const folded = th.resolved && !rvs.unfold.has(th.id);
+    const flags = [];
+    if (th.resolved) flags.push(`<span class="rv-flag rv-done">${escHtml(t('Resolved'))}</span>`);
+    if (why === 'gone') flags.push(`<span class="rv-flag rv-stale">${escHtml(t('passage changed'))}</span>`);
+    if (why === 'missing') flags.push(`<span class="rv-flag rv-stale">${escHtml(t('chapter gone'))}</span>`);
+    if (why === 'unplaced') flags.push(`<span class="rv-flag">${escHtml(t('not placed'))}</span>`);
+    const quote = th.anchor && th.anchor.exact ? `<div class="rv-quote">${escHtml(reviewSnip(th.anchor.exact, 90))}</div>` : '';
+    const first = th.comments[0];
+    let body;
+    if (folded) {
+      body = `<div class="rv-fold">${escHtml(reviewSnip(first.text, 70))}${th.comments.length > 1 ? ` <span class="rv-n">+${th.comments.length - 1}</span>` : ''}</div>`;
+    } else {
+      body = quote + th.comments.map(reviewCommentHtml).join('') +
+        (th.resolved ? '' : `<textarea class="rv-replybox" rows="1" placeholder="${escAttr(t('Reply…'))}" aria-label="${escAttr(t('Reply'))}">${escHtml(rvs.drafts.get(th.id) || '')}</textarea>`) +
+        '<div class="rv-acts">' +
+        (th.resolved
+          ? `<button type="button" class="rv-mini" data-tact="reopen">${escHtml(t('Reopen'))}</button>`
+          : `<button type="button" class="rv-mini rv-send-reply" data-tact="reply"${(rvs.drafts.get(th.id) || '').trim() ? '' : ' hidden'}>${escHtml(t('Reply'))}</button><button type="button" class="rv-mini" data-tact="resolve">${escHtml(t('Resolve'))}</button>`) +
+        `<button type="button" class="rv-mini" data-tact="delete" title="${escAttr(t('Out of the margin and every later file; kept under Deleted comments'))}">${escHtml(th.resolved ? t('Delete') : t('Resolve and Delete'))}</button></div>`;
+    }
+    html += `<div class="rv-thread${th.resolved ? ' rv-resolved' : ''}${folded ? ' rv-folded' : ''}${th.id === rvs.curT ? ' curc' : ''}" data-tid="${escAttr(th.id)}" style="--rv:${escAttr(reviewThreadColor(th))}" tabindex="-1">` +
+      (flags.length ? `<div class="rv-head">${flags.join('')}</div>` : '') + (folded ? `<div class="rv-cm-by"><i></i>${escHtml(first.mine ? reviewMe() : first.by || '')}</div>` : '') + body + '</div>';
+  }
+  const gone = rvs.data.threads.filter((th) => th.deleted && th.comments && th.comments.length);
+  if (gone.length) {
+    html += `<details class="rv-deleted"${rvs.showDeleted ? ' open' : ''}><summary>${escHtml(t('Deleted comments ({n})', { n: gone.length }))}</summary>` +
+      gone.map((th) => `<div class="rv-gone" data-tid="${escAttr(th.id)}"><span>${escHtml(reviewSnip(th.comments[0].text, 60))}</span><button type="button" class="rv-mini" data-tact="restore">${escHtml(t('Put back'))}</button></div>`).join('') +
+      '</details>';
+  }
+  return html || `<p class="rv-empty rv-nocm">${escHtml(t('No comments.'))}</p>`;
+}
+
+// Each card beside its words (or its chapter's title), never over the one
+// above it. With no room for a margin (a narrow window) they simply stack.
+function reviewPlaceCards() {
+  const host = $('#review-view');
+  const margin = host && host.querySelector('.rv-margin');
+  if (!margin) return;
+  const cards = [...margin.querySelectorAll('.rv-thread')];
+  const side = getComputedStyle(margin).position === 'relative';
+  for (const c of cards) c.style.top = '';
+  if (!side) { margin.style.height = ''; return; }
+  const top0 = margin.getBoundingClientRect().top;
+  let low = 0;
+  for (const c of cards) {
+    const id = c.dataset.tid;
+    const mark = host.querySelector(`.rv-page [data-tid~="${CSS.escape(id)}"]`);
+    const th = rvs.data.threads.find((x) => x.id === id);
+    const sec = th && host.querySelector(`.rv-chapter[data-ch="${CSS.escape(th.chapter || '')}"] h3`);
+    const want = mark ? mark.getBoundingClientRect().top - top0 - 6 : sec ? sec.getBoundingClientRect().top - top0 : low;
+    const y = Math.max(want, low);
+    c.style.top = y + 'px';
+    low = y + c.offsetHeight + 8;
+  }
+  const deleted = margin.querySelector('.rv-deleted');
+  if (deleted) { deleted.style.top = low + 'px'; low += deleted.offsetHeight + 8; }
+  margin.style.height = low + 'px';
+}
+
+// a thread chosen: lit in the margin and on the page
+function reviewSelectThread(id, { scroll = true, focus = false } = {}) {
+  rvs.curT = id;
+  const host = $('#review-view');
+  if (!host) return;
+  for (const el of host.querySelectorAll('.curc')) el.classList.remove('curc');
+  for (const el of host.querySelectorAll('[data-tid]')) if (el.dataset.tid.split(' ').includes(id)) el.classList.add('curc');
+  const card = host.querySelector(`.rv-thread[data-tid="${CSS.escape(id)}"]`);
+  if (!card) return;
+  if (scroll) {
+    const top = card.getBoundingClientRect().top;
+    const sc = $('#paper-scroll');
+    if (top < 80 || top > window.innerHeight - 160) sc.scrollTop += top - window.innerHeight * 0.3;
+  }
+  if (focus) { const box = card.querySelector('.rv-replybox'); (box || card).focus({ preventScroll: true }); }
+}
+
+// Resolve, reopen, delete, put back: one ⌘Z step each, saved at once
+async function reviewThreadSet(id, act) {
+  if (!reviewMine() || rvs.busy) return;
+  const th = rvs.data.threads.find((x) => x.id === id);
+  if (!th) return;
+  const bookId = book.id;
+  snapshotStructure('review');
+  const snap = undoStack[undoStack.length - 1];
+  if (snap) snap.review = { bookId, threads: [{ id, resolved: !!th.resolved, deleted: !!th.deleted }] };
+  if (act === 'resolve') th.resolved = true;
+  else if (act === 'reopen') { th.resolved = false; rvs.unfold.delete(id); } else if (act === 'delete') { th.resolved = true; th.deleted = Date.now(); } else if (act === 'restore') delete th.deleted;
+  breakRun++;
+  try { await reviewSave(bookId, rvs.data); } catch (err) {
+    window.neo.logError('review: ' + (err && err.stack || err));
+    toast(t('Couldn’t save the review’s progress: {error}', { error: plainError(err) }), 8000);
+  }
+  if (act === 'delete') toast(t('Comment deleted. It’s under Deleted comments, at the foot of the margin, and stays out of files you send. {key} to undo.', { key: KZ }), 7000);
+  reviewTabShow();
+  if (currentTab === 'review') reviewRender();
+}
+// a reply, typed here: the writer's, sent back with the next file
+async function reviewReply(id, text) {
+  text = String(text || '').replace(/\s+$/, '').replace(/^\s+/, '');
+  if (!text || !reviewMine()) return false;
+  const th = rvs.data.threads.find((x) => x.id === id);
+  if (!th) return false;
+  th.comments.push({ by: reviewMe(), at: new Date().toISOString(), text, mine: true });
+  try { await reviewSave(book.id, rvs.data); rvs.drafts.delete(id); } catch (err) {
+    th.comments.pop();
+    window.neo.logError('review: ' + (err && err.stack || err));
+    toast(t('Couldn’t save the reply: {error}', { error: plainError(err) }), 8000);
+    return false;
+  }
+  if (currentTab === 'review') reviewRender();
+  reviewSelectThread(id, { scroll: false });
+  return true;
 }
 
 // the current suggestion: lit in both panes, the page scrolled to it
@@ -16971,6 +17271,25 @@ async function reviewBulk(act, el) {
   const host = document.getElementById('review-view');
   if (!host) return;
   host.addEventListener('click', (e) => {
+    // the margin's comments
+    const tb = e.target.closest('button[data-tact]');
+    if (tb) {
+      const card = tb.closest('[data-tid]');
+      if (!card) return;
+      const id = card.dataset.tid;
+      if (tb.dataset.tact === 'reply') {
+        const box = card.querySelector('.rv-replybox');
+        reviewReply(id, box && box.value).then((ok) => { if (ok) reviewSelectThread(id, { scroll: false, focus: true }); });
+      } else reviewThreadSet(id, tb.dataset.tact);
+      return;
+    }
+    const card = e.target.closest('.rv-thread');
+    if (card) {
+      const id = card.dataset.tid;
+      if (card.classList.contains('rv-folded')) { rvs.unfold.add(id); rvs.curT = id; reviewRender(); reviewSelectThread(id, { scroll: false }); return; }
+      if (!e.target.closest('textarea')) reviewSelectThread(id, { scroll: false });
+      return;
+    }
     const btn = e.target.closest('button[data-act]');
     if (btn) {
       if (btn.disabled) return;
@@ -16982,8 +17301,54 @@ async function reviewBulk(act, el) {
       return;
     }
     const hit = e.target.closest('[data-sid]');
-    if (hit) reviewSelect(hit.dataset.sid, { scroll: !!hit.closest('.rv-list') });
+    if (hit) { reviewSelect(hit.dataset.sid, { scroll: !!hit.closest('.rv-list') }); return; }
+    const cm = e.target.closest('.rv-page [data-tid]');
+    if (cm) {
+      const ids = cm.dataset.tid.split(' ');
+      // (two threads on the same words: each click the next)
+      const id = ids[(ids.indexOf(rvs.curT) + 1) % ids.length];
+      if (rvs.unfold.has(id) || !(rvs.data.threads.find((x) => x.id === id) || {}).resolved) reviewSelectThread(id);
+      else { rvs.unfold.add(id); rvs.curT = id; reviewRender(); reviewSelectThread(id); }
+    }
   });
+  // a reply grows as it's typed; ⌘Enter (Ctrl+Enter) sends it, Esc leaves it
+  host.addEventListener('input', (e) => {
+    const box = e.target.closest('.rv-replybox');
+    if (!box) return;
+    box.style.height = 'auto';
+    box.style.height = box.scrollHeight + 'px';
+    // (kept while other things redraw the margin: words typed aren't lost)
+    const id = box.closest('.rv-thread').dataset.tid;
+    if (box.value) rvs.drafts.set(id, box.value); else rvs.drafts.delete(id);
+    const send = box.closest('.rv-thread').querySelector('.rv-send-reply');
+    if (send) send.hidden = !box.value.trim();
+    reviewPlaceCards();
+  });
+  host.addEventListener('keydown', (e) => {
+    const box = e.target.closest && e.target.closest('.rv-replybox');
+    if (!box || e.isComposing || e.keyCode === 229) return;
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      e.stopPropagation();
+      const id = box.closest('.rv-thread').dataset.tid;
+      reviewReply(id, box.value).then((ok) => { if (ok) reviewSelectThread(id, { scroll: false, focus: true }); });
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      box.blur();
+      reviewFocus();
+    }
+  });
+  host.addEventListener('focusin', (e) => {
+    const card = e.target.closest && e.target.closest('.rv-thread');
+    if (card && card.dataset.tid !== rvs.curT) reviewSelectThread(card.dataset.tid, { scroll: false });
+  });
+  host.addEventListener('toggle', (e) => {
+    if (!e.target.classList || !e.target.classList.contains('rv-deleted')) return;
+    rvs.showDeleted = e.target.open;
+    reviewPlaceCards();
+  }, true);
+  window.addEventListener('resize', () => { if (currentTab === 'review' && !host.hidden) reviewPlaceCards(); });
   // A and R decide, J and K (or the arrows) step; never over a dialog or in a box
   document.addEventListener('keydown', (e) => {
     if (currentTab !== 'review' || !book || $('#editor-view').hidden || host.hidden) return;

@@ -233,3 +233,83 @@ describe('anchors found again in today’s text', () => {
     assert.equal(M.findAnchor('Nothing alike here.', M.anchorIn(was, 25, 0)), null);
   });
 });
+
+describe('threads that come back (a second round)', () => {
+  const c = (by, text, paraId = '', more = {}) => Object.assign({ by, at: '2026-10-09T10:00:00Z', text, paraId }, more);
+  const known = () => [
+    { id: 't1', chapter: 'c1', anchor: { exact: 'hill' }, resolved: false, fileResolved: false, comments: [c('Dana', 'Which hill?', 'AAAA0001'), c('Charles', 'Shooter’s.', '', { mine: true, sent: ['0000B002'] })] },
+    { id: 't2', chapter: 'c1', anchor: null, resolved: true, fileResolved: false, comments: [c('Dana', 'Cut this?', 'AAAA0002')] },
+    { id: 't3', chapter: 'c2', anchor: null, resolved: false, deleted: true, comments: [c('Dana', 'Too long.', 'AAAA0003')] }
+  ];
+
+  test('the same thread by its paragraph ids; a new answer added once; the file’s anchor taken', () => {
+    const k = known();
+    const back = [
+      { chapter: 'c1', anchor: { exact: 'the hill' }, resolved: false, comments: [c('Dana', 'Which hill?', '0000B001'), c('Charles', 'Shooter’s.', '0000B002'), c('Dana', 'Thanks!', '0000B003')] },
+      { chapter: 'c2', anchor: null, resolved: false, comments: [c('Sam', 'New one.', '0000B004')] }
+    ];
+    const r = M.mergeThreads(k, back);
+    assert.equal(r.merged, 1);
+    assert.deepEqual(r.added.map((t) => t.comments[0].text), ['New one.']);
+    assert.deepEqual(r.repeats, { Dana: 1, Charles: 1 });
+    assert.deepEqual(k[0].comments.map((x) => x.text), ['Which hill?', 'Shooter’s.', 'Thanks!']);
+    assert.deepEqual(k[0].anchor, { exact: 'the hill' });
+    assert.ok(k[0].comments[0].sent.includes('0000B001'), 'Word’s new id kept for next time');
+    // read again: nothing more
+    const again = M.mergeThreads(k, [back[0]]);
+    assert.equal(again.merged, 1);
+    assert.equal(k[0].comments.length, 3);
+  });
+
+  test('by its first comment when the ids are new; resolved as the editor left it, else as the writer did', () => {
+    const k = known();
+    // t2: resolved by the writer after it went out open; the file still says open
+    M.mergeThreads(k, [{ chapter: 'c1', anchor: null, resolved: false, comments: [c('dana', ' Cut  this? ', 'FFFF0001')] }]);
+    assert.equal(k[1].resolved, true, 'the writer’s resolve stands');
+    // the editor resolves it in the next file
+    M.mergeThreads(k, [{ chapter: 'c1', anchor: null, resolved: true, comments: [c('Dana', 'Cut this?', 'FFFF0001')] }]);
+    assert.equal(k[1].resolved, true);
+    // and reopens it
+    M.mergeThreads(k, [{ chapter: 'c1', anchor: null, resolved: false, comments: [c('Dana', 'Cut this?', 'FFFF0001')] }]);
+    assert.equal(k[1].resolved, false);
+    assert.equal(k[1].comments.length, 1);
+  });
+
+  test('a deleted thread that gets an answer comes back; one without stays deleted', () => {
+    const k = known();
+    M.mergeThreads(k, [{ chapter: 'c2', anchor: null, resolved: false, comments: [c('Dana', 'Too long.', 'AAAA0003')] }]);
+    assert.equal(k[2].deleted, true);
+    M.mergeThreads(k, [{ chapter: 'c2', anchor: null, resolved: false, comments: [c('Dana', 'Too long.', 'AAAA0003'), c('Dana', 'Still too long.', 'AAAA0009')] }]);
+    assert.equal(k[2].deleted, undefined);
+    assert.equal(k[2].resolved, false);
+  });
+});
+
+describe('a file NEO sent with comments, saved again by LibreOffice (an outside tool)', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const zlib = require('node:zlib');
+  const Z = require('../slog-zip.js');
+  const read = () => RD.readDocx(new Uint8Array(fs.readFileSync(path.join(__dirname, 'fixtures', 'review', 'lo-resaved-comments.docx'))), Z, (b) => zlib.inflateRawSync(b));
+
+  test('its threads read whole, the first comment first, and are the threads that went out', async () => {
+    const m = await read();
+    const { sections } = M.sectionsOf(m);
+    const chapters = sections.map((s, k) => ({ id: 'c' + (k + 1), num: s.num, title: s.title, kind: 'chapter', text: M.streamOf(s).before }));
+    const r = M.match(m, chapters);
+    const hill = r.threads.find((th) => th.comments[0].text === 'Which hill?');
+    assert.ok(hill, JSON.stringify(r.threads.map((th) => th.comments.map((c) => c.text))));
+    assert.deepEqual(hill.comments.map((c) => [c.by, c.text]), [['Dana Editor', 'Which hill?'], ['Charles Dickens', 'Shooter’s Hill, near Blackheath.']]);
+    assert.equal(hill.anchor.exact, ' up Shooter’s Hill.');
+    const lovely = r.threads.find((th) => th.comments[0].text === 'Lovely.');
+    assert.deepEqual([lovely.resolved, lovely.anchor.exact], [true, 'the age of wisdom']);
+    // the threads as review.json had them when they went out (other ids)
+    const known = [
+      { id: 't1', resolved: false, fileResolved: false, comments: [{ by: 'Dana Editor', text: 'Which hill?', paraId: '7AAA0001' }, { by: 'Charles Dickens', text: 'Shooter’s Hill, near Blackheath.', mine: true }] },
+      { id: 't2', resolved: true, fileResolved: true, comments: [{ by: 'Dana Editor', text: 'Lovely.' }] }
+    ];
+    const back = M.mergeThreads(known, r.threads);
+    assert.deepEqual([back.merged, back.added.length], [2, 0]);
+    assert.equal(known[0].comments.length, 2);
+  });
+});

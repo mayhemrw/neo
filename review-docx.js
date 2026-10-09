@@ -81,7 +81,8 @@
   }
 
   // Every element start, end and stretch of text in `xml`, in order:
-  // { t: 'open', name, attrs, empty } | { t: 'close', name } | { t: 'text', text }.
+  // { t: 'open', name, attrs, empty } | { t: 'close', name } | { t: 'text', text },
+  // each with where it starts and ends in `xml` (s, e).
   // Names come back with the prefix their namespace's URI gives (w:, w14:…),
   // whatever the file called it; attribute names likewise.
   function tokens(xml) {
@@ -104,8 +105,8 @@
     const n = xml.length;
     while (i < n) {
       const lt = xml.indexOf('<', i);
-      if (lt < 0) { out.push({ t: 'text', text: decode(xml.slice(i)) }); break; }
-      if (lt > i) out.push({ t: 'text', text: decode(xml.slice(i, lt)) });
+      if (lt < 0) { out.push({ t: 'text', text: decode(xml.slice(i)), s: i, e: n }); break; }
+      if (lt > i) out.push({ t: 'text', text: decode(xml.slice(i, lt)), s: i, e: lt });
       if (xml.startsWith('<!--', lt)) {
         const e = xml.indexOf('-->', lt + 4);
         i = e < 0 ? n : e + 3;
@@ -113,7 +114,7 @@
       }
       if (xml.startsWith('<![CDATA[', lt)) {
         const e = xml.indexOf(']]>', lt + 9);
-        out.push({ t: 'text', text: xml.slice(lt + 9, e < 0 ? n : e) });
+        out.push({ t: 'text', text: xml.slice(lt + 9, e < 0 ? n : e), s: lt, e: e < 0 ? n : e + 3, cdata: true });
         i = e < 0 ? n : e + 3;
         continue;
       }
@@ -133,7 +134,7 @@
       i = j + 1;
       if (body[0] === '/') {
         const scope = scopes.length > 1 ? scopes.pop() : scopes[0];
-        out.push({ t: 'close', name: canon(body.slice(1).trim(), scope, false) });
+        out.push({ t: 'close', name: canon(body.slice(1).trim(), scope, false), s: lt, e: i });
         continue;
       }
       const empty = body.endsWith('/');
@@ -158,7 +159,7 @@
       const attrs = {};
       for (const [k, v] of raw) if (k !== 'xmlns' && !k.startsWith('xmlns:')) attrs[canon(k, scope, true)] = v;
       const name = canon(qname, scope, false);
-      out.push({ t: 'open', name, attrs, empty });
+      out.push({ t: 'open', name, attrs, empty, s: lt, e: i });
       if (!empty) scopes.push(scope);
     }
     return out;
@@ -869,6 +870,237 @@
     addType(get('[Content_Types].xml'), '/docProps/custom.xml', 'application/vnd.openxmlformats-officedocument.custom-properties+xml');
     return out;
   }
+  // -------------------------------------------------------------------------
+  // Sending comments back (M5): the threads as Word keeps them
+  // -------------------------------------------------------------------------
+
+  // Where each character of a paragraph is in document.xml, for NEO's own
+  // export (no review markup in it): [{ s, e, open, close, rPr, items }]
+  // runs per paragraph index, items being [{ cs, len, text?: { s, e, open } }]
+  // (a w:t's content, or a tab or a line break as one character). Paragraphs
+  // count as readDocument counts them.
+  function docRuns(xml) {
+    const toks = tokens(xml);
+    const paras = [];
+    let P = null;
+    let R = null;
+    let T = null;
+    let skip = 0;
+    let skipName = '';
+    let rPrAt = -1;
+    for (const tk of toks) {
+      if (skip) {
+        if (tk.t === 'open' && !tk.empty && tk.name === skipName) skip++;
+        else if (tk.t === 'close' && tk.name === skipName) skip--;
+        continue;
+      }
+      if (tk.t === 'open' && SKIP.has(tk.name)) { if (!tk.empty) { skip = 1; skipName = tk.name; } continue; }
+      if (tk.t === 'open') {
+        if (tk.name === 'w:p') {
+          P = { index: paras.length, s: tk.s, open: tk.e, empty: tk.empty, pPrEnd: -1, close: tk.e, runs: [], len: 0 };
+          paras.push(P);
+          if (tk.empty) P = null;
+        } else if (P && tk.name === 'w:r' && !tk.empty) {
+          R = { s: tk.s, e: -1, rPr: '', items: [], cs: P.len };
+          P.runs.push(R);
+        } else if (R && tk.name === 'w:rPr' && !tk.empty) rPrAt = tk.s;
+        else if (R && tk.name === 'w:t' && !tk.empty) T = { s: tk.e, e: tk.e, cs: P.len, len: 0 };
+        else if (R && rPrAt < 0 && (tk.name === 'w:tab' || (tk.name === 'w:br' && tk.attrs['w:type'] !== 'page' && tk.attrs['w:type'] !== 'column') || tk.name === 'w:cr' || tk.name === 'w:noBreakHyphen' || tk.name === 'w:softHyphen' || tk.name === 'w:sym')) {
+          R.items.push({ cs: P.len, len: 1 });
+          P.len += 1;
+        }
+      } else if (tk.t === 'close') {
+        if (tk.name === 'w:p' && P) { P.close = tk.s; P = null; } else if (tk.name === 'w:r' && R) { R.e = tk.e; R.ce = P ? P.len : R.cs; R = null; } else if (tk.name === 'w:rPr' && R && rPrAt >= 0) { R.rPr = xml.slice(rPrAt, tk.e); rPrAt = -1; } else if (tk.name === 'w:pPr' && P && !R) P.pPrEnd = tk.e;
+        else if (tk.name === 'w:t' && T) {
+          T.e = tk.s;
+          R.items.push({ cs: T.cs, len: T.len, text: { s: T.s, e: T.e } });
+          T = null;
+        }
+      } else if (T && P) {
+        T.len += tk.text.length;
+        P.len += tk.text.length;
+      }
+    }
+    return paras;
+  }
+  // where the k-th character of a w:t's content is in its raw XML
+  function rawOffset(xml, s, e, k) {
+    let i = s;
+    let n = 0;
+    while (i < e && n < k) {
+      if (xml[i] === '&') {
+        const semi = xml.indexOf(';', i);
+        n += decode(xml.slice(i, semi + 1)).length;
+        i = semi + 1;
+      } else { n++; i++; }
+    }
+    return i;
+  }
+  // A place in a paragraph, as { at, split? }: `at` a position in the XML
+  // between runs, or, with `split` (the run), inside a w:t's content, where
+  // the run is cut in two. `side` 'start' keeps to what follows, 'end' to
+  // what comes before.
+  function placeAt(xml, P, k, side) {
+    const runs = P.runs.filter((r) => r.items.length);
+    if (!runs.length) return { at: P.pPrEnd >= 0 ? P.pPrEnd : P.open };
+    if (side === 'start') {
+      for (const r of runs) {
+        if (k <= r.cs) return { at: r.s };
+        if (k >= r.ce) continue;
+        for (let j = 0; j < r.items.length; j++) {
+          const it = r.items[j];
+          if (k < it.cs || k >= it.cs + it.len) continue;
+          if (it.text) return k === it.cs && j === 0 ? { at: r.s } : { at: rawOffset(xml, it.text.s, it.text.e, k - it.cs), split: r };
+          const prev = r.items[j - 1];
+          if (prev && prev.text) return { at: prev.text.e, split: r };
+          return { at: r.s };
+        }
+      }
+      return { at: runs[runs.length - 1].e };
+    }
+    for (let q = runs.length - 1; q >= 0; q--) {
+      const r = runs[q];
+      if (k > r.ce || (k === r.ce && r.cs < k)) return { at: r.e };
+      if (k <= r.cs) continue;
+      for (let j = r.items.length - 1; j >= 0; j--) {
+        const it = r.items[j];
+        if (k <= it.cs || k > it.cs + it.len) continue;
+        if (it.text) return k === it.cs + it.len && j === r.items.length - 1 ? { at: r.e } : { at: rawOffset(xml, it.text.s, it.text.e, k - it.cs), split: r };
+        const next = r.items[j + 1];
+        if (next && next.text) return { at: next.text.s, split: r };
+        return { at: r.e };
+      }
+    }
+    return { at: runs[0].s };
+  }
+
+  const durable = () => (Math.floor(Math.random() * 0x7FFFFFFE) + 1).toString(16).toUpperCase().padStart(8, '0');
+  const isoDate = (d) => {
+    const t = Date.parse(d);
+    return (Number.isFinite(t) ? new Date(t) : new Date()).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  };
+  const escText = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  // The comment threads going back to an editor, put into a file for review
+  // (`entries` from forReview). Each thread is { start: { p, o }, end:
+  // { p, o }, resolved, comments: [{ author, initials, date, text }] }: p a
+  // paragraph index as the file reads (`parse(...).paragraphs`), o a
+  // character in it. The first comment starts the thread, the rest answer
+  // it (commentsExtended.xml's paraIdParent), every one over the same words
+  // as Word does; a resolved thread's comments are marked done. Writes
+  // comments.xml, commentsExtended.xml, commentsIds.xml,
+  // commentsExtensible.xml (each date in UTC) and people.xml. Returns
+  // { entries, paraIds } (paraIds[i]: the ids the i-th thread's comments got,
+  // so the next import knows them).
+  function withComments(entries, threads, { start } = {}) {
+    const out = entries.map((e) => ({ path: e.path, content: e.content }));
+    const get = (p) => out.find((e) => e.path === p);
+    const doc = get('word/document.xml');
+    if (!doc) throw new Error('no word/document.xml to send');
+    const list = (threads || []).filter((th) => th && th.comments && th.comments.length && th.start);
+    if (!list.length) return { entries: out, paraIds: [] };
+    const xml = doc.content;
+    const paras = docRuns(xml);
+    // comment paragraphs' ids: past every one the document has
+    let top = 0;
+    for (const m of xml.matchAll(/w14:paraId="([0-9A-Fa-f]{8})"/g)) top = Math.max(top, parseInt(m[1], 16));
+    const next = paraIds(start === undefined ? top : start);
+    // the marks, by where they go
+    const at = new Map(); // position → { split, marks: [{ order, xml }] }
+    const put = (pl, order, x) => {
+      const key = pl.at + (pl.split ? 's' : '');
+      if (!at.has(key)) at.set(key, { at: pl.at, split: pl.split || null, marks: [] });
+      at.get(key).marks.push({ order, xml: x });
+    };
+    const firstUsable = (p) => {
+      for (let q = Math.max(0, p); q < paras.length; q++) if (!paras[q].empty) return q;
+      for (let q = Math.min(p, paras.length - 1); q >= 0; q--) if (!paras[q].empty) return q;
+      return -1;
+    };
+    let id = 0;
+    const comments = [];
+    const ids = [];
+    for (const th of list) {
+      const ps = firstUsable(th.start.p);
+      if (ps < 0) { ids.push([]); continue; }
+      let os = ps === th.start.p ? th.start.o : 0;
+      let pe = th.end ? firstUsable(th.end.p) : ps;
+      let oe = th.end && pe === th.end.p ? th.end.o : os;
+      if (pe < ps || (pe === ps && oe < os)) { pe = ps; oe = os; }
+      os = Math.max(0, Math.min(os, paras[ps].len));
+      oe = Math.max(0, Math.min(oe, paras[pe].len));
+      const point = ps === pe && os === oe;
+      const a = placeAt(xml, paras[ps], os, 'start');
+      const b = point ? a : placeAt(xml, paras[pe], oe, 'end');
+      const mine = [];
+      const root = { pid: null };
+      th.comments.forEach((c, i) => {
+        const cid = id++;
+        const lines = String(c.text || '').split('\n');
+        const pids = lines.map(() => next());
+        const pid = pids[pids.length - 1];
+        if (i === 0) root.pid = pid;
+        mine.push(pid);
+        comments.push({ cid, c, lines, pids, pid, parent: i ? root.pid : '', done: !!th.resolved, durable: durable() });
+        put(a, 1, '<w:commentRangeStart w:id="' + cid + '"/>');
+        put(b, point ? 2 : 0, '<w:commentRangeEnd w:id="' + cid + '"/><w:r><w:commentReference w:id="' + cid + '"/></w:r>');
+      });
+      ids.push(mine);
+    }
+    // into the XML, from the end back
+    let s = xml;
+    for (const k of [...at.values()].sort((x, y) => y.at - x.at)) {
+      const marks = k.marks.sort((x, y) => x.order - y.order).map((m) => m.xml).join('');
+      const ins = k.split ? '</w:t></w:r>' + marks + '<w:r>' + k.split.rPr + '<w:t xml:space="preserve">' : marks;
+      s = s.slice(0, k.at) + ins + s.slice(k.at);
+    }
+    doc.content = s.replace(/<w:document\b([^>]*)>/, (m, attrs) => {
+      let x = attrs;
+      if (!/xmlns:w14=/.test(x)) x += ' xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
+      return '<w:document' + x + '>';
+    });
+
+    const HEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+    const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+    const MC = 'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"';
+    const W14 = 'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
+    const W15 = 'xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"';
+    const CID = 'xmlns:w16cid="http://schemas.microsoft.com/office/word/2016/wordml/cid"';
+    const CEX = 'xmlns:w16cex="http://schemas.microsoft.com/office/word/2018/wordml/cex"';
+    const initials = (n) => String(n || '').split(/\s+/).filter(Boolean).map((w) => w[0]).join('').slice(0, 4).toUpperCase();
+    const parts = {
+      'word/comments.xml': HEAD + '<w:comments ' + W + ' ' + MC + ' ' + W14 + ' mc:Ignorable="w14">' + comments.map((x) =>
+        '<w:comment w:id="' + x.cid + '" w:author="' + escAttr(x.c.author || '') + '" w:date="' + isoDate(x.c.date) + '" w:initials="' + escAttr(x.c.initials || initials(x.c.author)) + '">' +
+        x.lines.map((line, i) => '<w:p w14:paraId="' + x.pids[i] + '" w14:textId="77777777">' +
+          (i === 0 ? '<w:r><w:annotationRef/></w:r>' : '') +
+          (line ? '<w:r><w:t xml:space="preserve">' + escText(line) + '</w:t></w:r>' : '') + '</w:p>').join('') +
+        '</w:comment>').join('') + '</w:comments>',
+      'word/commentsExtended.xml': HEAD + '<w15:commentsEx ' + MC + ' ' + W15 + ' mc:Ignorable="w15">' + comments.map((x) =>
+        '<w15:commentEx w15:paraId="' + x.pid + '"' + (x.parent ? ' w15:paraIdParent="' + x.parent + '"' : '') + ' w15:done="' + (x.done ? 1 : 0) + '"/>').join('') + '</w15:commentsEx>',
+      'word/commentsIds.xml': HEAD + '<w16cid:commentsIds ' + MC + ' ' + CID + ' mc:Ignorable="w16cid">' + comments.map((x) =>
+        '<w16cid:commentId w16cid:paraId="' + x.pid + '" w16cid:durableId="' + x.durable + '"/>').join('') + '</w16cid:commentsIds>',
+      'word/commentsExtensible.xml': HEAD + '<w16cex:commentsExtensible ' + MC + ' ' + CEX + ' mc:Ignorable="w16cex">' + comments.map((x) =>
+        '<w16cex:commentExtensible w16cex:durableId="' + x.durable + '" w16cex:dateUtc="' + isoDate(x.c.date) + '"/>').join('') + '</w16cex:commentsExtensible>',
+      'word/people.xml': HEAD + '<w15:people ' + MC + ' ' + W15 + ' mc:Ignorable="w15">' + [...new Set(comments.map((x) => x.c.author || ''))].filter(Boolean).map((n) =>
+        '<w15:person w15:author="' + escAttr(n) + '"><w15:presenceInfo w15:providerId="None" w15:userId="' + escAttr(n) + '"/></w15:person>').join('') + '</w15:people>'
+    };
+    const TYPES = {
+      'word/comments.xml': ['http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments', 'application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml'],
+      'word/commentsExtended.xml': ['http://schemas.microsoft.com/office/2011/relationships/commentsExtended', 'application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml'],
+      'word/commentsIds.xml': ['http://schemas.microsoft.com/office/2016/09/relationships/commentsIds', 'application/vnd.openxmlformats-officedocument.wordprocessingml.commentsIds+xml'],
+      'word/commentsExtensible.xml': ['http://schemas.microsoft.com/office/2018/08/relationships/commentsExtensible', 'application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtensible+xml'],
+      'word/people.xml': ['http://schemas.microsoft.com/office/2011/relationships/people', 'application/vnd.openxmlformats-officedocument.wordprocessingml.people+xml']
+    };
+    const rels = get('word/_rels/document.xml.rels');
+    for (const [path, content] of Object.entries(parts)) {
+      const had = get(path);
+      if (had) { had.content = content; continue; }
+      out.push({ path, content });
+      if (rels && !rels.content.includes('Target="' + path.slice(5) + '"')) addRel(rels, TYPES[path][0], path.slice(5));
+      addType(get('[Content_Types].xml'), '/' + path, TYPES[path][1]);
+    }
+    return { entries: out, paraIds: ids };
+  }
   function addRel(entry, type, target) {
     if (!entry) return;
     const ids = [...entry.content.matchAll(/Id="rId(\d+)"/g)].map((m) => +m[1]);
@@ -885,6 +1117,7 @@
   exports.chapterMark = chapterMark;
   exports.withBookmark = withBookmark;
   exports.forReview = forReview;
+  exports.withComments = withComments;
 
   exports.tokens = tokens;
   exports.parse = parse;

@@ -345,6 +345,70 @@ describe('sending (a file for an editor)', () => {
     assert.equal((await R.readDocx(bytes, Z, (b) => zlib.inflateRawSync(b))).round, 'r20261009-abcdef');
   });
 
+  // NEO's own runs: bold in the middle, a line break, a character that's escaped
+  const sendDoc = () => {
+    const e = entries();
+    e[3].content = '<?xml version="1.0"?>\n<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
+      R.withBookmark('<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>One</w:t></w:r></w:p>', 1, R.chapterMark(1)) +
+      '<w:p><w:pPr></w:pPr><w:r><w:t xml:space="preserve">It was the </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">best &amp; worst</w:t></w:r><w:r><w:t xml:space="preserve"> of times,</w:t><w:br/><w:t xml:space="preserve">said he.</w:t></w:r></w:p>' +
+      '<w:p/><w:p><w:r><w:t xml:space="preserve">Last line.</w:t></w:r></w:p></w:body></w:document>';
+    return R.forReview(e, { round: 'r1', start: 0x200 });
+  };
+  const partsOf = (out) => { const o = {}; for (const e of out) o[e.path] = e.content; return o; };
+
+  test('withComments: threads with replies and done, over the right words, read back as they were', () => {
+    const threads = [
+      { start: { p: 1, o: 11 }, end: { p: 1, o: 25 }, resolved: false, comments: [
+        { author: 'Dana Editor', date: '2026-10-09T10:01:00Z', text: 'Too famous?' },
+        { author: 'Charles Dickens', date: '2026-10-09T12:00:00.123Z', text: 'It stays.\nSecond line.' }] },
+      { start: { p: 1, o: 3 }, end: { p: 1, o: 3 }, resolved: true, comments: [{ author: 'Dana Editor', date: '2026-10-09T10:02:00Z', text: 'A point.' }] },
+      { start: { p: 1, o: 37 }, end: { p: 3, o: 4 }, resolved: false, comments: [{ author: 'Sam <Proof>', date: 'x', text: 'Across & over' }] }
+    ];
+    const { entries: out, paraIds } = R.withComments(sendDoc(), threads, { start: 0x900 });
+    const parts = partsOf(out);
+    for (const n of ['comments', 'commentsExtended', 'commentsIds', 'commentsExtensible', 'people']) {
+      assert.ok(parts['word/' + n + '.xml'], n);
+      assert.match(parts['[Content_Types].xml'], new RegExp('PartName="/word/' + n + '.xml"'));
+      assert.match(parts['word/_rels/document.xml.rels'], new RegExp('Target="' + n + '.xml"'));
+    }
+    const m = R.parse(parts);
+    // the text is as it was: nothing put in the story
+    assert.equal(m.paragraphs[1].after, 'It was the best & worst of times,\nsaid he.');
+    assert.equal(m.paragraphs.length, 4);
+    assert.equal(m.paragraphs[1].segs.find((x) => x.text.includes('best')).b, true);
+    assert.equal(m.comments.length, 4);
+    const [a, b, c, d] = m.comments;
+    assert.deepEqual([a.author, a.text, a.parent, a.done], ['Dana Editor', 'Too famous?', null, false]);
+    assert.deepEqual([b.author, b.text, b.parent, b.done], ['Charles Dickens', 'It stays.\nSecond line.', a.id, false]);
+    assert.equal(b.dateUtc, '2026-10-09T12:00:00Z');
+    // over "best & worst", split inside the bold run and the plain one
+    assert.deepEqual([a.start.p, a.start.o, a.end.p, a.end.o], [1, 11, 1, 25]);
+    assert.equal(m.paragraphs[1].after.slice(a.start.o, a.end.o), 'best & worst o');
+    assert.deepEqual([b.start.o, b.end.o], [11, 25]);
+    assert.deepEqual([c.start.o, c.end.o, c.done, c.parent], [3, 3, true, null]);
+    assert.deepEqual([d.start.p, d.start.o, d.end.p, d.end.o, d.author, d.text], [1, 37, 3, 4, 'Sam <Proof>', 'Across & over']);
+    assert.deepEqual(paraIds.map((x) => x.length), [2, 1, 1]);
+    assert.equal(paraIds[0][0], a.paraId);
+    assert.equal(b.paraId, paraIds[0][1]);
+    // every paragraph id different, in the story and the comments
+    const all = [...parts['word/document.xml'].matchAll(/w14:paraId="(\w+)"/g), ...parts['word/comments.xml'].matchAll(/w14:paraId="(\w+)"/g)].map((x) => x[1]);
+    assert.equal(new Set(all).size, all.length);
+    assert.match(parts['word/people.xml'], /w15:author="Sam &lt;Proof&gt;"/);
+  });
+
+  test('withComments: a range at a run edge, at a paragraph start, and nothing to send', () => {
+    const { entries: out } = R.withComments(sendDoc(), [
+      { start: { p: 1, o: 0 }, end: { p: 1, o: 11 }, comments: [{ author: 'A', date: '', text: 'x' }] },
+      { start: { p: 0, o: 0 }, end: { p: 0, o: 3 }, comments: [{ author: 'A', date: '', text: 'title' }] },
+      { start: { p: 2, o: 0 }, end: { p: 2, o: 0 }, comments: [{ author: 'A', date: '', text: 'on an empty line' }] }
+    ]);
+    const m = R.parse(partsOf(out));
+    assert.deepEqual(m.comments.map((c) => [c.start.p, c.start.o, c.end.p, c.end.o]), [[1, 0, 1, 11], [0, 0, 0, 3], [3, 0, 3, 0]]);
+    assert.equal(m.paragraphs[0].bookmarks[0].name, '_NEO_ch_1');
+    const same = R.withComments(sendDoc(), []);
+    assert.equal(same.entries.some((e) => e.path === 'word/comments.xml'), false);
+  });
+
   test('forReview keeps a settings part that is there, and needs a round', () => {
     const e = entries();
     e.push({ path: 'word/settings.xml', content: '<w:settings xmlns:w="w"><w:zoom w:percent="100"/></w:settings>' });

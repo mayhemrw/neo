@@ -467,6 +467,15 @@
     };
     for (const c of model.comments) byCid.set(c.id, c);
     const threadOf = new Map();
+    const taken = new Set();
+    const add = (th, c) => {
+      if (taken.has(c)) return;
+      taken.add(c);
+      th.comments.push({ by: c.author, at: c.dateUtc || c.date, text: c.text, paraId: c.paraId || '' });
+      count(c.author, 'comments');
+    };
+    // (a reply can come before what it answers in the file: LibreOffice
+    // writes them so; the first comment is always the thread's own)
     for (const c of model.comments) {
       const root = rootOf(c);
       let th = threadOf.get(root.id);
@@ -478,14 +487,72 @@
           const end = e && e.stream === s.stream && e.o >= s.o ? e.o : s.o;
           anchor = anchorIn(s.stream.before, s.o, end - s.o);
         }
-        th = { chapter: s ? s.chId : null, anchor, resolved: !!root.done, comments: [], paraId: root.paraId || '' };
+        th = { chapter: s ? s.chId : null, anchor, resolved: !!root.done, fileResolved: !!root.done, comments: [], paraId: root.paraId || '' };
         threadOf.set(root.id, th);
         threads.push(th);
+        add(th, root);
       }
-      th.comments.push({ by: c.author, at: c.dateUtc || c.date, text: c.text, paraId: c.paraId || '' });
-      count(c.author, 'comments');
+      add(th, c);
     }
     return { how, chapters: out, suggestions, threads, counts, cancelled, unplaced };
+  }
+
+  // -------------------------------------------------------------------------
+  // Threads that come back (M5): a thread sent to an editor and returned is
+  // the same thread, not a second one
+  // -------------------------------------------------------------------------
+
+  const said = (c) => String((c && c.by) || '').trim().toLowerCase() + '\u0000' + String((c && c.text) || '').replace(/\s+/g, ' ').trim();
+  const idsOf = (c) => [c.paraId, ...(Array.isArray(c.sent) ? c.sent : [])].filter(Boolean);
+
+  // `known`: review.json's threads; `found`: an import's (match()'s
+  // threads). A found thread is a known one when one of its comments has a
+  // paragraph id a known comment had (Word's own, or the one NEO sent it
+  // with), or its first comment is a known thread's first (the same person,
+  // the same words). Its comments that aren't in the known thread already
+  // are added in order; resolved or not follows the file where the editor
+  // changed it (`fileResolved`: what the last file said); a deleted thread
+  // that gets an answer comes back. Changes `known` in place. Returns
+  // { added: [found threads that are new], merged: n, repeats: { name: n }
+  // (comments already known, by who wrote them) }.
+  function mergeThreads(known, found) {
+    const byId = new Map();
+    const byFirst = new Map();
+    for (const th of known) {
+      for (const c of th.comments || []) for (const id of idsOf(c)) byId.set(id, th);
+      if (th.comments && th.comments[0]) byFirst.set(said(th.comments[0]), th);
+    }
+    const added = [];
+    const repeats = {};
+    let merged = 0;
+    for (const f of found) {
+      let th = null;
+      for (const c of f.comments) { const hit = c.paraId && byId.get(c.paraId); if (hit) { th = hit; break; } }
+      if (!th && f.comments[0]) th = byFirst.get(said(f.comments[0])) || null;
+      if (!th) { added.push(f); continue; }
+      merged++;
+      let fresh = 0;
+      for (const c of f.comments) {
+        const ids = new Set(th.comments.flatMap(idsOf));
+        const has = th.comments.find((k) => (c.paraId && ids.has(c.paraId) && idsOf(k).includes(c.paraId)) || said(k) === said(c));
+        if (has) {
+          if (c.paraId && !idsOf(has).includes(c.paraId)) has.sent = [...(has.sent || []), c.paraId];
+          repeats[c.by] = (repeats[c.by] || 0) + 1;
+          continue;
+        }
+        th.comments.push(c);
+        fresh++;
+      }
+      // resolved or not: the editor's say when the file differs from what
+      // NEO last knew it to say (sent or read), else the writer's since
+      const was = th.fileResolved === undefined ? !!th.resolved : !!th.fileResolved;
+      if (!!f.resolved !== was) th.resolved = !!f.resolved;
+      th.fileResolved = !!f.resolved;
+      if (fresh && th.deleted) { delete th.deleted; th.resolved = false; }
+      // where it is now, from the file just read (a later version's text)
+      if (f.anchor) { th.anchor = f.anchor; th.chapter = f.chapter; }
+    }
+    return { added, merged, repeats };
   }
 
   // How close a file is to a version of the book, 0 to 1 (for choosing which
@@ -534,4 +601,5 @@
   exports.assignChapters = assignChapters;
   exports.match = match;
   exports.closeness = closeness;
+  exports.mergeThreads = mergeThreads;
 })(typeof module !== 'undefined' && module.exports ? module.exports : (globalThis.ReviewMatch = {}));

@@ -12,6 +12,10 @@
 // (A) and Reject, ⌘Z, out-of-date passages, Accept All with its version,
 // the log (the editor's words as theirs, numbered, never named) and the
 // Verification Report.
+// M5: comments in the margin beside their words, a reply (⌘Enter), Resolve,
+// Resolve and Delete (Deleted comments, ⌘Z, Put back), the threads sent back
+// in the next file as Word comments with replies and done, and read back
+// from it as the same threads.
 // NEO_TEST_SHOTS=<folder> saves pictures, and the sample file for review.
 
 'use strict';
@@ -515,6 +519,190 @@ test('the Verification Report counts the editor’s text, and names them only wh
   dialog.showSaveDialog = async () => ({ canceled: false, filePath: named });
   await js(`window.neo.slog.report(book.id, { privacy: 'dates', nameEditors: true })`);
   assert.ok(fs.readFileSync(named, 'utf8').includes('From an editor (Dana Editor)'));
+  let errors = '';
+  try { errors = fs.readFileSync(path.join(LIB, 'neo-errors.log'), 'utf8'); } catch { /* none */ }
+  assert.equal(errors, '');
+});
+
+// ---- M5: comments in the margin, replies, resolved, deleted, sent back ----
+const card = (id) => `${R}.querySelector('.rv-margin .rv-thread[data-tid="${id}"]')`;
+const thread = async (pred) => (await reviewJson()).threads.find(pred);
+let hillId = null;
+const extra = {};
+
+test('comments sit in the margin beside their words, lit on the page', async () => {
+  await js(`goToTab('review')`);
+  await tick(300);
+  // two more of Dana's on chapter 1, made the way an import keeps them
+  const c1 = await ch(0);
+  const ids = await js(`(async () => {
+    const text = reviewChapterText(${JSON.stringify(c1)});
+    const mk = (words, say) => ({ id: reviewNewId('t'), round: null, import: null, chapter: ${JSON.stringify(c1)}, anchor: ReviewMatch.anchorIn(text, text.indexOf(words), words.length), resolved: false, fileResolved: false, comments: [{ by: 'Dana Editor', at: '2026-10-09T11:00:00Z', text: say }] });
+    const a = mk('the age of wisdom', 'Lovely.');
+    const b = mk('a king with a large jaw', 'Cut?');
+    rvs.data.threads.push(a, b);
+    await reviewSave(book.id, rvs.data);
+    reviewTabShow();
+    reviewRender();
+    return [a.id, b.id];
+  })()`);
+  [extra.lovely, extra.cut] = ids;
+  const review = await reviewJson();
+  const open = review.threads.filter((th) => !th.deleted);
+  const cards = await js(`[...${R}.querySelectorAll('.rv-margin .rv-thread')].map((c) => c.dataset.tid)`);
+  assert.deepEqual(cards.slice().sort(), open.map((th) => th.id).sort());
+  hillId = review.threads.find((th) => th.comments[0].text === 'Which hill?').id;
+  // the words it's about, lit, and the card beside them
+  const lit = await js(`[...${R}.querySelectorAll('.rv-page .rv-c')].filter((e) => e.dataset.tid.split(' ').includes(${JSON.stringify(hillId)})).map((e) => e.textContent).join('')`);
+  assert.equal(lit, sent.b);
+  for (const [id, words] of [[hillId, sent.b], [extra.lovely, 'the age of wisdom'], [extra.cut, 'a king with a large jaw']]) {
+    const where = await js(`(() => {
+      const c = ${card(id)}.getBoundingClientRect().top;
+      const m = [...${R}.querySelectorAll('.rv-page [data-tid]')].find((e) => e.dataset.tid.split(' ').includes(${JSON.stringify(id)})).getBoundingClientRect().top;
+      return [c, m];
+    })()`);
+    assert.ok(Math.abs(where[0] - where[1]) < 140, words + ': card at ' + where[0] + ', words at ' + where[1]);
+  }
+  assert.equal(await js(`${card(extra.lovely)}.querySelector('.rv-cm-text').textContent`), 'Lovely.');
+  assert.equal(+(await tabN()), open.length, 'each open thread counts');
+  assert.equal(await js(`document.querySelectorAll('#chapters .rv-c, #chapters .rv-cpt, #chapters .rv-thread').length`), 0, 'nothing on the writing page');
+  await js(`reviewSelectThread(${JSON.stringify(extra.lovely)}); $('#paper-scroll').scrollTop = 0`);
+  await tick(250);
+  await shot('review-comments');
+});
+
+test('a reply is typed in the margin: ⌘Enter sends it, as the writer’s; a draft survives a redraw', async () => {
+  await js(`reviewSelectThread(${JSON.stringify(hillId)}, { focus: true })`);
+  assert.equal(await js(`document.activeElement === ${card(hillId)}.querySelector('.rv-replybox')`), true);
+  // a draft in another thread, kept while the margin redraws
+  await js(`(() => { const b = ${card(extra.cut)}.querySelector('.rv-replybox'); b.value = 'Half a thought'; b.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await js(`(() => {
+    const box = ${card(hillId)}.querySelector('.rv-replybox');
+    box.value = 'Shooter’s Hill, near Blackheath.';
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+    box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }));
+  })()`);
+  await until(async () => (await thread((th) => th.id === hillId)).comments.length === 2);
+  const th = await thread((x) => x.id === hillId);
+  assert.deepEqual(th.comments.map((c) => [c.by, c.text, !!c.mine]), [['Dana Editor', 'Which hill?', false], ['Charles Dickens', 'Shooter’s Hill, near Blackheath.', true]]);
+  assert.match(th.comments[1].at, /^\d{4}-\d\d-\d\dT/);
+  await tick(100);
+  assert.deepEqual(await js(`[...${card(hillId)}.querySelectorAll('.rv-cm-text')].map((e) => e.textContent)`), ['Which hill?', 'Shooter’s Hill, near Blackheath.']);
+  assert.equal(await js(`${card(hillId)}.querySelector('.rv-replybox').value`), '', 'the box empties');
+  assert.equal(await js(`${card(extra.cut)}.querySelector('.rv-replybox').value`), 'Half a thought', 'the other draft kept');
+  // an empty reply sends nothing
+  await js(`(() => { const box = ${card(hillId)}.querySelector('.rv-replybox'); box.value = '   '; box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true })); })()`);
+  await tick(200);
+  assert.equal((await thread((x) => x.id === hillId)).comments.length, 2);
+  // nothing in the book or the log for it
+  assert.equal(await js(`Object.values(chapterHTML).some((h) => h.includes('Blackheath'))`), false);
+});
+
+test('Resolve folds a thread; Resolve and Delete moves it to Deleted comments; ⌘Z and Put back bring it back', async () => {
+  const n0 = +(await tabN());
+  await js(`${card(extra.lovely)}.querySelector('[data-tact="resolve"]').click()`);
+  await until(async () => (await thread((x) => x.id === extra.lovely)).resolved === true);
+  await until(() => js(`!!${card(extra.lovely)} && ${card(extra.lovely)}.classList.contains('rv-folded')`));
+  assert.equal(+(await tabN()), n0 - 1);
+  // a click unfolds it: Reopen, Delete
+  await js(`${card(extra.lovely)}.click()`);
+  await until(() => js(`!${card(extra.lovely)}.classList.contains('rv-folded')`));
+  assert.deepEqual(await js(`[...${card(extra.lovely)}.querySelectorAll('[data-tact]')].map((b) => b.dataset.tact)`), ['reopen', 'delete']);
+  // Resolve and Delete
+  await js(`${card(extra.cut)}.querySelector('[data-tact="delete"]').click()`);
+  await until(async () => !!(await thread((x) => x.id === extra.cut)).deleted);
+  await until(() => js(`!${card(extra.cut)}`));
+  assert.match(await js(`$('#hint').textContent`), /under Deleted comments/);
+  assert.equal(await js(`${R}.querySelector('.rv-deleted summary').textContent`), 'Deleted comments (1)');
+  assert.equal(+(await tabN()), n0 - 2);
+  await js(`${R}.querySelector('.rv-deleted').open = true`);
+  await tick(250);
+  await shot('review-comments-deleted');
+  // ⌘Z puts it back
+  await js(`document.activeElement && document.activeElement.blur && document.activeElement.blur(); 0`);
+  await keyDown('z', ', ctrlKey: true');
+  await until(async () => !(await thread((x) => x.id === extra.cut)).deleted);
+  await until(() => js(`!!${card(extra.cut)}`));
+  assert.equal((await thread((x) => x.id === extra.cut)).resolved, false);
+  assert.equal(await js(`${card(extra.cut)}.querySelector('.rv-replybox').value`), 'Half a thought', 'the draft still there');
+  // deleted again, and Put back
+  await js(`${card(extra.cut)}.querySelector('[data-tact="delete"]').click()`);
+  await until(async () => !!(await thread((x) => x.id === extra.cut)).deleted);
+  await until(() => js(`!!${R}.querySelector('.rv-gone [data-tact="restore"]')`));
+  await js(`${R}.querySelector('.rv-gone [data-tact="restore"]').click()`);
+  await until(async () => !(await thread((x) => x.id === extra.cut)).deleted);
+  assert.equal((await thread((x) => x.id === extra.cut)).resolved, true, 'back, resolved');
+  // and deleted for good, for the file below
+  await until(() => js(`!!${card(extra.cut)}`));
+  await js(`${card(extra.cut)}.click()`);
+  await until(() => js(`!!${card(extra.cut)}.querySelector('[data-tact="delete"]')`));
+  await js(`${card(extra.cut)}.querySelector('[data-tact="delete"]').click()`);
+  await until(async () => !!(await thread((x) => x.id === extra.cut)).deleted);
+});
+
+test('the next file for an editor carries the threads back: replies, done, nothing deleted', async () => {
+  const to = path.join(tmp, 'two-cities-dana-2.docx');
+  dialog.showSaveDialog = async () => ({ canceled: false, filePath: to });
+  await js(`(() => { window.__rv = doExport('review'); })()`);
+  await until(() => js(`!!${D}`));
+  await js(`${D}.querySelector('.rv-name').value = 'Dana Editor'; ${D}.querySelector('.rv-go').click()`);
+  await js(`window.__rv`);
+  assert.ok(fs.existsSync(to));
+  if (process.env.NEO_TEST_SHOTS) fs.copyFileSync(to, path.join(process.env.NEO_TEST_SHOTS, 'sent-back-with-comments.docx'));
+  const m = await readDocx(to);
+  const by = (text) => m.comments.find((c) => c.text === text);
+  const hill = by('Which hill?');
+  const reply = by('Shooter’s Hill, near Blackheath.');
+  assert.ok(hill && reply, m.comments.map((c) => c.text).join(' | '));
+  assert.deepEqual([hill.author, hill.parent, hill.done], ['Dana Editor', null, false]);
+  assert.deepEqual([reply.author, reply.parent, reply.done], ['Charles Dickens', hill.id, false]);
+  assert.equal(m.paragraphs[hill.start.p].after.slice(hill.start.a, hill.end.a), sent.b, 'over the same words');
+  const lovely = by('Lovely.');
+  assert.equal(lovely.done, true, 'resolved goes back marked done');
+  assert.equal(m.paragraphs[lovely.start.p].after.slice(lovely.start.a, lovely.end.a), 'the age of wisdom');
+  assert.equal(by('Cut?'), undefined, 'a deleted thread stays home');
+  assert.equal(hill.dateUtc, '2026-10-09T10:01:00Z');
+  // the text itself is as NEO sends it: the comments add no words
+  assert.ok(m.paragraphs.some((p) => p.after === CH1[0]));
+  assert.equal(m.changes.length, 0);
+  // the file opens in LibreOffice, an outside reader
+  const review = await reviewJson();
+  const th = review.threads.find((x) => x.id === hillId);
+  assert.ok(th.comments.every((c) => (c.sent || []).length === 1), 'the ids it went with, kept');
+  sent.back2 = { to, round: review.rounds[review.rounds.length - 1], m };
+});
+
+test('a second round reads them back as the same threads, with the editor’s new reply', async () => {
+  const { to, m } = sent.back2;
+  const zip = await JSZip.loadAsync(fs.readFileSync(to));
+  const root = m.comments.find((c) => c.text === 'Which hill?');
+  let cx = await zip.file('word/comments.xml').async('string');
+  cx = cx.replace('</w:comments>', '<w:comment w:id="99" w:author="Dana Editor" w:date="2026-10-10T09:00:00Z"><w:p w14:paraId="7BBB0001"><w:r><w:t>Perfect, thanks.</w:t></w:r></w:p></w:comment></w:comments>');
+  zip.file('word/comments.xml', cx);
+  let ex = await zip.file('word/commentsExtended.xml').async('string');
+  ex = ex.replace('</w15:commentsEx>', `<w15:commentEx w15:paraId="7BBB0001" w15:paraIdParent="${root.paraId}" w15:done="0"/></w15:commentsEx>`);
+  zip.file('word/commentsExtended.xml', ex);
+  const back = path.join(tmp, 'two-cities-dana-2-back.docx');
+  fs.writeFileSync(back, await zip.generateAsync({ type: 'nodebuffer' }));
+  const before = await reviewJson();
+  await js(`(() => { window.__ri = importReview(${JSON.stringify(back)}); })()`);
+  await until(() => js(`!!${S}`));
+  const lines = await summaryLines();
+  assert.equal(lines[0], 'Dana Editor: 1 comment', lines.join(' | '));
+  assert.ok(lines.some((l) => /comment threads you sent back are the same threads/.test(l)), lines.join(' | '));
+  await tick(150);
+  await shot('review-comments-second-round');
+  await js(`${S}.querySelector('.m-ok').click()`);
+  await js(`window.__ri`);
+  const after = await reviewJson();
+  assert.equal(after.threads.length, before.threads.length, 'no new threads');
+  const th = after.threads.find((x) => x.id === hillId);
+  assert.deepEqual(th.comments.map((c) => c.text), ['Which hill?', 'Shooter’s Hill, near Blackheath.', 'Perfect, thanks.']);
+  assert.equal(after.threads.find((x) => x.id === extra.lovely).resolved, true);
+  assert.ok(after.threads.find((x) => x.id === extra.cut).deleted, 'still deleted');
+  assert.deepEqual(after.reviewers.map((r) => r.name), before.reviewers.map((r) => r.name), 'the writer is not a reviewer');
+  await until(() => js(`currentTab === 'review' && !!${card(hillId)}`));
+  assert.equal(await js(`${card(hillId)}.querySelectorAll('.rv-cm').length`), 3);
   let errors = '';
   try { errors = fs.readFileSync(path.join(LIB, 'neo-errors.log'), 'utf8'); } catch { /* none */ }
   assert.equal(errors, '');
