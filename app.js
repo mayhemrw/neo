@@ -16297,7 +16297,7 @@ async function importReview(filePath = null) {
     review.imports.push(imp);
     if (round) round.imports = (round.imports || []).concat(importId);
     await reviewSave(bookId, review);
-    if (book && book.id === bookId) { rv.bookId = bookId; rv.data = review; reviewTabShow(); }
+    if (book && book.id === bookId) { rvs.bookId = bookId; rvs.data = review; reviewTabShow(); }
     const notes = [];
     if (found.unplaced) notes.push(t('{n} parts of the file didn’t match a chapter; their changes are kept, marked as not placed.', { n: found.unplaced }));
     if (found.cancelled) notes.push(t('{n} changes one reviewer made and another took back were left out.', { n: found.cancelled }));
@@ -16328,19 +16328,19 @@ async function importReview(filePath = null) {
 /* Nothing here touches the writing page's look: the tab shows only while */
 /* something waits.                                                       */
 
-const rv = { bookId: null, data: null, cur: null, busy: false };
+const rvs = { bookId: null, data: null, cur: null, busy: false };
 
 const reviewOpen = (d) => (d ? d.suggestions.filter((s) => s.status === 'open') : []);
 const reviewOpenThreads = (d) => (d ? d.threads.filter((th) => !th.resolved && !th.deleted) : []);
 const reviewWaiting = (d) => reviewOpen(d).length + reviewOpenThreads(d).length;
-const reviewMine = () => !!(book && rv.data && rv.bookId === book.id);
-function reviewTabWanted() { return reviewMine() && (reviewWaiting(rv.data) > 0 || currentTab === 'review'); }
+const reviewMine = () => !!(book && rvs.data && rvs.bookId === book.id);
+function reviewTabWanted() { return reviewMine() && (reviewWaiting(rvs.data) > 0 || currentTab === 'review'); }
 
 // the tab, with how many wait (its only sign on the writing page)
 function reviewTabShow() {
   const tab = document.querySelector('.tab[data-tab="review"]');
   if (!tab) return;
-  const n = reviewMine() ? reviewWaiting(rv.data) : 0;
+  const n = reviewMine() ? reviewWaiting(rvs.data) : 0;
   tab.hidden = !reviewTabWanted();
   tab.querySelector('.rv-tab-n').textContent = n ? String(n) : '';
   tab.setAttribute('aria-label', n ? t('Review: {n} waiting', { n }) : t('Review'));
@@ -16348,32 +16348,32 @@ function reviewTabShow() {
 
 // a book opened: its review.json, if it has one (desktop only)
 async function reviewOpened(bookId) {
-  rv.bookId = bookId;
-  rv.data = null;
-  rv.cur = null;
+  rvs.bookId = bookId;
+  rvs.data = null;
+  rvs.cur = null;
   reviewTabShow();
   if (!window.neo.review || !window.ReviewMatch) return;
   let d = null;
   try { d = await reviewLoad(bookId); } catch (err) { window.neo.logError('review: ' + (err && err.stack || err)); }
   if (!book || book.id !== bookId) return;
-  rv.data = d;
+  rvs.data = d;
   reviewTabShow();
   if (currentTab === 'review') reviewRender();
 }
 // View → Review: the tab, when there's anything in it
 function reviewGoTo() {
   if (!book || isScript()) return;
-  if (!reviewMine() || !reviewWaiting(rv.data)) {
+  if (!reviewMine() || !reviewWaiting(rvs.data)) {
     if (currentTab !== 'review') toast(t('Nothing to review. File → Import Review… brings in an editor’s Word file.'));
     return;
   }
   goToTab('review');
 }
 
-const reviewerOf = (name) => (rv.data && rv.data.reviewers.find((r) => r.name === name)) || null;
+const reviewerOf = (name) => (rvs.data && rvs.data.reviewers.find((r) => r.name === name)) || null;
 const reviewColor = (name) => (reviewerOf(name) || {}).color || '#7d55c7';
 // how the log names a reviewer (decision 2: never by name)
-const reviewLogBy = (name) => (rv.data && ReviewMatch.reviewerTag(rv.data.reviewers, name)) || undefined;
+const reviewLogBy = (name) => (rvs.data && ReviewMatch.reviewerTag(rvs.data.reviewers, name)) || undefined;
 
 /* -- reading a chapter on the page the way review-match.js reads its HTML -- */
 
@@ -16609,12 +16609,12 @@ function reviewChapterText(chId) {
 // name when several are accepted at once ("all changes"). Returns
 // { done, left } (left: those whose passage couldn't be found).
 async function reviewDecide(list, how, what = '') {
-  if (!reviewMine() || rv.busy) return { done: 0, left: 0 };
+  if (!reviewMine() || rvs.busy) return { done: 0, left: 0 };
   const items = list.filter((s) => s.status === 'open');
   if (!items.length) return { done: 0, left: 0 };
-  rv.busy = true;
+  rvs.busy = true;
   const bookId = book.id;
-  const d = rv.data;
+  const d = rvs.data;
   let done = 0;
   let left = 0;
   try {
@@ -16727,22 +16727,22 @@ async function reviewDecide(list, how, what = '') {
     } else if (how === 'reject' && done > 1) toast(t('{n} rejected.', { n: done }) + ' ' + t('{key} to undo.', { key: KZ }), 5000);
     return { done, left };
   } finally {
-    rv.busy = false;
+    rvs.busy = false;
     reviewTabShow();
     if (currentTab === 'review') reviewRender();
   }
 }
 // ⌘Z took a decision back: the suggestions it decided wait again
 function reviewUndone(r) {
-  if (!r || !reviewMine() || rv.bookId !== r.bookId) return;
-  const byId = new Map(rv.data.suggestions.map((s) => [s.id, s]));
+  if (!r || !reviewMine() || rvs.bookId !== r.bookId) return;
+  const byId = new Map(rvs.data.suggestions.map((s) => [s.id, s]));
   for (const { id, status } of r.before) {
     const s = byId.get(id);
     if (!s) continue;
     s.status = status;
     delete s.decided;
   }
-  reviewSave(r.bookId, rv.data).catch((err) => window.neo.logError('review: ' + (err && err.stack || err)));
+  reviewSave(r.bookId, rvs.data).catch((err) => window.neo.logError('review: ' + (err && err.stack || err)));
   reviewTabShow();
   if (currentTab === 'review') reviewRender();
 }
@@ -16765,7 +16765,7 @@ function reviewFormatWords(s) {
 
 // The suggestions shown, in book order: [{ s, chId, place }]
 function reviewRows() {
-  const d = rv.data;
+  const d = rvs.data;
   const texts = new Map();
   const textOf = (chId) => {
     if (!texts.has(chId)) texts.set(chId, reviewChapterText(chId));
@@ -16786,7 +16786,7 @@ function reviewRender() {
   if (!host || !book) return;
   if (!reviewMine()) { host.innerHTML = `<p class="rv-empty">${escHtml(t('Reading the review…'))}</p>`; return; }
   const { rows, textOf } = reviewRows();
-  if (rv.cur && !rows.some((r) => r.s.id === rv.cur)) rv.cur = null;
+  if (rvs.cur && !rows.some((r) => r.s.id === rvs.cur)) rvs.cur = null;
   const kinds = REVIEW_KIND();
   const byWho = new Map();
   for (const r of rows) byWho.set(r.s.reviewer, (byWho.get(r.s.reviewer) || 0) + 1);
@@ -16820,6 +16820,7 @@ function reviewRender() {
     let what;
     if (s.kind === 'format') what = `<span class="rv-txt">${escHtml(reviewSnip(s.text || (s.anchor && s.anchor.exact)))}</span> → ${escHtml(reviewFormatWords(s))}`;
     else if (s.kind === 'title') what = `<del>${escHtml(reviewSnip(s.del))}</del> → <ins>${escHtml(reviewSnip(s.ins))}</ins>`;
+    else if (s.del === ReviewMatch.PARA && !s.ins) what = escHtml(t('A paragraph break taken out (two paragraphs join)'));
     else what = (s.del ? `<del>${escHtml(reviewSnip(s.del))}</del>` : '') + (s.del && s.ins ? ' → ' : '') + (s.ins ? `<ins>${escHtml(reviewSnip(s.ins))}</ins>` : '');
     const flags = [];
     if (s.untracked) flags.push(`<span class="rv-flag">${escHtml(t('made without Track Changes'))}</span>`);
@@ -16828,11 +16829,13 @@ function reviewRender() {
     if (r.place.why === 'gone' && s.anchor && r.chId) {
       // the editor's wording beside today's, to apply by hand
       const today = (textOf(r.chId) || '').split(ReviewMatch.PARA)[s.anchor.p] || '';
-      stale = `<div class="rv-staleboth"><div><b>${escHtml(t('The editor’s wording'))}</b> ${escHtml(reviewSnip(s.anchor.pre, 40))}<ins>${escHtml(reviewShow(s.ins))}</ins>${escHtml(reviewSnip(s.anchor.post, 40))}</div>` +
+      const pre = reviewShow(s.anchor.pre).slice(-40);
+      const post = reviewShow(s.anchor.post).slice(0, 40);
+      stale = `<div class="rv-staleboth"><div><b>${escHtml(t('The editor’s wording'))}</b> …${escHtml(pre)}<ins>${escHtml(reviewShow(s.ins))}</ins>${escHtml(post)}…</div>` +
         `<div><b>${escHtml(t('Today'))}</b> ${escHtml(reviewSnip(today, 160))}</div></div>`;
     }
     const can = !r.place.why;
-    list += `<div class="rv-item${s.id === rv.cur ? ' cur' : ''}" data-sid="${escAttr(s.id)}" style="--rv:${escAttr(reviewColor(s.reviewer))}" role="option" aria-selected="${s.id === rv.cur}">` +
+    list += `<div class="rv-item${s.id === rvs.cur ? ' cur' : ''}" data-sid="${escAttr(s.id)}" style="--rv:${escAttr(reviewColor(s.reviewer))}" role="option" aria-selected="${s.id === rvs.cur}">` +
       `<div class="rv-head"><i></i><span class="rv-kind">${escHtml(kinds[s.kind] || s.kind)}</span><span class="rv-by">${escHtml(s.reviewer || '')}</span>${flags.join('')}</div>` +
       `<div class="rv-what">${what}</div>${stale}` +
       `<div class="rv-acts"><button type="button" class="rv-mini" data-act="accept"${can ? '' : ' disabled'} title="${escAttr(can ? t('Accept (A)') : t('The passage has changed since: apply it by hand, then reject it'))}">${escHtml(t('Accept'))}</button>` +
@@ -16860,7 +16863,7 @@ function reviewRender() {
     const text = textOf(chId);
     const ts = titles.get(chId);
     const head = ts
-      ? `<span class="rv-s${ts.id === rv.cur ? ' cur' : ''}" data-sid="${escAttr(ts.id)}" style="--rv:${escAttr(reviewColor(ts.reviewer))}"><del>${escHtml(ts.del)}</del><ins>${escHtml(ts.ins)}</ins></span>`
+      ? `<span class="rv-s${ts.id === rvs.cur ? ' cur' : ''}" data-sid="${escAttr(ts.id)}" style="--rv:${escAttr(reviewColor(ts.reviewer))}"><del>${escHtml(ts.del)}</del><ins>${escHtml(ts.ins)}</ins></span>`
       : escHtml(chapterHeading(chId));
     page += `<section class="rv-chapter" data-ch="${escAttr(chId)}"><h3>${head}</h3>${reviewMarkup(text || '', marks.get(chId) || [])}</section>`;
   }
@@ -16884,14 +16887,21 @@ function reviewMarkup(text, marks) {
     if (m.o < pos) continue; // overlapping another: in the list only
     textUpTo(m.o);
     const s = m.s;
-    const open = `<span class="rv-s${s.id === rv.cur ? ' cur' : ''}${s.kind === 'format' ? ' rv-fmt' : ''}" data-sid="${escAttr(s.id)}" style="--rv:${escAttr(reviewColor(s.reviewer))}">`;
+    const open = `<span class="rv-s${s.id === rvs.cur ? ' cur' : ''}${s.kind === 'format' ? ' rv-fmt' : ''}" data-sid="${escAttr(s.id)}" style="--rv:${escAttr(reviewColor(s.reviewer))}">`;
     if (s.kind === 'format') {
       textUpTo(m.o + m.len, open, '</span>');
       continue;
     }
-    if (m.len) textUpTo(m.o + m.len, open + '<del>', '</del></span>');
     const ins = m.part === 'from' ? '' : s.ins || '';
-    if (ins) html += open + '<ins>' + ins.split(PARA).map(plain).join('<span class="rv-pilcrow">¶</span>') + '</ins></span>';
+    const insHtml = ins ? '<ins>' + ins.split(PARA).map(plain).join('<span class="rv-pilcrow">¶</span>') + '</ins>' : '';
+    // (one mark for both halves, unless what goes runs over a paragraph's end)
+    if (m.len && !text.slice(m.o, m.o + m.len).includes(PARA)) {
+      html += open + '<del>' + plain(text.slice(m.o, m.o + m.len)) + '</del>' + insHtml + '</span>';
+      pos = m.o + m.len;
+      continue;
+    }
+    if (m.len) textUpTo(m.o + m.len, open + '<del>', '</del></span>');
+    if (insHtml) html += open + insHtml + '</span>';
   }
   textUpTo(text.length);
   return html + '</p>';
@@ -16899,7 +16909,7 @@ function reviewMarkup(text, marks) {
 
 // the current suggestion: lit in both panes, the page scrolled to it
 function reviewSelect(id, { scroll = true } = {}) {
-  rv.cur = id;
+  rvs.cur = id;
   const host = $('#review-view');
   if (!host) return;
   for (const el of host.querySelectorAll('.cur')) el.classList.remove('cur');
@@ -16922,17 +16932,17 @@ function reviewSelect(id, { scroll = true } = {}) {
 function reviewStep(by) {
   const ids = [...$('#review-view').querySelectorAll('.rv-item')].map((el) => el.dataset.sid);
   if (!ids.length) return;
-  const i = ids.indexOf(rv.cur);
+  const i = ids.indexOf(rvs.cur);
   reviewSelect(ids[i < 0 ? (by > 0 ? 0 : ids.length - 1) : Math.max(0, Math.min(ids.length - 1, i + by))]);
 }
 function reviewFocus() {
   const list = $('#review-view .rv-list');
   if (list) list.focus({ preventScroll: true });
-  if (!rv.cur) { const first = $('#review-view .rv-item'); if (first) reviewSelect(first.dataset.sid, { scroll: false }); }
+  if (!rvs.cur) { const first = $('#review-view .rv-item'); if (first) reviewSelect(first.dataset.sid, { scroll: false }); }
 }
 // a decision on one, then on to the next that waits
 async function reviewDecideOne(id, how) {
-  const s = rv.data && rv.data.suggestions.find((x) => x.id === id);
+  const s = rvs.data && rvs.data.suggestions.find((x) => x.id === id);
   if (!s) return;
   const ids = [...$('#review-view').querySelectorAll('.rv-item')].map((el) => el.dataset.sid);
   const next = ids[ids.indexOf(id) + 1] || ids[ids.indexOf(id) - 1] || null;
@@ -16942,7 +16952,7 @@ async function reviewDecideOne(id, how) {
   reviewFocus();
 }
 async function reviewBulk(act, el) {
-  const open = reviewOpen(rv.data);
+  const open = reviewOpen(rvs.data);
   let list = open;
   let what = t('all changes');
   if (act.endsWith('-who')) {
@@ -16985,9 +16995,9 @@ async function reviewBulk(act, el) {
       if (e.key === 'Enter' || e.key === ' ') return; // a button's own
     }
     const k = e.key.toLowerCase();
-    if (k === 'j' || e.key === 'ArrowDown') { e.preventDefault(); reviewStep(1); } else if (k === 'k' || e.key === 'ArrowUp') { e.preventDefault(); reviewStep(-1); } else if ((k === 'a' || k === 'r') && !e.shiftKey && rv.cur) {
+    if (k === 'j' || e.key === 'ArrowDown') { e.preventDefault(); reviewStep(1); } else if (k === 'k' || e.key === 'ArrowUp') { e.preventDefault(); reviewStep(-1); } else if ((k === 'a' || k === 'r') && !e.shiftKey && rvs.cur) {
       e.preventDefault();
-      reviewDecideOne(rv.cur, k === 'a' ? 'accept' : 'reject');
+      reviewDecideOne(rvs.cur, k === 'a' ? 'accept' : 'reject');
     }
   });
 })();

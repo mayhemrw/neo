@@ -8,6 +8,10 @@
 // finds its chapters; NEO's own import still reads it; a second round to
 // another editor remembers both names.
 // Run with `npm run test:review` (under xvfb-run without a display).
+// M4: the Review tab (each change inline, in its reviewer's color), Accept
+// (A) and Reject, ⌘Z, out-of-date passages, Accept All with its version,
+// the log (the editor's words as theirs, numbered, never named) and the
+// Verification Report.
 // NEO_TEST_SHOTS=<folder> saves pictures, and the sample file for review.
 
 'use strict';
@@ -349,6 +353,168 @@ test('a file not from NEO: it asks which version, the closest first', async () =
   assert.equal(review.imports.length, 3);
   assert.equal(review.imports[2].how, 'headings');
   assert.ok(fs.readdirSync(path.join(await bookDirOf(), 'reviews')).length === 3);
+  let errors = '';
+  try { errors = fs.readFileSync(path.join(LIB, 'neo-errors.log'), 'utf8'); } catch { /* none */ }
+  assert.equal(errors, '');
+});
+
+// ---- M4: the Review tab, accepting and rejecting, the log ----
+const R = `document.getElementById('review-view')`;
+const tabN = () => js(`document.querySelector('.tab[data-tab="review"] .rv-tab-n').textContent`);
+const items = () => js(`[...${R}.querySelectorAll('.rv-item')].map((el) => el.dataset.sid)`);
+const sug = async (pred) => (await reviewJson()).suggestions.filter(pred);
+const keyDown = (key, more = '') => js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(key)}, bubbles: true${more} })); 0`);
+const ch = async (i) => (await js(`book.chapterOrder`))[i];
+
+test('the Review tab opens after an import and shows what waits; the writing page shows none of it', async () => {
+  assert.equal(await js(`currentTab`), 'review');
+  assert.equal(await js(`document.querySelector('.tab[data-tab="review"]').hidden`), false);
+  // the file from somewhere else: its changes go (one undoable step)
+  const review = await reviewJson();
+  const lo = review.imports[2].id;
+  await js(`reviewDecide(rvs.data.suggestions.filter((s) => s.import === ${JSON.stringify(lo)}), 'reject')`);
+  const open = (await reviewJson()).suggestions.filter((s) => s.status === 'open');
+  const threads = (await reviewJson()).threads.filter((th) => !th.resolved);
+  assert.equal(+(await tabN()), open.length + threads.length);
+  assert.deepEqual((await items()).sort(), open.map((s) => s.id).sort());
+  // the change inline, in Dana's color
+  const s = open.find((x) => x.del === 'lumbered');
+  const mark = await js(`(() => { const m = ${R}.querySelector('.rv-page [data-sid="${s.id}"]'); return m && [m.querySelector('del').textContent, m.querySelector('ins').textContent, m.style.getPropertyValue('--rv')]; })()`);
+  assert.deepEqual(mark, ['lumbered', 'laboured', review.reviewers[0].color]);
+  assert.equal(await js(`document.querySelectorAll('#chapters .rv-s, #chapters del, #chapters ins').length`), 0, 'nothing on the writing page');
+  await js(`reviewSelect(${JSON.stringify(s.id)}); $('#paper-scroll').scrollTop = 0`);
+  await tick(200);
+  await shot('review-tab');
+});
+
+test('Accept (A) puts the editor’s words in; ⌘Z takes them out and the change waits again', async () => {
+  const [s] = await sug((x) => x.del === 'lumbered');
+  const c2 = await ch(1);
+  const before = await js(`chapterHTML[${JSON.stringify(c2)}]`);
+  await js(`reviewSelect(${JSON.stringify(s.id)}); reviewFocus()`);
+  await keyDown('a');
+  await until(async () => (await sug((x) => x.id === s.id))[0].status === 'accepted');
+  const after = await js(`chapterHTML[${JSON.stringify(c2)}]`);
+  assert.ok(after.includes('as it laboured up Shooter'), after);
+  assert.ok(!after.includes('lumbered'));
+  assert.equal(after, before.replace('lumbered', 'laboured'), 'only that word changed');
+  assert.ok(!(await items()).includes(s.id));
+  // ⌘Z, from the Review tab
+  await js(`document.activeElement && document.activeElement.blur && document.activeElement.blur(); 0`);
+  await keyDown('z', ', ctrlKey: true');
+  await until(async () => (await sug((x) => x.id === s.id))[0].status === 'open');
+  await until(() => js(`chapterHTML[${JSON.stringify(c2)}] === ${JSON.stringify(before)}`));
+  assert.ok((await items()).includes(s.id));
+  // and the button does it too
+  await js(`${R}.querySelector('.rv-item[data-sid="${s.id}"] [data-act="accept"]').click()`);
+  await until(async () => (await sug((x) => x.id === s.id))[0].status === 'accepted');
+  assert.ok((await js(`chapterHTML[${JSON.stringify(c2)}]`)).includes('laboured'));
+});
+
+test('Reject leaves the book as it is', async () => {
+  const [s] = await sug((x) => x.ins === '\u2029Nobody tracked this line.' && x.status === 'open');
+  const before = await js(`JSON.stringify(chapterHTML)`);
+  await js(`${R}.querySelector('.rv-item[data-sid="${s.id}"] [data-act="reject"]').click()`);
+  await until(async () => (await sug((x) => x.id === s.id))[0].status === 'rejected');
+  assert.equal(await js(`JSON.stringify(chapterHTML)`), before);
+});
+
+test('a passage rewritten since is out of date: the editor’s wording beside today’s, no Accept', async () => {
+  const [s] = await sug((x) => x.del === 'plain' && x.status === 'open');
+  const c1 = await ch(0);
+  // the writer changes the passage on the page first
+  await js(`(() => {
+    const body = document.querySelector('.chapter[data-id="${c1}"] .chapter-body');
+    const w = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+    for (let n; (n = w.nextNode());) if (n.data.includes('a queen with a plain face')) n.data = n.data.replace('a large jaw and a queen with a plain face', 'a narrow jaw and a queen with a sour face');
+    slogWith({ src: 'typed' }, () => syncChapter(body, ${JSON.stringify(c1)}));
+    reviewRender();
+  })()`);
+  const it = `${R}.querySelector('.rv-item[data-sid="${s.id}"]')`;
+  assert.equal(await js(`${it}.querySelector('.rv-stale').textContent`), 'out of date');
+  assert.equal(await js(`${it}.querySelector('[data-act="accept"]').disabled`), true);
+  assert.match(await js(`${it}.querySelector('.rv-staleboth').textContent`), /homely.*Today.*sour face/);
+  await js(`reviewSelect(${JSON.stringify(s.id)}); $('#paper-scroll').scrollTop = 0`);
+  await tick(150);
+  await shot('review-out-of-date');
+  const before = await js(`chapterHTML[${JSON.stringify(c1)}]`);
+  await js(`reviewDecideOne(${JSON.stringify(s.id)}, 'accept')`);
+  assert.equal((await sug((x) => x.id === s.id))[0].status, 'open');
+  assert.equal(await js(`chapterHTML[${JSON.stringify(c1)}]`), before);
+  await js(`${it}.querySelector('[data-act="reject"]').click()`);
+  await until(async () => (await sug((x) => x.id === s.id))[0].status === 'rejected');
+});
+
+test('Accept All names a version first; formatting, a new paragraph and a join go through the page', async () => {
+  const c2 = await ch(1);
+  // three more of Dana's, made the way an import keeps them
+  await js(`(() => {
+    const text = reviewChapterText(${JSON.stringify(c2)});
+    const at = (w) => text.indexOf(w);
+    const P = ReviewMatch.PARA;
+    const mk = (kind, o, len, more) => Object.assign({ id: reviewNewId('s'), round: null, import: null, status: 'open', kind, reviewer: 'Dana Editor', date: '', chapter: ${JSON.stringify(c2)}, anchor: ReviewMatch.anchorIn(text, o, len) }, more);
+    const first = text.indexOf(P);
+    rvs.data.suggestions.push(
+      mk('format', at('Friday night'), 'Friday night'.length, { text: 'Friday night', was: { b: false, i: false }, now: { b: false, i: true } }),
+      mk('insert', first, 0, { del: '', ins: P + 'The night was cold.' }),
+      mk('delete', at('mail, as it laboured') + 'mail, as it laboured up Shooter’s Hill.'.length, 1, { del: P, ins: '' })
+    );
+    reviewRender();
+    $('#paper-scroll').scrollTop = 0;
+  })()`);
+  await tick(150);
+  await shot('review-before-accept-all');
+  const open = await js(`reviewOpen(rvs.data).length`);
+  await js(`${R}.querySelector('[data-act="accept-all"]').click()`);
+  await until(() => js(`reviewOpen(rvs.data).length === 0 && !rvs.busy`));
+  const html = await js(`chapterHTML[${JSON.stringify(c2)}]`);
+  assert.match(html, /<i>Friday night<\/i>/);
+  const paras = await js(`ReviewMatch.htmlParas(chapterHTML[${JSON.stringify(c2)}])`);
+  assert.equal(paras[1], 'The night was cold.');
+  assert.ok(paras[2].startsWith('The Dover road lay') && paras[2].includes('Shooter’s Hill.He walked uphill'), paras[2]);
+  assert.equal(paras.length, 3);
+  const named = await js(`window.neo.history.named(book.id)`);
+  const v = named.find((x) => x.auto === 'review');
+  assert.ok(v && /^Before accepting all changes \(/.test(v.name), JSON.stringify(named.map((x) => x.name)));
+  assert.match(await js(`$('#hint').textContent`), new RegExp('^' + (open) + ' accepted\\.'));
+  // nothing left: the tab goes once the writer leaves it
+  const threads = (await reviewJson()).threads.filter((th) => !th.resolved).length;
+  assert.equal(await tabN(), String(threads)); // (the comments wait: M5)
+  assert.ok(threads > 0);
+  await js(`goToTab('manuscript')`);
+  await tick(100);
+  assert.equal(await js(`document.querySelector('.tab[data-tab="review"]').hidden`), false, 'comments still wait');
+});
+
+test('the log says the accepted words are the editor’s, numbered, never named; nothing unlogged', async () => {
+  await js(`slogSaveAll()`);
+  await tick(600);
+  const dir = path.join(await bookDirOf(), 'scribes-log');
+  const slog = require('../slog.js');
+  const entries = fs.readdirSync(dir).filter(slog.isChunkName).sort().flatMap((n) => slog.parseChunk(fs.readFileSync(path.join(dir, n), 'utf8')).entries);
+  const ed = entries.filter((e) => e.src === 'editor');
+  assert.ok(ed.length >= 2, 'editor entries: ' + ed.length);
+  assert.ok(ed.every((e) => e.by === 'Reviewer 1' && e.cause === 'review'), JSON.stringify(ed.map((e) => [e.by, e.cause])));
+  const unlogged = entries.filter((e) => e.src === 'unlogged');
+  assert.deepEqual(unlogged.map((e) => e.doc), []);
+  for (const n of fs.readdirSync(dir)) {
+    if (!fs.statSync(path.join(dir, n)).isFile()) continue;
+    assert.ok(!fs.readFileSync(path.join(dir, n), 'utf8').includes('Dana'), n + ' names no one');
+  }
+});
+
+test('the Verification Report counts the editor’s text, and names them only when asked', async () => {
+  const file = path.join(tmp, 'report.html');
+  dialog.showSaveDialog = async () => ({ canceled: false, filePath: file });
+  const res = await js(`window.neo.slog.report(book.id, { privacy: 'dates' })`);
+  assert.equal(res.path, file, JSON.stringify(res));
+  const page = fs.readFileSync(file, 'utf8');
+  assert.ok(page.includes('From an editor (Reviewer 1)'), 'counted');
+  assert.ok(!page.includes('Dana'), 'not named');
+  const named = path.join(tmp, 'report-named.html');
+  dialog.showSaveDialog = async () => ({ canceled: false, filePath: named });
+  await js(`window.neo.slog.report(book.id, { privacy: 'dates', nameEditors: true })`);
+  assert.ok(fs.readFileSync(named, 'utf8').includes('From an editor (Dana Editor)'));
   let errors = '';
   try { errors = fs.readFileSync(path.join(LIB, 'neo-errors.log'), 'utf8'); } catch { /* none */ }
   assert.equal(errors, '');

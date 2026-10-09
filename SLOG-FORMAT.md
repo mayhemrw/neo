@@ -52,7 +52,7 @@ Every entry has a **clear part** and, while it's on the writer's computer, an op
 | `kind` | Meaning | Fields |
 |---|---|---|
 | `open` | Starts a chunk | `v` (format: `2`, or `1` for a chunk with no `stamp` entries written before them), `log` (log id), `dev` (device id, 32 hex), `prevChunk` (name of this device's previous chunk, or `null`), `app` (NEO version, then `+slog1`) |
-| `edit` | One burst of changes to one document | `doc`, `src`, `ops`, `c` if text was inserted, and optionally `dur`, `ev`, `cause`, `from`, `keys` |
+| `edit` | One burst of changes to one document | `doc`, `src`, `ops`, `c` if text was inserted, and optionally `dur`, `ev`, `cause`, `from`, `keys`, `by` |
 | `base` | A document's whole text, with no process record behind it | `doc`, `src` (`baseline`, `import` or `arrived`), `ops` (a single `[0, 0, length]`), `c`, optionally `file` or `from` (another book, or another device) |
 | `doc` | A document created or deleted | `doc`, `act` (`new` or `del`). A deleted document's text is first deleted by an `edit`, so a later move can point at it |
 | `on`, `off` | The log switched on or off for this book. `off` is followed by the chunk's `close`; after `on`, whatever changed while the log was off is recorded with `cause: "off"` | |
@@ -99,12 +99,15 @@ Ops apply in order, and each `at` refers to the text as it stands after the ops 
 | `move` | Moved or copied from elsewhere in NEO; `from` says where, when the log could tell |
 | `import` | Read in from a file. On a `base`, `file` gives that file's `mtime` (ms) and `sha256` (hex of its bytes); never its name |
 | `arrived` | Written on another device and found on disk |
+| `editor` | An editor's change from a Word review, accepted by the writer in NEO; `by` says which editor, as `Reviewer 1`, `Reviewer 2` (numbered per book in the order they were first imported), never a name |
 | `baseline` | In the book before the log began |
 | `unlogged` | Reached disk without a labeled entry; origin unknown |
 
 An edit that only deletes uses `src` for how the change was made: `typed` for the writer's own editing (the leaving half of a move included; `cause` says which tool), `arrived` for a change found on disk, `unlogged` when NEO can't say.
 
-`cause` optionally names what in NEO made the change (`undo`, `redo`, `replace`, `outline`, `split`, `join`, `spell`, `darling`, `placeholder`, `restore`, `off`). `restore` is a past version of a chapter put back (the whole chapter, a chapter no longer in the book, or a passage copied out of a version and pasted in); its `src` is `move` (`typed` when putting it back only deletes), and its `from` points at the deletions that took those words out. A checker that doesn't know a `cause` ignores it: chunks stay `v: 2`.
+`cause` optionally names what in NEO made the change (`undo`, `redo`, `replace`, `outline`, `split`, `join`, `spell`, `darling`, `placeholder`, `restore`, `review`, `off`). `restore` is a past version of a chapter put back (the whole chapter, a chapter no longer in the book, or a passage copied out of a version and pasted in); its `src` is `move` (`typed` when putting it back only deletes), and its `from` points at the deletions that took those words out. A checker that doesn't know a `cause` ignores it: chunks stay `v: 2`.
+
+**An editor's text.** Accepting a change from an editor's Word file (File → Import Review…, then the Review tab) logs the words it puts in with `src: "editor"`, `cause: "review"` and `by: "Reviewer <n>"`; what it takes out is logged the same way. Who Reviewer 1 is lives only in the book's `review.json`, which isn't part of the log: the log never holds an editor's name. A checker counts the text as the editor's (`editor:Reviewer 1` as an origin, or `editor` when `by` is missing or isn't of that form), never as typed. A checker older than `editor` counts it as not logged. Chunks stay `v: 2`.
 
 ### Where moved text came from
 

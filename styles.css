@@ -2358,6 +2358,10 @@ body.light #nav-pane.script .nav-item.sp-scene .n-num { color: #8f8a80; }
 .rv-ch:first-child { margin-top: 0; }
 .rv-ch .rv-mini, .rv-who .rv-mini, .rv-item .rv-acts { opacity: 0; transition: opacity 0.12s; }
 .rv-ch .rv-mini:first-of-type { margin-left: auto; }
+.rv-who .rv-mini { max-width: 0; padding: 0; border-width: 0; overflow: hidden; transition: opacity 0.12s, max-width 0.12s; }
+.rv-who:hover .rv-mini, .rv-who:focus-within .rv-mini { max-width: 80px; padding: 1px 8px; border-width: 1px; }
+.rv-who { padding-right: 10px; }
+.rv-who:hover, .rv-who:focus-within { padding-right: 4px; }
 .rv-ch:hover .rv-mini, .rv-ch:focus-within .rv-mini, .rv-who:hover .rv-mini, .rv-who:focus-within .rv-mini,
 .rv-item:hover .rv-acts, .rv-item.cur .rv-acts, .rv-item:focus-within .rv-acts { opacity: 1; }
 .rv-item { border-left: 3px solid var(--rv); background: var(--bg-soft); border-radius: 4px; padding: 7px 10px 7px 10px; margin-bottom: 6px; cursor: pointer; color: #cfcbc2; }
