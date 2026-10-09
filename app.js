@@ -226,7 +226,7 @@ function writeLibrary(lib = library) {
 // library's copy is the last device's, so a device opening the library for
 // the first time starts out the way the writer last had it, and from then on
 // keeps its own.
-const DEVICE_LOOK = ['pageTheme', 'uiBright', 'uiBrightAside', 'uiZoom', 'editorFontSize', 'typewriter', 'focus', 'posMode', 'outlineView', 'vimKeys'];
+const DEVICE_LOOK = ['pageTheme', 'uiBright', 'uiBrightAside', 'uiZoom', 'editorFontSize', 'typewriter', 'focus', 'posMode', 'outlineView', 'vimKeys', 'findCase', 'findWord', 'findTitles'];
 const DEVICE_LOOK_KEY = 'neo-device-look';
 function deviceLookOf(lib) {
   const out = {};
@@ -12937,50 +12937,164 @@ function paintHighlights() {
 }
 
 // Find searches the tab you're in: the whole manuscript, first chapter to
-// last, or the Notes page, the outline's lines, the Darlings. Replace stays
-// with the manuscript, where ⌘Z can take a Replace All back.
+// last (each chapter's title first, when Include chapter titles is on), or
+// the Notes page, the outline's lines, the Darlings. Replace stays with the
+// manuscript, where ⌘Z can take a Replace All back.
 function searchRoots() {
-  if (currentTab === 'manuscript') return book.chapterOrder.map((chId) => document.querySelector(`.chapter[data-id="${chId}"] .chapter-body`));
+  if (currentTab === 'manuscript') {
+    const titles = findOpts().titles;
+    return book.chapterOrder.flatMap((chId) => {
+      const sec = document.querySelector(`.chapter[data-id="${chId}"]`);
+      if (!sec) return [];
+      const title = titles ? sec.querySelector('.chapter-head .ch-title') : null;
+      return title ? [title, sec.querySelector('.chapter-body')] : [sec.querySelector('.chapter-body')];
+    });
+  }
   if (currentTab === 'outline') return boardShowing() ? $$('#outline-board .ob-text, #loose-list .ob-text') : $$('#outline-list .ol-text');
   if (currentTab === 'darlings') return $$('#darlings-list .darling > :first-child');
   return [$('#aux-editor')];
 }
 
-// every place q appears in the tab, in reading order, any case
-function findRanges(q) {
+// Find's options, kept per device (DEVICE_LOOK): Match case, Whole word,
+// and Include chapter titles (the manuscript only)
+const findOpts = () => ({ matchCase: !!(library && library.findCase), wholeWord: !!(library && library.findWord), titles: !!(library && library.findTitles) });
+
+// The pattern a search looks for: the words as typed (no regular
+// expressions), any case unless Match case. With Whole word, not inside a
+// longer word: a letter, digit or mark on either side makes it part of
+// one, and so does an apostrophe joining two ("don" isn't found in
+// "don't"); a hyphen or a dash ends a word.
+const FIND_WORD = '[\\p{L}\\p{N}\\p{M}]';
+function findPattern(q, { matchCase = false, wholeWord = false } = {}) {
+  if (!q) return null;
+  let src = q.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
+  if (wholeWord) src = `(?<!${FIND_WORD})(?<!${FIND_WORD}['’])${src}(?!${FIND_WORD})(?!['’]${FIND_WORD})`;
+  return new RegExp(src, matchCase ? 'gu' : 'giu');
+}
+// where a pattern is found in a text: [[start, end], …], none overlapping
+function findIn(text, re) {
+  const out = [];
+  if (!re) return out;
+  re.lastIndex = 0;
+  for (let m; (m = re.exec(text));) {
+    if (!m[0].length) { re.lastIndex++; continue; }
+    out.push([m.index, m.index + m[0].length]);
+  }
+  return out;
+}
+
+// A root's text as Find reads it: each paragraph's text as one string,
+// with where each of its text nodes starts in it, so a phrase is found
+// whatever inline formatting it crosses ("the <i>old</i> house"). A new
+// paragraph or a line break (<br>) starts a new stretch, so nothing is
+// found across one. [{ text, nodes: [{ node, at }], root }]
+const FIND_BLOCKS = new Set(['P', 'LI', 'DIV', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'PRE', 'TD', 'TH', 'SECTION']);
+function findBlocks(root) {
+  const out = [];
+  if (!root) return out;
+  let cur = null;
+  let curBlock = null;
+  const blockOf = (n) => {
+    for (let e = n.parentElement; e && e !== root; e = e.parentElement) if (FIND_BLOCKS.has(e.tagName)) return e;
+    return root;
+  };
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if (n.nodeType !== Node.TEXT_NODE) { if (n.tagName === 'BR') cur = null; continue; }
+    const b = blockOf(n);
+    if (!cur || b !== curBlock) { cur = { text: '', nodes: [], root }; out.push(cur); curBlock = b; }
+    cur.nodes.push({ node: n, at: cur.text.length });
+    cur.text += n.data;
+  }
+  return out;
+}
+// The inline styles a text node carries within its paragraph, as a key
+// ("bi" for bold italic): tags and the engine's style attributes alike
+const FIND_STYLE_TAGS = { B: 'b', STRONG: 'b', I: 'i', EM: 'i', U: 'u', S: 's', STRIKE: 's', DEL: 's' };
+function findStyleOf(node, root) {
+  const k = new Set();
+  for (let e = node.parentElement; e && e !== root && !FIND_BLOCKS.has(e.tagName); e = e.parentElement) {
+    if (FIND_STYLE_TAGS[e.tagName]) k.add(FIND_STYLE_TAGS[e.tagName]);
+    const st = e.getAttribute('style') || '';
+    if (/font-style\s*:\s*italic/i.test(st)) k.add('i');
+    if (/font-weight\s*:\s*(?:bold|[6-9]00)/i.test(st)) k.add('b');
+    if (/text-decoration[^;]*underline/i.test(st)) k.add('u');
+    if (/text-decoration[^;]*line-through/i.test(st)) k.add('s');
+  }
+  return [...k].sort().join('');
+}
+// One match in a stretch as a Range over its text nodes, with the nodes
+// it covers and whether it crosses formatting (part of it styled
+// differently from the rest)
+function findMatchAt(block, s, e) {
+  const { nodes } = block;
+  let i = 0;
+  while (i < nodes.length - 1 && nodes[i + 1].at <= s) i++;
+  let j = i;
+  while (j < nodes.length - 1 && nodes[j + 1].at < e) j++;
+  const range = document.createRange();
+  range.setStart(nodes[i].node, s - nodes[i].at);
+  range.setEnd(nodes[j].node, e - nodes[j].at);
+  let crosses = false;
+  if (j > i) {
+    const styles = new Set();
+    for (let k = i; k <= j; k++) {
+      const n = nodes[k];
+      if (n.at + n.node.data.length > s && n.at < e) styles.add(findStyleOf(n.node, block.root));
+    }
+    crosses = styles.size > 1;
+  }
+  return { range, block, from: i, to: j, start: s, end: e, crosses };
+}
+
+// Every place q is found in the tab, in reading order: [{ range, chId,
+// title (a chapter's title), crosses, block, from, to, start, end }]
+function findMatches(q) {
   const found = [];
-  if (!q) return found;
-  const ql = q.toLowerCase();
-  for (const body of searchRoots()) {
-    if (!body) continue;
-    const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
-    let node;
-    while ((node = walker.nextNode())) {
-      const tl = node.textContent.toLowerCase();
-      let pos = 0;
-      while ((pos = tl.indexOf(ql, pos)) !== -1) {
-        const range = document.createRange();
-        range.setStart(node, pos);
-        range.setEnd(node, pos + q.length);
-        found.push(range);
-        pos += q.length;
-      }
+  const re = findPattern(q, findOpts());
+  if (!re) return found;
+  for (const root of searchRoots()) {
+    if (!root) continue;
+    const sec = root.closest && root.closest('.chapter');
+    const chId = sec ? sec.dataset.id : null;
+    const title = root.classList.contains('ch-title');
+    for (const block of findBlocks(root)) {
+      for (const [s, e] of findIn(block.text, re)) found.push({ ...findMatchAt(block, s, e), chId, title });
     }
   }
   return found;
+}
+// …as ranges alone (vim's n and N)
+const findRanges = (q) => findMatches(q).map((m) => m.range);
+
+// The bar's three options: pressed or not, as kept; titles only in the manuscript
+function showFindOpts() {
+  const o = findOpts();
+  $('#find-case').setAttribute('aria-pressed', String(o.matchCase));
+  $('#find-word').setAttribute('aria-pressed', String(o.wholeWord));
+  $('#find-titles').setAttribute('aria-pressed', String(o.titles));
+  $('#find-titles').hidden = currentTab !== 'manuscript';
+}
+function toggleFindOpt(key) {
+  library[key] = !library[key];
+  writeLibrary(library);
+  showFindOpts();
+  runSearch();
+  $('#search-input').focus();
 }
 
 // Scan the whole tab every time. Matches are highlighted, not selected.
 function runSearch() {
   const q = $('#search-input').value;
-  searchState = { matches: [], idx: -1, query: q, tab: currentTab };
+  searchState = { matches: [], idx: -1, query: q, tab: currentTab, opts: JSON.stringify(findOpts()) };
   $('#searchbar').classList.toggle('find-only', currentTab !== 'manuscript');
+  showFindOpts();
   if (!q) {
     $('#search-count').textContent = '';
     paintHighlights();
     return;
   }
-  searchState.matches = findRanges(q).map((range) => ({ range }));
+  searchState.matches = findMatches(q);
   const n = searchState.matches.length;
   $('#search-count').textContent = n ? t('{n} found', { n }) : t('none');
   paintHighlights();
@@ -13000,7 +13114,7 @@ function gotoMatch(i) {
 }
 
 function freshSearchIfStale() {
-  if (searchState.query !== $('#search-input').value || searchState.tab !== currentTab) runSearch();
+  if (searchState.query !== $('#search-input').value || searchState.tab !== currentTab || searchState.opts !== JSON.stringify(findOpts())) runSearch();
 }
 
 function replaceCurrent() {
@@ -13012,7 +13126,14 @@ function replaceCurrent() {
   const rep = $('#replace-input').value;
   // the match may have been edited away by hand since it was found: look
   // again rather than put the replacement where it no longer is
-  if (m.range.toString().toLowerCase() !== String(searchState.query || '').toLowerCase()) { runSearch(); return; }
+  const again = findIn(m.range.toString(), findPattern(String(searchState.query || ''), { matchCase: findOpts().matchCase }));
+  if (!(again.length === 1 && again[0][0] === 0 && again[0][1] === m.range.toString().length)) { runSearch(); return; }
+  // a title, or a match that crosses formatting, is left for later (phase
+  // 4's list: replace it by hand for now)
+  if (m.title || m.crosses) {
+    toast(m.title ? t('Chapter titles can be found, not replaced, for now.') : t('That one crosses italics or bold: replace it by hand for now.'), 5000);
+    return;
+  }
   let chapter = null;
   try {
     chapter = m.range.startContainer.parentElement.closest('.chapter');
@@ -13030,33 +13151,51 @@ function replaceCurrent() {
   if (searchState.matches.length) gotoMatch(Math.min(oldIdx, searchState.matches.length - 1));
 }
 
-// Every chapter, front to back
+// Every chapter, front to back, as Find finds them (Match case and Whole
+// word too). A match that crosses formatting is left alone and counted
+// (phase 4 lets the writer decide those); so are chapter titles, for now.
 function replaceAllMatches() {
   const q = $('#search-input').value;
   if (!q || currentTab !== 'manuscript') return;
-  snapshotStructure('replace all');
+  const re = findPattern(q, findOpts());
   const rep = $('#replace-input').value;
-  const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  snapshotStructure('replace all');
   let n = 0;
+  let left = 0;
   for (const chId of book.chapterOrder) {
     const body = document.querySelector(`.chapter[data-id="${chId}"] .chapter-body`);
     if (!body) continue;
-    const nodes = [];
-    const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
-    let node;
-    while ((node = walker.nextNode())) nodes.push(node);
-    let touched = false;
-    for (const nd of nodes) {
-      if (nd.textContent.toLowerCase().includes(q.toLowerCase())) {
-        nd.textContent = nd.textContent.replace(re, () => { n++; return rep; });
-        touched = true;
+    // every match's place in its text nodes, worked out before anything
+    // changes, then put in from the last back, so the places stay right
+    const edits = [];
+    for (const block of findBlocks(body)) {
+      for (const [s, e] of findIn(block.text, re)) {
+        const m = findMatchAt(block, s, e);
+        if (m.crosses) { left++; continue; }
+        edits.push(m);
       }
     }
-    if (touched) syncChapter(body, chId);
+    if (!edits.length) continue;
+    for (let k = edits.length - 1; k >= 0; k--) {
+      const { block, from, to, start, end } = edits[k];
+      const a = block.nodes[from];
+      const z = block.nodes[to];
+      const a0 = start - a.at;
+      const z1 = end - z.at;
+      if (from === to) a.node.data = a.node.data.slice(0, a0) + rep + a.node.data.slice(z1);
+      else {
+        z.node.data = z.node.data.slice(z1);
+        for (let x = to - 1; x > from; x--) block.nodes[x].node.data = '';
+        a.node.data = a.node.data.slice(0, a0) + rep;
+      }
+      n++;
+    }
+    syncChapter(body, chId);
   }
   if (n === 0) undoStack.pop(); // nothing changed, nothing to undo
   else breakRun++; // ⌘Z from inside the text reaches this undo too
-  toast(n ? t('{n} replaced across the whole book — {key} to undo', { n, key: KZ }) : t('0 replaced'));
+  const done = n ? t('{n} replaced across the whole book — {key} to undo', { n, key: KZ }) : t('0 replaced');
+  toast(left ? done + ' ' + t('{n} left: they cross italics or bold.', { n: left }) : done, left ? 8000 : undefined);
   runSearch();
 }
 
@@ -13090,6 +13229,9 @@ $('#search-prev').onclick = () => { freshSearchIfStale(); gotoMatch(searchState.
 $('#replace-one').onclick = replaceCurrent;
 $('#replace-all').onclick = replaceAllMatches;
 $('#search-close').onclick = closeSearch;
+$('#find-case').onclick = () => toggleFindOpt('findCase');
+$('#find-word').onclick = () => toggleFindOpt('findWord');
+$('#find-titles').onclick = () => toggleFindOpt('findTitles');
 
 /* ================================================================== */
 /*  IMPORT                                                             */

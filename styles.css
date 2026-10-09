@@ -1327,6 +1327,13 @@ body.full-screen.focus-mode #bottombar:not(:hover):not(.attn) { opacity: 0; }
   color: #aaa; font-size: 12px; padding: 5px 9px;
 }
 #searchbar button:hover { color: var(--accent); border-color: var(--accent); }
+/* Match case, Whole word, Include chapter titles: on when pressed */
+#searchbar .find-opt { padding: 4px 7px; min-width: 28px; font-weight: 600; }
+#searchbar .find-opt[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: rgba(201,168,106,0.14); }
+/* The toggles' glyphs are drawn here, not in the page, so they aren't taken for words to translate. */
+#find-case::before { content: "Aa"; }
+#searchbar .find-word-mark::before { content: "ab"; }
+#searchbar .find-word-mark { border-bottom: 1px solid currentColor; border-left: 1px solid currentColor; border-right: 1px solid currentColor; padding: 0 2px; line-height: 1; }
 #search-count { font-size: 11px; color: var(--muted); min-width: 52px; text-align: center; }
 
 #goal-counter.goal-met { color: var(--accent); }

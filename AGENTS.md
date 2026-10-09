@@ -113,6 +113,15 @@ Each book's log lives in its `scribes-log/` folder: `log.json` (made once) and o
 - Duplicate leaves `versions/` behind, as it does `scribes-log/`: the copy's history starts at the copy. Nothing that reads a book's documents looks in `versions/`; the daily backup zips it with the rest of the book.
 - `scripts/slog-history.test.js`, `scripts/slog-diff.test.js` and the versions tests in `scripts/slog-main.test.js`; `slog.e2e.js` names a version and checks the log-off stretch's copy; `npm run test:history` (`scripts/history.e2e.js`, Electron) drives the History window (`NEO_TEST_SHOTS=<folder>` saves pictures of it).
 
+## Find and replace
+
+The FIND & REPLACE section of `app.js` (⌘F, `#searchbar`, at the top of the window). Highlights only, through the CSS Highlight API: nothing goes into the chapters until a replace.
+
+- Each root Find searches (`searchRoots`: the chapters in order, each title first when Include chapter titles is on; or the Notes page, the outline's lines, Darlings) is read as stretches of text (`findBlocks`: a paragraph's text with where each text node starts in it; a new paragraph or a `<br>` starts a new stretch), so a phrase is found across inline formatting but never across a paragraph break. `findMatchAt` turns a hit into a Range and says whether it `crosses` formatting (its text nodes carry different inline styles, `findStyleOf`).
+- `findPattern` is the words as typed (never a regular expression), any case unless Match case; Whole word uses Unicode letters, digits and marks, and an apostrophe between letters joins a word ("don" isn't found in "don't"). The three options are `library.findCase`, `findWord`, `findTitles`, kept per computer (`DEVICE_LOOK`); the toggles' glyphs are drawn in CSS so they aren't taken for words to translate.
+- Replace and Replace All stay in the manuscript and honor the options. A hit that crosses formatting, or a title, is left alone for now (Replace says so; Replace All counts what it left in its toast); phase 4's later milestones let the writer decide those. Replace All works out every place first and edits from the last back, as one `snapshotStructure('replace all')`; both log as `{ src: 'typed', cause: 'replace' }`.
+- `scripts/find.test.js` (the pattern, in `vm`); `npm run test:find` (`scripts/find.e2e.js`, Electron) drives the bar, the options, a phrase across italics, titles, Replace and Replace All, and checks the log.
+
 ## Paperbacks for KDP
 
 Export → Paperback for KDP… (also on the shelf's right-click Export) writes a print interior PDF and a cover template PDF beside it. `printPaperback` and `buildPrintHtml` are the PRINT BOOK section of `app.js`; `makePaperback`, `renderPaged` and `kdpCoverHtml` are in `main.js`, behind `print:paperback`.
@@ -226,6 +235,7 @@ npm run test:dashes        # node --test scripts/dashes.test.js
 npm run test:verifier      # the verifier page, in Electron (xvfb-run without a display)
 npm run test:devices       # two computers on one library, end to end (add -- --live for the real services)
 npm run test:history       # the History window, in Electron (xvfb-run without a display)
+npm run test:find          # Find and Replace, in Electron (xvfb-run without a display)
 npm run build:verifier     # writes verifier/verifier.html
 npm run bundle             # Hugh: brings in the newest .bundle from ~/Downloads and pushes main
 npm run release            # Hugh: next version (x.y.9 → x.(y+1).0), commit, push, tag (npm run release -- 2.0.0 for another)

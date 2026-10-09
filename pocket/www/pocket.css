@@ -135,3 +135,6 @@ body.light .book { box-shadow: 2px 3px 6px rgba(0,0,0,0.2); }
 body.light #pocket-undo { background: #f1eee8; border-color: #dcd7ce; }
 body.light #pocket-undo button { color: #2b2926; }
 body.light #pocket-undo button:disabled { color: #b0aa9f; }
+
+/* Find: the bar wraps on a narrow screen rather than running off it. */
+#searchbar { flex-wrap: wrap; max-width: calc(100vw - 16px); }
