@@ -85,7 +85,7 @@ Running the Electron tests in the cloud: `timeout 600 xvfb-run -a -s "-screen 0 
 ## Claim
 
 - Scheduled task: `trig_01G2ZxJvq3EbmHSLDeaCnd9t` ("NEO phase 6 builder", hourly at :36 Pacific, automatic approval, push notifications). A session may also start the next one at once with `fire_trigger` on this id once its milestone is pushed and the claim cleared.
-- Claimed: none
+- Claimed: M6, session started 2026-10-09 15:58 UTC, heartbeat 2026-10-09 15:59 UTC
 
 ## Open questions
 
