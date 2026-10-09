@@ -15992,12 +15992,12 @@ async function manuscriptRun(sections) {
 // review.json as the window keeps it. Every list is there, whatever the
 // file held (an older or hand-edited one), so callers needn't check.
 function reviewBlank() {
-  return { v: 1, editors: [], rounds: [], reviewers: [], suggestions: [], threads: [] };
+  return { v: 1, editors: [], rounds: [], imports: [], reviewers: [], suggestions: [], threads: [] };
 }
 function reviewNormal(data) {
   const r = reviewBlank();
   if (data && typeof data === 'object') {
-    for (const k of ['editors', 'rounds', 'reviewers', 'suggestions', 'threads']) if (Array.isArray(data[k])) r[k] = data[k];
+    for (const k of ['editors', 'rounds', 'imports', 'reviewers', 'suggestions', 'threads']) if (Array.isArray(data[k])) r[k] = data[k];
   }
   r.editors = r.editors.filter((x) => typeof x === 'string' && x.trim());
   return r;
@@ -16131,6 +16131,198 @@ async function exportForEditor() {
     reviewSending = false;
   }
 }
+
+// Reviewers' colors, in the order they first appear in a book (the same
+// hues as the book's notes, dark enough on Paper and light enough on Night)
+const REVIEW_COLORS = ['#c0392b', '#2471a3', '#1e8449', '#8e44ad', '#b9770e', '#117a65', '#a04000', '#5d6d7e'];
+
+// The book's chapters as a round sent them: each one's text in the version
+// named when the file went out ({ id, num, title, kind, text }), or null if
+// that version can't be read.
+async function reviewSentChapters(bookId, round) {
+  const h = window.neo.history;
+  if (!round || !round.version || !round.version.file || !h || !h.text) return null;
+  const out = [];
+  for (const c of round.chapters || []) {
+    let got;
+    try { got = await h.text(bookId, { named: round.version.file }, c.id); } catch (err) { got = { error: (err && err.message) || String(err) }; }
+    if (!got || got.error || typeof got.text !== 'string') continue;
+    out.push({ id: c.id, num: c.num, title: c.title || '', kind: c.kind || 'chapter', text: ReviewMatch.htmlText(got.text) });
+  }
+  return out.length ? out : null;
+}
+// The book as it stands, for a file that came from somewhere else
+function reviewBookNow() {
+  return book.chapterOrder.map((id) => ({ id, num: null, title: chapterHeading(id), kind: chapterKind(id), text: ReviewMatch.htmlText(chapterHTML[id] || '') }));
+}
+
+// A file with no round NEO knows (not sent from this book, or from a copy
+// of it), or whose version can't be read: the writer says which version to
+// compare it with, the closest by text first. Resolves to { round,
+// chapters } or null.
+async function reviewWhichVersion(bookId, review, model, known) {
+  const choices = [];
+  for (const r of review.rounds.slice(-6).reverse()) {
+    const chapters = await reviewSentChapters(bookId, r);
+    if (chapters) choices.push({ round: r, chapters, label: r.version ? r.version.name : r.to });
+  }
+  choices.push({ round: null, chapters: reviewBookNow(), label: t('The book as it is now') });
+  for (const c of choices) c.near = ReviewMatch.closeness(model, c.chapters);
+  choices.sort((a, b) => b.near - a.near);
+  const pick = await optionModal(
+    t('Which version was this file sent from?'),
+    escHtml(known ? t('The version this file was sent from can’t be read. NEO compares the file with the one you pick, to find changes made without Track Changes.')
+      : t('This file doesn’t say. NEO compares it with the one you pick, to find changes made without Track Changes.')),
+    choices.map((c, i) => ({ label: escHtml(c.label), desc: i === 0 ? escHtml(t('Closest to the file')) : '', value: i + 1 })));
+  if (!pick) return null;
+  const c = choices[pick - 1];
+  return { round: c.round, chapters: c.chapters };
+}
+
+// What an import found, said once, in a small window: by reviewer, then
+// what NEO couldn't place or read
+function reviewSummaryDialog(name, lines, notes) {
+  return new Promise((resolve) => {
+    const bd = document.createElement('div');
+    bd.className = 'modal-backdrop';
+    bd.id = 'review-summary';
+    bd.innerHTML = `
+      <div class="modal rv-send" role="dialog" aria-modal="true" aria-labelledby="rv-sum-title">
+        <h2 id="rv-sum-title">${escHtml(t('Review imported'))}</h2>
+        <p class="rv-lead rv-file"></p>
+        <ul class="rv-lines"></ul>
+        <ul class="rv-notes"></ul>
+        <p class="rv-lead">${escHtml(t('Nothing in the book has changed. Each change waits for you to take or leave it.'))}</p>
+        <div class="rv-actions"><button class="btn-gold m-ok">${escHtml(t('OK'))}</button></div>
+      </div>`;
+    bd.querySelector('.rv-file').textContent = name;
+    for (const [list, items] of [['.rv-lines', lines], ['.rv-notes', notes]]) {
+      const ul = bd.querySelector(list);
+      for (const x of items) { const li = document.createElement('li'); li.textContent = x; ul.appendChild(li); }
+      if (!items.length) ul.remove();
+    }
+    const done = () => { bd.remove(); resolve(); };
+    bd.querySelector('.m-ok').onclick = done;
+    bd.addEventListener('keydown', (e) => { if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); done(); } });
+    document.body.appendChild(bd);
+    bd.querySelector('.m-ok').focus();
+  });
+}
+
+// One line per reviewer: "Dana: 212 changes, 31 comments, 4 made without
+// Track Changes, 3 formatting changes"
+function reviewCountLine(name, c) {
+  const parts = [];
+  if (c.changes) parts.push(t('{n} changes', { n: c.changes }));
+  if (c.comments) parts.push(t('{n} comments', { n: c.comments }));
+  if (c.untracked) parts.push(t('{n} made without Track Changes', { n: c.untracked }));
+  if (c.formatting) parts.push(t('{n} formatting changes', { n: c.formatting }));
+  return t('{name}: {what}', { name, what: parts.length ? parts.join(', ') : t('nothing changed') });
+}
+
+const reviewNewId = (pre) => pre + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+
+// File → Import Review… (or a .docx dropped on the open book): the editor's
+// file read in main (review-docx.js), matched to the version it was sent
+// from (review-match.js), a copy kept in reviews/, and every change and
+// comment kept in review.json. Nothing in the book changes here.
+let reviewImporting = false;
+async function importReview(filePath = null) {
+  if (!book) { toast(t('Open the book the file belongs to first.')); return; }
+  if (isScript()) { toast(t('Reviews are for books; a script’s Word file can be imported as a new script.')); return; }
+  const rv = window.neo && window.neo.review;
+  if (!rv || !window.ReviewMatch || reviewImporting) return;
+  if (document.querySelector('.modal-backdrop:not([hidden])')) return;
+  reviewImporting = true;
+  const bookId = book.id;
+  try {
+    flushAllSaves();
+    const got = filePath ? await rv.read(filePath) : await rv.pick();
+    if (!got || !book || book.id !== bookId) return;
+    if (got.error) { toast(got.error, 8000); return; }
+    const model = got.model;
+    const review = await reviewLoad(bookId);
+    let round = model.round ? review.rounds.find((r) => r.id === model.round) || null : null;
+    let chapters = round ? await reviewSentChapters(bookId, round) : null;
+    if (!chapters) {
+      const choice = await reviewWhichVersion(bookId, review, model, !!round);
+      if (!choice || !book || book.id !== bookId) return;
+      round = choice.round;
+      chapters = choice.chapters;
+    }
+    const authors = [...new Set(model.changes.map((c) => c.author).concat(model.comments.map((c) => c.author)).filter(Boolean))];
+    const fallback = (round && round.to) || authors[0] || t('Editor');
+    const found = ReviewMatch.match(model, chapters, { fallback });
+    const names = Object.keys(found.counts);
+    const at = Date.now();
+    const importId = reviewNewId('i');
+    let copy = null;
+    try {
+      const day = new Date(at).toISOString().slice(0, 10).replace(/-/g, '');
+      copy = await rv.keep(bookId, got.token, (round ? round.id : 'r' + day) + '-' + safeName(names[0] || fallback));
+    } catch (err) { window.neo.logError('review copy: ' + (err && err.stack || err)); }
+    // reviewers keep their color from round to round
+    for (const n of names) {
+      if (!review.reviewers.some((r) => r.name === n)) review.reviewers.push({ name: n, color: REVIEW_COLORS[review.reviewers.length % REVIEW_COLORS.length] });
+    }
+    for (const s of found.suggestions) {
+      review.suggestions.push(Object.assign({ id: reviewNewId('s'), round: round ? round.id : null, import: importId, status: 'open' }, s));
+    }
+    for (const th of found.threads) {
+      review.threads.push(Object.assign({ id: reviewNewId('t'), round: round ? round.id : null, import: importId }, th));
+    }
+    const imp = {
+      id: importId, at, file: got.name, copy, round: round ? round.id : null, how: found.how,
+      counts: found.counts, cancelled: found.cancelled, unplaced: found.unplaced, notes: model.notes
+    };
+    review.imports.push(imp);
+    if (round) round.imports = (round.imports || []).concat(importId);
+    await reviewSave(bookId, review);
+    const notes = [];
+    if (found.unplaced) notes.push(t('{n} parts of the file didn’t match a chapter; their changes are kept, marked as not placed.', { n: found.unplaced }));
+    if (found.cancelled) notes.push(t('{n} changes one reviewer made and another took back were left out.', { n: found.cancelled }));
+    if (model.notes.footnotes) notes.push(t('{n} footnotes weren’t read.', { n: model.notes.footnotes }));
+    if (model.notes.textBoxes) notes.push(t('{n} text boxes weren’t read.', { n: model.notes.textBoxes }));
+    if (model.notes.tableChanges) notes.push(t('{n} changes to tables weren’t read.', { n: model.notes.tableChanges }));
+    if (!round) notes.push(t('Compared with the book as it is now: changes made without Track Changes include anything you wrote since.'));
+    const lines = names.length ? names.map((n) => reviewCountLine(n, found.counts[n])) : [t('No tracked changes or comments in this file.')];
+    await reviewSummaryDialog(got.name, lines, notes);
+  } catch (err) {
+    window.neo.logError('import review: ' + (err && err.stack || err));
+    toast(t('Couldn’t import the review: {error}', { error: plainError(err) }), 8000);
+  } finally {
+    reviewImporting = false;
+  }
+}
+
+// a .docx dropped on the open book's page is a review coming back (a file
+// dropped on the shelf is still a new book)
+(() => {
+  const view = document.getElementById('editor-view');
+  if (!view) return;
+  const oneDocx = (e) => {
+    const dt = e.dataTransfer;
+    if (!dt || ![...(dt.types || [])].includes('Files')) return false;
+    const items = [...(dt.items || [])].filter((it) => it.kind === 'file');
+    return items.length === 1;
+  };
+  view.addEventListener('dragover', (e) => {
+    if (!book || isScript() || !oneDocx(e) || !(window.neo && window.neo.review)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  });
+  view.addEventListener('drop', (e) => {
+    if (!book || isScript() || !(window.neo && window.neo.review)) return;
+    const files = e.dataTransfer && e.dataTransfer.files;
+    if (!files || files.length !== 1) return;
+    let p = null;
+    try { p = window.neo.pathForFile(files[0]); } catch { /* no path */ }
+    if (!p || !/\.docx$/i.test(p)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    importReview(p);
+  });
+})();
 
 /* ================================================================== */
 /*  PRINT BOOK — a paperback for KDP                                   */
@@ -17891,6 +18083,7 @@ window.neo.onMenu(async (msg) => {
   if (msg.type === 'focus') setFocus(msg.value);
   if (msg.type === 'focusCycle') cycleFocus();
   if (msg.type === 'import') importBooks();
+  if (msg.type === 'importReview') importReview();
   if (msg.type === 'stats') openStats();
   if (msg.type === 'chapterStep') gotoChapter(msg.value);
   // View → Go To: a tab by name, or the next or previous one

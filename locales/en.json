@@ -57,5 +57,41 @@
   "{n} chapter titles are back as they were in “{name}”.": {
     "one": "{n} chapter title is back as it was in “{name}”.",
     "other": "{n} chapter titles are back as they were in “{name}”."
+  },
+  "{n} changes": {
+    "one": "{n} change",
+    "other": "{n} changes"
+  },
+  "{n} comments": {
+    "one": "{n} comment",
+    "other": "{n} comments"
+  },
+  "{n} made without Track Changes": {
+    "one": "{n} made without Track Changes",
+    "other": "{n} made without Track Changes"
+  },
+  "{n} formatting changes": {
+    "one": "{n} formatting change",
+    "other": "{n} formatting changes"
+  },
+  "{n} parts of the file didn’t match a chapter; their changes are kept, marked as not placed.": {
+    "one": "{n} part of the file didn’t match a chapter; its changes are kept, marked as not placed.",
+    "other": "{n} parts of the file didn’t match a chapter; their changes are kept, marked as not placed."
+  },
+  "{n} changes one reviewer made and another took back were left out.": {
+    "one": "{n} change one reviewer made and another took back was left out.",
+    "other": "{n} changes one reviewer made and another took back were left out."
+  },
+  "{n} footnotes weren’t read.": {
+    "one": "{n} footnote wasn’t read.",
+    "other": "{n} footnotes weren’t read."
+  },
+  "{n} text boxes weren’t read.": {
+    "one": "{n} text box wasn’t read.",
+    "other": "{n} text boxes weren’t read."
+  },
+  "{n} changes to tables weren’t read.": {
+    "one": "{n} change to a table wasn’t read.",
+    "other": "{n} changes to tables weren’t read."
   }
 }

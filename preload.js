@@ -84,6 +84,12 @@ contextBridge.exposeInMainWorld('neo', {
     items: () => ipcRenderer.invoke('palette:items'),
     run: (key, label, path) => ipcRenderer.invoke('palette:run', key, label, path)
   },
+  // an editor's Word file (phase 6; main.js; Pocket has none)
+  review: {
+    pick: () => ipcRenderer.invoke('review:pick'),
+    read: (path) => ipcRenderer.invoke('review:read', path),
+    keep: (bookId, token, name) => ipcRenderer.invoke('review:keep', bookId, token, name)
+  },
   // versions (main.js and slog-history.js; Pocket has none)
   history: {
     mark: (bookId, name, auto) => ipcRenderer.invoke('history:mark', bookId, name, auto),

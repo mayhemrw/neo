@@ -777,7 +777,8 @@ ipcMain.handle('book:duplicate', (_e, bookId, title) => {
   const dest = bookDir(id);
   // a chapter iCloud hasn't brought down yet would be missing from the copy
   // (the Scribe's Log and versions aren't copied, so they needn't be down)
-  const own = (name) => name === slog.LOG_DIR || name === slogHistory.VERSIONS_DIR;
+  // (nor are an editor's files and what was decided about them, phase 6)
+  const own = (name) => name === slog.LOG_DIR || name === slogHistory.VERSIONS_DIR || name === REVIEWS_DIR || name === 'review.json';
   const waiting = (dir) => fs.readdirSync(dir, { withFileTypes: true }).some((e) => (e.isDirectory() ? !(dir === src && own(e.name)) && waiting(path.join(dir, e.name)) : /\.icloud$/.test(e.name)));
   if (waiting(src)) throw new Error('Some of this book is still downloading from iCloud. Try again in a moment');
   const copyDir = (from, to) => {
@@ -2422,6 +2423,55 @@ ipcMain.handle('import:files', async (_e, paths) => {
   return out;
 });
 
+// ---------------------------------------------------------------------------
+// The Word round-trip (phase 6): an editor's .docx read for its tracked
+// changes and comments (review-docx.js), and a copy kept in the book's
+// reviews/ folder. The window matches it to the book (review-match.js)
+// and keeps what it found in review.json; nothing here changes a chapter.
+// A file the window may keep is known by a token, never by a path the
+// window hands back.
+// ---------------------------------------------------------------------------
+const REVIEWS_DIR = 'reviews';
+const reviewFiles = new Map(); // token → the file's path
+async function reviewRead(fp) {
+  if (!/\.docx$/i.test(fp || '')) return { error: t('That isn’t a Word file (.docx).') };
+  try {
+    const bytes = new Uint8Array(fs.readFileSync(fp));
+    const model = await require('./review-docx.js').readDocx(bytes, require('./slog-zip.js'), (b) => require('zlib').inflateRawSync(b));
+    const token = require('crypto').randomBytes(12).toString('hex');
+    reviewFiles.set(token, fp);
+    return { token, name: path.basename(fp), model };
+  } catch (err) {
+    logError('import review', err);
+    return { error: t('NEO couldn’t read {file}: {why}', { file: path.basename(fp), why: err.message }) };
+  }
+}
+ipcMain.handle('review:pick', async () => {
+  const win = BrowserWindow.getFocusedWindow();
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    title: t('Import Review'),
+    properties: ['openFile'],
+    filters: [{ name: t('Word'), extensions: ['docx'] }]
+  });
+  if (canceled || !filePaths.length) return null;
+  return reviewRead(filePaths[0]);
+});
+// a .docx dropped on the open book (the window has its path from the drop)
+ipcMain.handle('review:read', (_e, fp) => reviewRead(String(fp || '')));
+// keep a copy of a file read above in reviews/<name>.docx (a new name if
+// that's taken). Returns the copy's file name.
+ipcMain.handle('review:keep', (_e, bookId, token, name) => {
+  const from = reviewFiles.get(token);
+  if (!from) throw new Error('That file isn’t known any more');
+  const base = libName(String(name || 'review').replace(/[^\p{L}\p{N}._ -]+/gu, '-').replace(/^[.-]+/, '').slice(0, 80) || 'review');
+  const dir = path.join(bookDir(bookId), REVIEWS_DIR);
+  fs.mkdirSync(dir, { recursive: true });
+  let file = base + '.docx';
+  for (let n = 2; fs.existsSync(path.join(dir, file)); n++) file = base + '-' + n + '.docx';
+  writeFileDurable(path.join(dir, libName(file)), fs.readFileSync(from));
+  return file;
+});
+
 ipcMain.handle('import:pick', async () => {
   const win = BrowserWindow.getFocusedWindow();
   const { canceled, filePaths } = await dialog.showOpenDialog(win, {
@@ -3052,6 +3102,8 @@ function buildMenu() {
           accelerator: 'CmdOrCtrl+Shift+I',
           click: () => sendToWindow({ type: 'import' })
         },
+        // an editor's Word file, back with their changes and comments (phase 6)
+        { label: t('Import Review…'), click: () => sendToWindow({ type: 'importReview' }) },
         { label: t('Reshelve a Book…'), click: () => sendToWindow({ type: 'reshelve' }) },
         { label: t('Library Folder…'), click: () => { chooseLibraryFolder().catch((err) => logError('library folder', err)); } },
         { type: 'separator' },

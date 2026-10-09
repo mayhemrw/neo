@@ -43,6 +43,7 @@ BrowserWindow.prototype.loadFile = function (file, opts) {
 require('../main.js');
 const JSZip = require('jszip');
 const RD = require('../review-docx.js');
+const RM = require('../review-match.js');
 const Z = require('../slog-zip.js');
 
 let wc;
@@ -200,6 +201,8 @@ test('edited as a reviewer would, it reads back and finds its chapters', async (
   zip.file('word/comments.xml', `<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:comment w:id="0" w:author="Dana Editor" w:date="2026-10-09T10:01:00Z"><w:p w14:paraId="7AAA0001"><w:r><w:t>Which hill?</w:t></w:r></w:p></w:comment></w:comments>`);
   const back = path.join(tmp, 'two-cities-dana-edited.docx');
   fs.writeFileSync(back, await zip.generateAsync({ type: 'nodebuffer' }));
+  sent.edited = back;
+  sent.b = b;
 
   const m = await readDocx(back);
   assert.equal(m.round, sent.round.id, 'the round id came back');
@@ -246,6 +249,116 @@ test('a second round: the last name first, the names to pick from, another round
   let errors = '';
   try { errors = fs.readFileSync(path.join(LIB, 'neo-errors.log'), 'utf8'); } catch { /* none */ }
   assert.equal(errors, '');
+});
+
+const S = `document.getElementById('review-summary')`;
+const summaryLines = () => js(`[...${S}.querySelectorAll('.rv-lines li')].map((li) => li.textContent)`);
+const summaryNotes = () => js(`[...${S}.querySelectorAll('.rv-notes li')].map((li) => li.textContent)`);
+
+test('Import Review: the editor’s change and comment are kept; nothing in the book changes', async () => {
+  const order = await js(`book.chapterOrder`);
+  const before = await js(`JSON.stringify(chapterHTML)`);
+  await js(`(() => { window.__ri = importReview(${JSON.stringify(sent.edited)}); })()`);
+  await until(() => js(`!!${S}`));
+  assert.equal(await js(`${S}.querySelector('.rv-file').textContent`), 'two-cities-dana-edited.docx');
+  assert.deepEqual(await summaryLines(), ['Dana Editor: 1 change, 1 comment']);
+  assert.deepEqual(await summaryNotes(), []);
+  await tick(150);
+  await shot('review-import-summary');
+  await js(`${S}.querySelector('.m-ok').click()`);
+  await js(`window.__ri`);
+  assert.equal(await js(`JSON.stringify(chapterHTML)`), before, 'the book as it was');
+
+  const review = await reviewJson();
+  assert.equal(review.imports.length, 1);
+  const imp = review.imports[0];
+  assert.equal(imp.round, sent.round.id);
+  assert.equal(imp.how, 'bookmarks');
+  assert.equal(imp.file, 'two-cities-dana-edited.docx');
+  assert.equal(imp.copy, sent.round.id + '-Dana-Editor.docx');
+  assert.ok(fs.existsSync(path.join(await bookDirOf(), 'reviews', imp.copy)), 'the copy kept');
+  assert.deepEqual(review.rounds[0].imports, [imp.id]);
+  assert.deepEqual(review.reviewers.map((r) => r.name), ['Dana Editor']);
+  assert.match(review.reviewers[0].color, /^#[0-9a-f]{6}$/);
+  assert.equal(review.suggestions.length, 1);
+  const s = review.suggestions[0];
+  assert.deepEqual([s.kind, s.del, s.ins, s.reviewer, s.chapter, s.round, s.import, s.status, !!s.untracked], ['replace', 'lumbered', 'laboured', 'Dana Editor', order[1], sent.round.id, imp.id, 'open', false]);
+  assert.equal(s.anchor.exact, 'lumbered');
+  assert.ok(s.anchor.pre.endsWith('as it '));
+  assert.equal(review.threads.length, 1);
+  const th = review.threads[0];
+  assert.equal(th.chapter, order[1]);
+  assert.equal(th.anchor.exact, sent.b);
+  assert.deepEqual(th.comments.map((c) => [c.by, c.text]), [['Dana Editor', 'Which hill?']]);
+  // the anchor is found in the chapter as it is today
+  const today = await js(`ReviewMatch.htmlText(chapterHTML[${JSON.stringify(order[1])}])`);
+  const f = RM.findAnchor(today, s.anchor);
+  assert.equal(today.slice(f.o, f.o + f.len), 'lumbered');
+  assert.equal(f.sure, true);
+});
+
+test('changes made without Track Changes are found against the version sent', async () => {
+  const sam = path.join(tmp, 'two-cities-sam.docx');
+  const zip = await JSZip.loadAsync(fs.readFileSync(sam));
+  let doc = await zip.file('word/document.xml').async('string');
+  // typed straight in, untracked: one word changed, one paragraph added
+  assert.ok(doc.includes('a large jaw and a queen with a plain face'));
+  doc = doc.replace('a queen with a plain face', 'a queen with a homely face');
+  const last = CH2[2];
+  const i = doc.indexOf(last);
+  const pEnd = doc.indexOf('</w:p>', i) + 6;
+  doc = doc.slice(0, pEnd) + '<w:p><w:r><w:t>Nobody tracked this line.</w:t></w:r></w:p>' + doc.slice(pEnd);
+  zip.file('word/document.xml', doc);
+  const back = path.join(tmp, 'two-cities-sam-back.docx');
+  fs.writeFileSync(back, await zip.generateAsync({ type: 'nodebuffer' }));
+  await js(`(() => { window.__ri = importReview(${JSON.stringify(back)}); })()`);
+  await until(() => js(`!!${S}`));
+  assert.deepEqual(await summaryLines(), ['Sam Proofreader: 2 made without Track Changes']);
+  await js(`${S}.querySelector('.m-ok').click()`);
+  await js(`window.__ri`);
+  const review = await reviewJson();
+  const mine = review.suggestions.filter((x) => x.round === review.rounds[1].id);
+  assert.deepEqual(mine.map((x) => [x.kind, x.del, x.ins, x.untracked, x.reviewer]), [
+    ['replace', 'plain', 'homely', true, 'Sam Proofreader'],
+    ['insert', '', '\u2029Nobody tracked this line.', true, 'Sam Proofreader']
+  ]);
+  assert.deepEqual(review.reviewers.map((r) => r.name), ['Dana Editor', 'Sam Proofreader']);
+  assert.notEqual(review.reviewers[0].color, review.reviewers[1].color);
+});
+
+test('a file not from NEO: it asks which version, the closest first', async () => {
+  const lo = path.join(__dirname, 'fixtures', 'review', 'lo-tracked.docx');
+  await js(`(() => { window.__ri = importReview(${JSON.stringify(lo)}); })()`);
+  await js(`window.LAST = () => [...document.querySelectorAll('.modal-backdrop:not([hidden])')].pop(); 0`);
+  await until(() => js(`!!LAST() && !!LAST().querySelector('.fr-choice')`));
+  const labels = await js(`[...LAST().querySelectorAll('.fr-choice strong')].map((b) => b.textContent)`);
+  assert.equal(labels.length, 3, labels.join(' | '));
+  assert.ok(labels.includes('The book as it is now'));
+  assert.ok(labels.some((l) => /^Sent to Sam Proofreader \(/.test(l)));
+  assert.equal(await js(`LAST().querySelector('.fr-choice span').textContent`), 'Closest to the file');
+  await tick(150);
+  await shot('review-import-which');
+  await js(`LAST().querySelector('.fr-choice').click()`);
+  await until(() => js(`!!${S}`));
+  const lines = await summaryLines();
+  assert.ok(lines.includes('Sam Proofreader: 1 change'), lines.join(' | '));
+  assert.ok(lines.some((l) => l.startsWith('Dana Editor: 2 changes, 1 comment')), lines.join(' | '));
+  await js(`${S}.querySelector('.m-ok').click()`);
+  await js(`window.__ri`);
+  const review = await reviewJson();
+  assert.equal(review.imports.length, 3);
+  assert.equal(review.imports[2].how, 'headings');
+  assert.ok(fs.readdirSync(path.join(await bookDirOf(), 'reviews')).length === 3);
+  let errors = '';
+  try { errors = fs.readFileSync(path.join(LIB, 'neo-errors.log'), 'utf8'); } catch { /* none */ }
+  assert.equal(errors, '');
+});
+
+test('Import Review… is in the palette, and does nothing on the shelf', async () => {
+  const items = await js(`window.neo.palette.items()`);
+  const it = items.find((x) => x.label === 'Import Review…');
+  assert.ok(it, 'listed');
+  assert.deepEqual(it.path, ['File']);
 });
 
 async function main() {
