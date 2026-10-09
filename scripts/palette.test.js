@@ -179,3 +179,10 @@ test('groups for choosing what\'s listed: by place, in the menu\'s order', () =>
     ['Format', ['Café Lights']]
   ]);
 });
+
+test('the whole name typed comes first, whatever the menu\'s order', () => {
+  const items = [C('Manuscript Format…', ['File', 'Export']), C('Manuscript', ['View', 'Go To']), C('Notes', ['View', 'Go To'])];
+  assert.deepEqual(filter(items, 'manuscript'), ['Manuscript', 'Manuscript Format…']);
+  assert.deepEqual(filter(items, 'MANUSCRIPT '), ['Manuscript', 'Manuscript Format…']);
+  assert.deepEqual(filter(items, 'manu form'), ['Manuscript Format…']);
+});

@@ -1940,7 +1940,7 @@ ${spine > 0.3 ? box(spineX, bleed, spine, th, 'vert', esc(t('SPINE'))) : ''}
 let paperbackBusy = false;
 ipcMain.handle('print:paperback', async (_e, job) => {
   // one at a time: they share the print window
-  if (paperbackBusy) throw new Error('Another paperback is still being set');
+  if (paperbackBusy || manuscriptBusy) throw new Error(t('Another export is still being set. Try again when it’s done.'));
   paperbackBusy = true;
   try {
     return await makePaperback(job);
@@ -1994,6 +1994,31 @@ async function makePaperback({ html, trim, paper, pagesGuess, title, author, def
     tooFew: pages < 24, tooMany: pages > KDP_MAX_PAGES[paper]
   };
 }
+
+// File → Export → Manuscript Format… as a PDF: manuscript.js's page laid
+// out by Paged.js (the running header in the margin box, the story numbered
+// from 1) and saved where the writer says. Returns { file, pages } or null.
+let manuscriptBusy = false;
+ipcMain.handle('print:manuscript', async (_e, { html, paper, defaultName }) => {
+  if (manuscriptBusy || paperbackBusy) throw new Error(t('Another export is still being set. Try again when it’s done.'));
+  manuscriptBusy = true;
+  try {
+    const [width, height] = paper === 'A4' ? [8.2677, 11.6929] : [8.5, 11];
+    const { pdf, pages } = await renderPaged(String(html || ''), { width, height });
+    const win = BrowserWindow.getFocusedWindow();
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+      defaultPath: path.join(exportFolder(), String(defaultName || 'manuscript') + '.pdf'),
+      filters: [{ name: 'PDF', extensions: ['pdf'] }]
+    });
+    if (canceled || !filePath) return null;
+    rememberExportFolder(filePath);
+    try { fs.writeFileSync(filePath, pdf); } catch (err) { logError('manuscript save', err); throw new Error('Could not write the file (' + ((err && err.message) || err) + ')'); }
+    return { file: filePath, pages };
+  } finally {
+    manuscriptBusy = false;
+    closePrintWindow();
+  }
+});
 
 // Writes a timestamped snapshot to the library's Exports folder, then hands it
 // to your email — an outside-the-machine paper trail for provenance.
@@ -2966,6 +2991,8 @@ function buildMenu() {
             { label: 'EPUB (.epub)', click: () => sendToWindow({ type: 'export', format: 'epub' }) },
             { type: 'separator' },
             { label: t('Paperback for KDP…'), click: () => sendToWindow({ type: 'export', format: 'paperback' }) },
+            // agents' and editors' format, as Word or PDF (phase 5)
+            { label: t('Manuscript Format…'), click: () => sendToWindow({ type: 'export', format: 'manuscript' }) },
             { type: 'separator' },
             {
               id: 'export-custom-chapter-titles',

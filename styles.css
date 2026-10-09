@@ -1869,6 +1869,25 @@ body.light .ps-paper { box-shadow: 0 20px 60px rgba(0,0,0,0.22); }
 
 /* dialogs */
 body.light .modal-backdrop { background: rgba(60,55,45,0.28); }
+/* File → Export → Manuscript Format… (app.js, MANUSCRIPT FORMAT) */
+.ms-modal { width: 640px; }
+.ms-modal .ms-lead { font-size: 13px; color: var(--muted); }
+.ms-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.ms-modal fieldset { border: none; margin: 0; padding: 0; min-width: 0; }
+.ms-modal legend { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 8px; }
+.ms-modal label { margin-bottom: 10px; font-size: 12.5px; }
+.ms-modal input[type="text"], .ms-modal input[type="email"], .ms-modal textarea { margin-top: 4px; }
+.ms-modal textarea { display: block; width: 100%; margin-top: 4px; padding: 8px 12px; background: var(--bg); border: 1px solid #3a3a3a; border-radius: 6px; color: #eee; font: inherit; font-size: 13px; resize: vertical; }
+.ms-modal textarea:focus { outline: none; border-color: var(--accent); }
+.ms-modal .ms-inline { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.ms-modal .ms-inline input { display: inline; width: auto; margin: 0; }
+.ms-font { display: flex; gap: 16px; margin: 4px 0 6px; }
+.ms-header-eg { font-size: 11.5px !important; color: var(--muted); margin: -4px 0 10px !important; font-family: "Times New Roman", serif; }
+.ms-count { font-size: 12.5px !important; color: var(--muted); margin: 6px 0 14px !important; }
+.ms-actions { display: flex; justify-content: flex-end; gap: 10px; }
+body.light .ms-modal textarea { background: #fff; border-color: #cfcac0; color: #1c1a17; }
+@media (max-width: 700px) { .ms-cols { grid-template-columns: 1fr; } }
+
 /* The command palette (app.js, COMMAND PALETTE): narrow, near the top */
 .modal-backdrop.palette-backdrop { align-items: flex-start; padding-top: calc(12vh / var(--ui-zoom)); }
 .palette-modal { width: 560px; padding: 10px; display: flex; flex-direction: column; overflow: hidden; max-height: calc(70vh / var(--ui-zoom)); box-shadow: 0 18px 60px rgba(0,0,0,0.5); }

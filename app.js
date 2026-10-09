@@ -14081,6 +14081,8 @@ function paletteScore(item, q) {
   const want = paletteWords(q);
   if (!want.length) return 0;
   const name = paletteWords(item.label);
+  // the whole name typed: that one first ("manuscript" is the tab, not Manuscript Format…)
+  if (want.join(' ') === name.join(' ')) return -1;
   const where = paletteWords((item.path || []).join(' '));
   const all = paletteFold(item.label + ' ' + (item.path || []).join(' '));
   let score = 0;
@@ -14331,6 +14333,8 @@ async function showPalette() {
 /* ================================================================== */
 
 const escHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// …and for a value between quotation marks (an attribute)
+const escAttr = (s) => escHtml(s).replace(/"/g, '&quot;');
 
 // Turn parsed manuscripts into books on a shelf — used by the file picker
 // and by dropping files from Finder straight onto a shelf.
@@ -15763,6 +15767,211 @@ function bookExportData() {
     contents,
     contentsChapters: true
   };
+}
+
+/* ================================================================== */
+/*  MANUSCRIPT FORMAT                                                  */
+/*  File → Export → Manuscript Format… (phase 5): the open book the    */
+/*  way agents and editors ask for it, as Word or PDF. The pages are   */
+/*  manuscript.js's (window.NeoManuscript); this is the dialog, which  */
+/*  remembers the writer's contact details (library.manuscript, every  */
+/*  book) and the byline and header (book.manuscript, this book), and  */
+/*  the book's chapters handed over as runs. Desktop only.             */
+/* ================================================================== */
+
+// What a submission carries: the story (chapters, a prologue, an
+// epilogue, parts) and an epigraph. The copyright, dedication, contents,
+// acknowledgments and about-the-author pages stay out.
+function manuscriptSections() {
+  const { sections } = exportChapters();
+  return sections.filter((s) => s.kind === 'chapter' || s.kind === 'part' || s.kind === 'epigraph').map((s) => ({
+    kind: s.kind, heading: s.heading || '', partTitle: s.partTitle || '',
+    paras: s.paras.map((p) => ({ sceneBreak: p.sceneBreak, poetry: p.poetry, flush: p.flush, align: p.align, runs: p.runs || [] })),
+    words: s.paras.reduce((n, p) => n + (p.sceneBreak ? 0 : countWords(p.text || '')), 0)
+  }));
+}
+// the name on the book, as NEO knows it ("Anonymous", the screen's stand-in
+// for no name, is no byline)
+function manuscriptByline() {
+  const real = (x) => (x && String(x).trim() !== t('Anonymous') ? String(x).trim() : '');
+  return real(book.author) || real(library.authorName) || '';
+}
+// what the dialog starts with, from what was kept
+function manuscriptDefaults() {
+  const lib = library.manuscript || {};
+  const mine = (book && book.manuscript) || {};
+  const byline = mine.byline || manuscriptByline();
+  return {
+    name: lib.name != null ? lib.name : (library.authorName || ''),
+    address: lib.address || '', phone: lib.phone || '',
+    email: lib.email != null ? lib.email : (library.emailAddress || ''),
+    font: lib.font === 'courier' ? 'courier' : 'times',
+    end: lib.end !== false,
+    byline,
+    headerName: mine.headerName || NeoManuscript.surnameOf(byline),
+    headerTitle: mine.headerTitle || String(book.title || t('Untitled')).toLocaleUpperCase(writingLanguage())
+  };
+}
+function manuscriptModel(v, sections) {
+  const words = sections.reduce((n, s) => n + s.words, 0);
+  const shown = NeoManuscript.roundWords(words);
+  const chapters = sections.filter((s) => s.kind === 'chapter');
+  return {
+    title: book.title || t('Untitled'), byline: v.byline, headerName: v.headerName, headerTitle: v.headerTitle,
+    contact: { name: v.name, lines: [...String(v.address || '').split(/\r?\n/), v.phone, v.email] },
+    wordsText: t('about {n} words', { n: shown.toLocaleString(NeoI18n.getLocale()) }),
+    byText: v.byline ? t('by {name}', { name: v.byline }) : '',
+    endText: v.end ? t('END') : '',
+    font: v.font, paper: window.neo.paper || 'Letter', lang: writingLanguage(),
+    // one story with no chapters: the short-story layout
+    short: sections.length === 1 && chapters.length === 1 && !chapters[0].heading,
+    sections, words
+  };
+}
+// Courier Prime (NEO's own Courier, bundled) goes into the PDF; Times New
+// Roman is the computer's own
+async function manuscriptFontFaces(font) {
+  if (font !== 'courier') return '';
+  let css = '';
+  for (const sheet of document.styleSheets) {
+    let rules = [];
+    try { rules = [...sheet.cssRules]; } catch { continue; }
+    for (const r of rules) {
+      if (!(r instanceof CSSFontFaceRule) || r.style.getPropertyValue('font-family').replace(/["']/g, '').trim() !== 'Courier Prime') continue;
+      const src = r.style.getPropertyValue('src').match(/url\(["']?([^"')]+)["']?\)/);
+      if (!src) continue;
+      try {
+        const bytes = new Uint8Array(await (await fetch(new URL(src[1], sheet.href || location.href))).arrayBuffer());
+        let bin = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+        const range = r.style.getPropertyValue('unicode-range');
+        css += `@font-face { font-family: 'Courier Prime'; src: url(data:font/woff2;base64,${btoa(bin)}) format('woff2'); font-weight: ${r.style.getPropertyValue('font-weight') || 400}; font-style: ${r.style.getPropertyValue('font-style') || 'normal'};${range ? ' unicode-range: ' + range + ';' : ''} }\n`;
+      } catch { /* the fallbacks stand in */ }
+    }
+  }
+  return css;
+}
+
+// The dialog: the contact block, the byline and header, the font, END, and
+// the two ways out. Resolves to { values, as: 'docx' | 'pdf' } or null.
+function manuscriptDialog(v, words) {
+  return new Promise((resolve) => {
+    const bd = document.createElement('div');
+    bd.className = 'modal-backdrop';
+    bd.id = 'manuscript-dialog';
+    // (the values go in from code: a quotation mark in a title can't cut one short)
+    const field = (k, label, ph = '', type = 'text') => `<label>${escHtml(label)}<input data-k="${k}" type="${type}" placeholder="${escAttr(ph)}" spellcheck="false" autocomplete="off"></label>`;
+    bd.innerHTML = `
+      <div class="modal ms-modal" role="dialog" aria-modal="true" aria-labelledby="ms-title">
+        <h2 id="ms-title">${escHtml(t('Manuscript Format'))}</h2>
+        <p class="ms-lead">${escHtml(t('The way agents and editors ask for it: double-spaced 12 point, one-inch margins, a title page with your details, and your name, the title and the page number at the top of every page.'))}</p>
+        <div class="ms-cols">
+          <fieldset><legend>${escHtml(t('Your details, for the title page'))}</legend>
+            ${field('name', t('Name'), t('Your legal name'))}
+            <label>${escHtml(t('Address'))}<textarea data-k="address" rows="2" spellcheck="false" placeholder="${escAttr(t('Street, city, postcode'))}"></textarea></label>
+            ${field('phone', t('Phone'))}
+            ${field('email', t('Email'), '', 'email')}
+          </fieldset>
+          <fieldset><legend>${escHtml(t('This book'))}</legend>
+            ${field('byline', t('Byline'), t('The name on the book'))}
+            ${field('headerName', t('Name in the header'))}
+            ${field('headerTitle', t('Title in the header'))}
+            <p class="ms-header-eg"></p>
+            <div class="ms-font" role="radiogroup" aria-label="${escAttr(t('Font'))}">
+              <label class="ms-inline"><input type="radio" name="ms-font" value="times"${v.font !== 'courier' ? ' checked' : ''}> Times New Roman</label>
+              <label class="ms-inline"><input type="radio" name="ms-font" value="courier"${v.font === 'courier' ? ' checked' : ''}> Courier</label>
+            </div>
+            <label class="ms-inline"><input type="checkbox" data-k="end"${v.end ? ' checked' : ''}> ${escHtml(t('“END” after the last line'))}</label>
+          </fieldset>
+        </div>
+        <p class="ms-count">${escHtml(t('{shown} on the title page ({n} counted).', { shown: t('about {n} words', { n: NeoManuscript.roundWords(words).toLocaleString(NeoI18n.getLocale()) }), n: words.toLocaleString(NeoI18n.getLocale()) }))}</p>
+        <div class="ms-actions">
+          <button class="m-cancel btn-quiet">${escHtml(t('Cancel'))}</button>
+          <button class="btn-quiet ms-docx">${escHtml(t('Save as Word (.docx)'))}</button>
+          <button class="btn-gold ms-pdf">${escHtml(t('Save as PDF'))}</button>
+        </div>
+      </div>`;
+    bd.querySelectorAll('[data-k]').forEach((el) => { if (el.type === 'checkbox') el.checked = !!v[el.dataset.k]; else el.value = v[el.dataset.k] || ''; });
+    const read = () => {
+      const out = { ...v };
+      bd.querySelectorAll('[data-k]').forEach((el) => { out[el.dataset.k] = el.type === 'checkbox' ? el.checked : el.value.trim(); });
+      out.font = (bd.querySelector('input[name="ms-font"]:checked') || {}).value || 'times';
+      return out;
+    };
+    const eg = () => { bd.querySelector('.ms-header-eg').textContent = t('At the top right: {header}', { header: NeoManuscript.headerText(read()) + '1' }); };
+    // the header's name follows the byline until it's been changed by hand
+    let nameTouched = v.headerName !== NeoManuscript.surnameOf(v.byline);
+    bd.querySelector('[data-k="headerName"]').addEventListener('input', () => { nameTouched = true; });
+    bd.querySelector('[data-k="byline"]').addEventListener('input', (e) => {
+      if (!nameTouched) bd.querySelector('[data-k="headerName"]').value = NeoManuscript.surnameOf(e.target.value);
+    });
+    bd.addEventListener('input', eg);
+    eg();
+    const done = (val) => { bd.remove(); resolve(val); };
+    bd.querySelector('.m-cancel').onclick = () => done(null);
+    bd.querySelector('.ms-docx').onclick = () => done({ values: read(), as: 'docx' });
+    bd.querySelector('.ms-pdf').onclick = () => done({ values: read(), as: 'pdf' });
+    bd.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); done(null); } });
+    document.body.appendChild(bd);
+    const first = bd.querySelector(v.name ? '.ms-pdf' : '[data-k="name"]');
+    first.focus();
+  });
+}
+
+// What was typed is kept: the details for every book, the byline and the
+// header for this one (only where they differ from what NEO would choose)
+async function manuscriptKeep(v) {
+  library.manuscript = { name: v.name, address: v.address, phone: v.phone, email: v.email, font: v.font, end: !!v.end };
+  await writeLibrary(library);
+  const mine = {};
+  if (v.byline && v.byline !== manuscriptByline()) mine.byline = v.byline;
+  if (v.headerName && v.headerName !== NeoManuscript.surnameOf(v.byline)) mine.headerName = v.headerName;
+  if (v.headerTitle && v.headerTitle !== String(book.title || t('Untitled')).toLocaleUpperCase(writingLanguage())) mine.headerTitle = v.headerTitle;
+  const before = JSON.stringify(book.manuscript || {});
+  if (Object.keys(mine).length) book.manuscript = mine; else delete book.manuscript;
+  if (JSON.stringify(book.manuscript || {}) !== before) await saveMeta();
+}
+
+let manuscriptBusy = false;
+async function exportManuscript() {
+  if (!book) { toast(t('Open a book first')); return; }
+  if (isScript()) { toast(t('A script has its own format: Export → PDF.')); return; }
+  if (!window.NeoManuscript || manuscriptBusy) return;
+  // never over another dialog (the menu stays open under one), never twice
+  if (document.querySelector('.modal-backdrop:not([hidden])')) return;
+  flushAllSaves();
+  const sections = manuscriptSections();
+  if (!sections.some((s) => s.kind === 'chapter' && s.words)) { toast(t('There’s no story to send yet.')); return; }
+  manuscriptBusy = true;
+  try {
+    await manuscriptRun(sections);
+  } finally {
+    manuscriptBusy = false;
+  }
+}
+async function manuscriptRun(sections) {
+  const chosen = await manuscriptDialog(manuscriptDefaults(), sections.reduce((n, s) => n + s.words, 0));
+  if (!chosen || !book) return;
+  // (remembering is a nicety: a library that can't be written now doesn't stop the export)
+  try { await manuscriptKeep(chosen.values); } catch (err) { window.neo.logError('manuscript details: ' + (err && err.stack || err)); }
+  const m = manuscriptModel(chosen.values, sections);
+  const defaultName = safeName(book.title) + '-' + safeName(t('manuscript'));
+  try {
+    let saved;
+    if (chosen.as === 'docx') {
+      saved = await window.neo.exportSave({ format: 'docx', defaultName, zipEntries: NeoManuscript.docxEntries(m) });
+    } else {
+      toast(t('Setting the pages…'));
+      const res = await window.neo.printManuscript({ html: NeoManuscript.html(m, { fontFaces: await manuscriptFontFaces(m.font) }), paper: m.paper, defaultName });
+      saved = res && res.file;
+      if (saved) toast(t('Exported: {file} ({pages} pages)', { file: saved.split(/[\\/]/).pop(), pages: res.pages }), 6000);
+      return;
+    }
+    if (saved) toast(t('Exported: {file}', { file: saved.split(/[\\/]/).pop() }));
+  } catch (err) {
+    window.neo.logError('export manuscript: ' + (err && err.stack || err));
+    toast(t('Couldn’t export: {error}', { error: plainError(err) }), 8000);
+  }
 }
 
 /* ================================================================== */
@@ -17210,6 +17419,7 @@ async function exportFromShelf(bookId, format) {
 async function doExport(format, chId = null) {
   if (!book) { toast(t('Open a book first')); return; }
   if (format === 'paperback') { await printPaperback(); return; }
+  if (format === 'manuscript') { await exportManuscript(); return; }
   // a script leaves as a PDF set the way scripts print, or as Fountain
   if (isScript()) { await spExport(['pdf', 'fdx'].includes(format) ? format : 'fountain'); return; }
   flushAllSaves();
