@@ -619,6 +619,25 @@
 
   // How close a file is to a version of the book, 0 to 1 (for choosing which
   // version a file with no round of NEO's was sent from)
+  // How much of a file is this book's own words: the share of its
+  // five-word stretches found in the chapters (null when the file is too
+  // short to tell). Common words don't count for two books by one writer,
+  // as they would in a likeness of words alone.
+  function shingles(text) {
+    const w = String(text).toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+    const out = new Set();
+    for (let i = 0; i + 5 <= w.length; i++) out.add(w.slice(i, i + 5).join(' '));
+    return out;
+  }
+  function overlap(model, chapters) {
+    const file = shingles(RD.joined(model, 'before').map((p) => p.text).join(' '));
+    if (file.size < 20) return null;
+    const book = shingles(chapters.map((c) => c.text).join(' '));
+    let n = 0;
+    for (const x of file) if (book.has(x)) n++;
+    return n / file.size;
+  }
+
   function closeness(model, chapters) {
     const file = RD.joined(model, 'before').map((p) => p.text).join(' ');
     return likeness(file, chapters.map((c) => c.text).join(' '));
@@ -702,6 +721,7 @@
     return out;
   }
 
+  exports.overlap = overlap;
   exports.reviewerTag = reviewerTag;
   exports.mergeReview = mergeReview;
   exports.reviewerNames = reviewerNames;

@@ -1031,6 +1031,61 @@ test('Import Review… is in the palette, and does nothing on the shelf', async 
   assert.deepEqual(it.path, ['File']);
 });
 
+test('a file from another book: NEO says which book it’s from and imports it there; one that isn’t this book’s is asked about', async () => {
+  const twoCities = await js('book.id');
+  const reviewsBefore = JSON.stringify((await reviewJson()).imports);
+  // a second book, sent to an editor
+  const md = path.join(tmp, 'harbor.md');
+  fs.writeFileSync(md, ['# Chapter 1', 'The harbor was quiet before the storm, and the gulls wheeled over the empty slips while the boats rocked at their moorings.', 'Mara counted the boats twice and found that one of them was missing from the far end of the long stone pier.'].join('\n\n'));
+  const harbor = await js(`(async () => {
+    const results = await window.neo.importFiles([${JSON.stringify(md)}]);
+    await addImportedBooks(results, library.shelves[0]);
+    const ids = library.shelves[0].bookIds;
+    await openBook(ids[ids.length - 1]);
+    return book.id;
+  })()`);
+  await tick(800);
+  const sentFile = path.join(tmp, 'renamed-by-the-editor.docx');
+  await sendTo('Dana Editor', sentFile);
+  const edited2 = await edited(sentFile, path.join(tmp, 'final-FINAL-v3.docx'), (doc) => splice(doc, 'quiet', DEL('Dana Editor', 'quiet') + INS('Dana Editor', 'still')));
+  // back to A Tale of Two Cities, and the harbor's file imported there by mistake
+  await js(`openBook(${JSON.stringify(twoCities)})`);
+  await until(() => js(`book.id === ${JSON.stringify(twoCities)}`));
+  await tick(600);
+  await js(`(() => { window.__ri = importReview(${JSON.stringify(edited2)}); })()`);
+  await js(`window.LAST = () => [...document.querySelectorAll('.modal-backdrop:not([hidden])')].pop(); 0`);
+  await until(() => js(`!!LAST() && /another book/.test(LAST().textContent)`));
+  assert.match(await js(`LAST().textContent`), /was sent from “harbor”|was sent from “The Harbor”|was sent from “/);
+  await tick(150);
+  await shot('review-wrong-book');
+  await js(`LAST().querySelector('.fr-choice').click()`);
+  await until(() => js(`!!${S}`));
+  assert.equal(await js('book.id'), harbor, 'the harbor book opened');
+  assert.deepEqual(await summaryLines(), ['Dana Editor: 1 change']);
+  await js(`${S}.querySelector('.m-ok').click()`);
+  await js(`window.__ri`);
+  assert.equal((await reviewJson()).imports.length, 1, 'in the harbor book');
+  // the same file with NEO's marks taken out (as if from somewhere else),
+  // into A Tale of Two Cities: it doesn't look like this book
+  const bare = path.join(tmp, 'bare.docx');
+  {
+    const zip = await JSZip.loadAsync(fs.readFileSync(edited2));
+    zip.remove('docProps/custom.xml');
+    fs.writeFileSync(bare, await zip.generateAsync({ type: 'nodebuffer' }));
+  }
+  await js(`openBook(${JSON.stringify(twoCities)})`);
+  await until(() => js(`book.id === ${JSON.stringify(twoCities)}`));
+  await tick(600);
+  await js(`(() => { window.__ri = importReview(${JSON.stringify(bare)}); })()`);
+  await until(() => js(`!!LAST() && /Which version/.test(LAST().textContent)`));
+  await js(`LAST().querySelector('.fr-choice').click()`);
+  await until(() => js(`!!LAST() && /doesn’t look like this book/.test(LAST().textContent)`));
+  assert.match(await js(`LAST().textContent`), /Only \d+% of bare\.docx is in “A Tale of Two Cities”/);
+  await js(`LAST().querySelector('.m-cancel').click()`);
+  await js(`window.__ri`);
+  assert.equal(JSON.stringify((await reviewJson()).imports), reviewsBefore, 'nothing imported into the wrong book');
+});
+
 async function main() {
   await app.whenReady();
   let failed = 0;

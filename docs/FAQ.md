@@ -115,6 +115,10 @@ That's fine. NEO knows which version the editor started from and places each cha
 
 **File → Import Review…** still reads it. NEO asks which version it was made from, and suggests the closest.
 
+### What if I import the file into the wrong book?
+
+NEO notices. The file it sends to an editor says which book it came from, inside the file, so renaming it doesn't matter. Import it into another book and NEO says where it belongs and offers to open that book and import it there. A file that didn't come from NEO is compared with the book: if it hardly shares a passage with it, NEO asks before importing. Either way, nothing in a book changes until you accept a change.
+
 ### Will my editor see my replies?
 
 Yes, on the next **File → Export → Word for an Editor…** Your replies go into the file as real Word replies, signed with the book's author name (or "Author" if it has none), and threads you resolved are marked done. Threads you resolved and deleted stay home.

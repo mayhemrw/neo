@@ -337,6 +337,8 @@ describe('sending (a file for an editor)', () => {
     assert.match(parts['_rels/.rels'], /Id="rId2" Type="[^"]+\/custom-properties" Target="docProps\/custom.xml"/);
     const m = R.parse(parts);
     assert.equal(m.round, 'r20261009-abcdef');
+    assert.equal(m.book, '', 'no book named unless asked');
+    assert.equal(R.parse(Object.fromEntries(R.forReview(entries(), { round: 'r1', book: 'book-the-harbor-abc123' }).map((e) => [e.path, e.content]))).book, 'book-the-harbor-abc123');
     assert.deepEqual(m.paragraphs.map((p) => p.paraId), ['00000101', '00000102', '00000103']);
     assert.deepEqual(m.paragraphs.map((p) => p.bookmarks.map((b) => b.name)), [['_NEO_ch_1'], [], ['_NEO_ch_2']]);
     assert.equal(m.paragraphs[0].heading, true);

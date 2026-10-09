@@ -720,6 +720,8 @@
     const props = readCustomProps(get('custom'));
     return {
       round: props['NEO.ReviewRound'] || '',
+      // (the book it was sent from: which one, whatever the file is called)
+      book: props['NEO.Book'] || '',
       props: plain(props),
       people: plain(readPeople(get('people'))),
       paragraphs: doc.paragraphs,
@@ -850,7 +852,7 @@
   // in docProps/custom.xml (NEO.ReviewRound), and Track Changes switched on
   // in word/settings.xml, so the editor's changes are tracked from the
   // first keystroke. Returns new entries; `entries` is left as it was.
-  function forReview(entries, { round, start } = {}) {
+  function forReview(entries, { round, start, book = '' } = {}) {
     if (!round) throw new Error('a review export needs its round');
     const next = paraIds(start);
     const out = entries.map((e) => ({ path: e.path, content: e.content }));
@@ -878,7 +880,8 @@
     out.push({
       path: 'docProps/custom.xml',
       content: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">' +
-        '<property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="2" name="NEO.ReviewRound"><vt:lpwstr>' + escAttr(round) + '</vt:lpwstr></property></Properties>'
+        '<property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="2" name="NEO.ReviewRound"><vt:lpwstr>' + escAttr(round) + '</vt:lpwstr></property>' +
+          (book ? '<property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="3" name="NEO.Book"><vt:lpwstr>' + escAttr(book) + '</vt:lpwstr></property>' : '') + '</Properties>'
     });
     addRel(get('_rels/.rels'), 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties', 'docProps/custom.xml');
     addType(get('[Content_Types].xml'), '/docProps/custom.xml', 'application/vnd.openxmlformats-officedocument.custom-properties+xml');

@@ -454,3 +454,14 @@ describe('a paragraph moved in Word', () => {
     assert.equal(text.slice(0, f.o) + r.suggestions[0].ins + text.slice(f.o), ['One.', 'Two.', 'Three.'].join(P));
   });
 });
+
+describe('the right book', () => {
+  test('overlap: an edited copy shares most of its passages with its book, another book by the same writer next to none', () => {
+    const mine = ['It was the best of times, it was the worst of times, it was the age of wisdom, it was the age of foolishness.', 'It was the epoch of belief, it was the epoch of incredulity, it was the season of Light, it was the season of Darkness.'];
+    const other = ['The harbor was quiet before the storm and the gulls wheeled over the empty slips while the boats rocked.', 'Mara counted the boats twice and found that one of them was missing from the end of the pier.'];
+    const edited = file([{ title: 'Chapter 1', paras: [mine[0].replace('wisdom', 'insight'), mine[1]] }]);
+    assert.ok(M.overlap(edited, sent([{ id: 'c1', title: 'Chapter 1', paras: mine }])) > 0.6);
+    assert.ok(M.overlap(edited, sent([{ id: 'c1', title: 'Chapter 1', paras: other }])) < 0.05);
+    assert.equal(M.overlap(file([{ title: 'Chapter 1', paras: ['Too short.'] }]), sent([{ id: 'c1', title: 'Chapter 1', paras: other }])), null, 'too short to tell');
+  });
+});

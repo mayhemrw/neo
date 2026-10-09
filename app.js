@@ -16264,7 +16264,7 @@ async function exportForEditor() {
     const round = ReviewDocx.roundId(at);
     const data = bookExportData();
     if (!data.sections.length) { toast(t('There’s nothing in this book to export yet')); return; }
-    const out = reviewWithThreads(ReviewDocx.forReview(buildDocxEntries(data, { marks: true }), { round }), data, review);
+    const out = reviewWithThreads(ReviewDocx.forReview(buildDocxEntries(data, { marks: true }), { round, book: bookId }), data, review);
     const entries = out.entries;
     const day = new Date(at).toLocaleDateString(NeoI18n.getLocale(), { month: 'short', day: 'numeric' });
     const defaultName = safeName(book.title) + '-' + safeName(to);
@@ -16459,7 +16459,25 @@ const reviewNewId = (pre) => pre + Date.now().toString(36) + Math.random().toStr
 // from (review-match.js), a copy kept in reviews/, and every change and
 // comment kept in review.json. Nothing in the book changes here.
 let reviewImporting = false;
-async function importReview(filePath = null) {
+// A file sent from another book (it says so, or its round is that book's):
+// { id, title }, or null
+async function reviewHomeOf(model, bookId, review) {
+  let id = model.book && model.book !== bookId ? model.book : null;
+  if (!id && !model.book && model.round && !review.rounds.some((r) => r.id === model.round)) {
+    const ids = [...new Set((library.shelves || []).flatMap((sh) => sh.bookIds || []))].filter((x) => x !== bookId);
+    for (const other of ids) {
+      let r = null;
+      try { r = await window.neo.readJSON(other, 'review', null); } catch { /* none */ }
+      if (r && Array.isArray(r.rounds) && r.rounds.some((x) => x && x.id === model.round)) { id = other; break; }
+    }
+  }
+  if (!id) return null;
+  let meta = null;
+  try { meta = await shelfMeta(id); } catch { /* gone */ }
+  return { id, title: (meta && meta.title) || '', there: !!meta };
+}
+
+async function importReview(filePath = null, already = null) {
   if (!book) { toast(t('Open the book the file belongs to first.')); return; }
   if (isScript()) { toast(t('Reviews are for books; a script’s Word file can be imported as a new script.')); return; }
   const rv = window.neo && window.neo.review;
@@ -16469,11 +16487,26 @@ async function importReview(filePath = null) {
   const bookId = book.id;
   try {
     flushAllSaves();
-    const got = filePath ? await rv.read(filePath) : await rv.pick();
+    const got = already || (filePath ? await rv.read(filePath) : await rv.pick());
     if (!got || !book || book.id !== bookId) return;
     if (got.error) { toast(got.error, 8000); return; }
     const model = got.model;
     const review = await reviewLoad(bookId);
+    // the wrong book? NEO's own file says which book it came from, whatever
+    // it's called now
+    const home = await reviewHomeOf(model, bookId, review);
+    if (home) {
+      const title = home.title || t('Untitled');
+      const go = await optionModal(escHtml(t('This file is from another book')),
+        escHtml(t('{file} was sent from “{title}”, not this book. Its changes belong there.', { file: got.name, title })),
+        home.there ? [{ label: escHtml(t('Open “{title}” and import it there', { title })), value: 'go' }] : []);
+      if (go === 'go' && book && book.id === bookId) {
+        reviewImporting = false;
+        await openBook(home.id);
+        if (book && book.id === home.id) await importReview(null, got);
+      } else if (!home.there) toast(t('That book isn’t in this library. Nothing was imported.'), 6000);
+      return;
+    }
     let round = model.round ? review.rounds.find((r) => r.id === model.round) || null : null;
     let chapters = round ? await reviewSentChapters(bookId, round) : null;
     if (!chapters) {
@@ -16481,6 +16514,16 @@ async function importReview(filePath = null) {
       if (!choice || !book || book.id !== bookId) return;
       round = choice.round;
       chapters = choice.chapters;
+    }
+    // a file from somewhere else that hardly shares a passage with this
+    // book is most likely another book's: asked, never taken quietly
+    const ours = model.book === bookId || (!!model.round && review.rounds.some((r) => r.id === model.round));
+    const share = ours ? null : ReviewMatch.overlap(model, chapters);
+    if (share !== null && share < 0.25) {
+      const go = await optionModal(escHtml(t('This file doesn’t look like this book')),
+        escHtml(t('Only {n}% of {file} is in “{title}”. If it’s another book’s, open that book and import it there.', { n: Math.round(share * 100), file: got.name, title: book.title || t('Untitled') })),
+        [{ label: escHtml(t('Import it anyway')), desc: escHtml(t('Nothing in the book changes until you accept a change.')), value: 'go', danger: true }]);
+      if (go !== 'go' || !book || book.id !== bookId) return;
     }
     const authors = [...new Set(model.changes.map((c) => c.author).concat(model.comments.map((c) => c.author)).filter(Boolean))];
     const fallback = (round && round.to) || authors[0] || t('Editor');
