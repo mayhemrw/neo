@@ -325,14 +325,72 @@ function findRecent(view, found, pool) {
   let k = 0;
   for (const rec of pool.src.records()) {
     if (k++ >= RECENT) break;
-    const s = rec.view.text;
-    const vis = textBefore(s, !rec.view.json);
-    if (vis[s.length] < RECENT_MIN) continue;
-    for (let i = t.indexOf(s); i >= 0; i = t.indexOf(s, i + 1)) {
-      if (free(i, i + s.length)) out.push({ at: i, len: s.length, rec, src: 0, pool });
+    const whole = rec.view.text;
+    // the deletion as it was, and (in a chapter) its words without the tags
+    // at its ends: a paragraph moved can leave as "words</p><p>" and come
+    // back as "<p>words</p>", the diff drawing its edges either way
+    const tries = [[whole, 0]];
+    if (!rec.view.json) {
+      const lead = /^(?:<[^>]*>)+/.exec(whole);
+      const a = lead ? lead[0].length : 0;
+      const tail = /(?:<[^>]*>)+$/.exec(whole.slice(a));
+      const b = whole.length - (tail ? tail[0].length : 0);
+      if ((a || b < whole.length) && b > a) tries.push([whole.slice(a, b), a]);
+    }
+    for (const [s, off] of tries) {
+      const vis = textBefore(s, !rec.view.json);
+      if (vis[s.length] < RECENT_MIN) continue;
+      let hit = false;
+      for (let i = t.indexOf(s); i >= 0; i = t.indexOf(s, i + 1)) {
+        if (free(i, i + s.length)) { out.push({ at: i, len: s.length, rec, src: off, pool }); hit = true; }
+      }
+      if (hit) break;
+    }
+    // …or, for words the window says were moved, the deletion's stretches
+    // found in them piece by piece: the diff can draw a moved paragraph's
+    // edges anywhere ("night was cold.</p><p>The " going, "<p>The night
+    // was cold.</p>" coming), so its words come back in two pieces
+    if (!out.some((m) => m.rec === rec)) {
+      const got = commonPieces(t, whole, out);
+      const vis = textBefore(t, !rec.view.json);
+      const visOf = (m) => vis[m.at + m.len] - vis[m.at];
+      if (got.length && got.reduce((n, m) => n + visOf(m), 0) * 2 >= vis[t.length]) {
+        for (const m of got) out.push({ at: m.at, len: m.len, rec, src: m.src, pool });
+      }
     }
   }
   return out.sort((a, b) => a.at - b.at);
+}
+// The longest stretches `t` and `s` share, longest first, each at least
+// RECENT_MIN long, in parts of `t` no match in `taken` covers and parts of
+// `s` not used twice: [{ at, len, src }]. Only for short texts (a move's
+// words that were too short to be found by the index).
+const COMMON_WORK = 250000;
+function commonPieces(t, s, taken) {
+  if (t.length * s.length > COMMON_WORK) return [];
+  const usedT = new Uint8Array(t.length);
+  for (const m of taken) for (let i = m.at; i < m.at + m.len && i < t.length; i++) usedT[i] = 1;
+  const usedS = new Uint8Array(s.length);
+  const out = [];
+  for (;;) {
+    let best = null;
+    let prev = new Uint16Array(s.length + 1);
+    for (let i = 1; i <= t.length; i++) {
+      const row = new Uint16Array(s.length + 1);
+      for (let j = 1; j <= s.length; j++) {
+        if (!usedT[i - 1] && !usedS[j - 1] && t[i - 1] === s[j - 1]) {
+          row[j] = prev[j - 1] + 1;
+          if (!best || row[j] > best.len) best = { at: i - row[j], len: row[j], src: j - row[j] };
+        }
+      }
+      prev = row;
+    }
+    if (!best || best.len < RECENT_MIN) break;
+    out.push(best);
+    for (let i = best.at; i < best.at + best.len; i++) usedT[i] = 1;
+    for (let j = best.src; j < best.src + best.len; j++) usedS[j] = 1;
+  }
+  return out;
 }
 
 // A restore's words that nothing above placed (a word revised and then

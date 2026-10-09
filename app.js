@@ -15730,7 +15730,8 @@ async function showGuide(name = 'how-to', anchor = '') {
     };
     bd.querySelector('.m-ok').onclick = close;
     bd.addEventListener('click', (e) => {
-      const a = e.target.closest('[data-guide], [data-anchor]');
+      // (the window keeps which guide it shows in data-guide too: only links count)
+      const a = e.target.closest('a[data-guide], a[data-anchor], button[data-guide]');
       if (!a || !bd.contains(a)) return;
       e.preventDefault();
       if (a.dataset.guide) showGuide(a.dataset.guide, a.dataset.anchor || '');
@@ -16984,7 +16985,11 @@ function reviewApplyAccept(items, now, before) {
           const clash = pl.ops.some((x) => taken.some((y) => x.o < y.o + y.len && y.o < x.o + x.len));
           if (clash) { left++; continue; }
           taken.push(...pl.ops);
-          for (const op of pl.ops) op.k = kOf.get(s);
+          for (const op of pl.ops) {
+            op.k = kOf.get(s);
+            // (a move's words arriving: put in as a move of their own, below)
+            if (s.kind === 'move' && op.ins && !op.len) op.moveIn = true;
+          }
           ops.push(...pl.ops);
           s.status = 'accepted';
           s.decided = now;
@@ -16994,7 +16999,13 @@ function reviewApplyAccept(items, now, before) {
         // from the end back; at one point, what's taken out first, then
         // what goes in, the editor's later words first (so they end up after)
         ops.sort((x, y) => y.o - x.o || (y.len ? 1 : 0) - (x.len ? 1 : 0) || y.k - x.k);
-        for (const op of ops) {
+        // A move's words go in as a step of their own, logged as a move (the
+        // words keep where they were first written; an editor who only moved
+        // them didn't write them), after everything else, their places
+        // shifted by what went before them
+        const first = ops.filter((op) => !op.moveIn);
+        const arriving = ops.filter((op) => op.moveIn);
+        for (const op of first) {
           if (op.style) {
             for (const k of ['b', 'i']) {
               if (op.style.now[k] !== undefined && !!op.style.now[k] !== !!op.style.was[k]) reviewStyle(body, op.o, op.len, k, !!op.style.now[k]);
@@ -17002,6 +17013,17 @@ function reviewApplyAccept(items, now, before) {
           } else reviewSplice(body, op.o, op.len, op.ins);
         }
         syncChapter(body, chId);
+        if (arriving.length) {
+          const shifted = arriving.map((m) => ({
+            o: m.o + first.reduce((n, x) => (!x.style && x.o + (x.len || 0) <= m.o && (x.o < m.o || x.len) ? n + (x.ins || '').length - (x.len || 0) : n), 0),
+            ins: m.ins
+          }));
+          shifted.sort((x, y) => y.o - x.o);
+          slogWith({ src: 'move', cause: 'review' }, () => {
+            for (const m of shifted) reviewSplice(body, m.o, 0, m.ins);
+            syncChapter(body, chId);
+          });
+        }
         // the others still waiting in this chapter: found where they are now
         const now2 = reviewParasText(reviewDomParas(body));
         for (const o of d.suggestions) {

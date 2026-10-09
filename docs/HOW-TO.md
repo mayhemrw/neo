@@ -1,6 +1,6 @@
 # How-To Guide
 
-Short recipes for the things this version of NEO adds: the Scribe's Log, versions, Find and Replace, the command palette, manuscript format and sending a book to an editor. Each one is a few steps with the exact menu names. Shortcuts are written for Windows and Linux, with the Mac's after them: Ctrl+K or ⌘K.
+Short recipes for the things this version of NEO adds: the Scribe's Log, versions, Find and Replace, the command palette, manuscript format, and sending a book to an editor. Each one is a few steps with the exact menu names. Shortcuts are written for Windows and Linux, with the Mac's after them: Ctrl+K or ⌘K.
 
 For plain answers about what the Scribe's Log can and can't do, see the [FAQ](FAQ.md).
 
@@ -12,11 +12,11 @@ When someone asks how the book was written:
 
 1. Open the book.
 2. Choose **File → Scribe's Log → Verification Report…**
-3. Pick how exactly to show the times: **Exact times**, **Dates only** or **Weeks only**. Dates only is the usual choice: it shows which days you wrote, not when in the day.
+3. Pick how exactly to show the times: **Exact times**, **Dates only**, or **Weeks only**. Dates only is the usual choice: it shows which days you wrote, not when in the day.
 4. Tick **Also save it as a PDF** if the person would rather have a PDF. If editors' changes are in the book, **Name the editors** puts their names in this one report (the log itself only says Reviewer 1, Reviewer 2).
-5. Click **Save Report…** and pick a place. NEO closes the writing session, timestamps its end and saves the report.
+5. Click **Save Report…** and pick a place. NEO closes the writing session, timestamps its end, and saves the report.
 
-The report is a summary they can read: where the text came from (typed in NEO, pasted, imported, an editor's), how much it was revised, when you wrote, and the outside timestamps. It shows the title, your author name and the chapter titles, and none of the writing itself.
+The report is a summary they can read: where the text came from (typed in NEO, pasted, imported, an editor's), how much it was revised, when you wrote, and the outside timestamps. It shows the title, your author name, and the chapter titles, and none of the writing itself.
 
 If they want to check the record for themselves, send them an export too (next recipe).
 
@@ -35,7 +35,7 @@ The .zip carries its own copy of the verifier, so nobody needs NEO to check it. 
 
 1. Unzip the export and open **verifier.html** in any web browser. It works offline.
 2. Drop the .zip itself on the page (or use **Choose files…**).
-3. Read the result. "Everything here checks." means no part of the record was changed, added or taken out since it was written, and the timestamps match.
+3. Read the result. "Everything here checks." means no part of the record was changed, added, or taken out since it was written, and the timestamps match.
 4. To match a manuscript to the log, click **Check a manuscript…** and pick the .txt or .docx. The verifier tells you whether it's exactly the text the log ends in.
 5. **Check against Bitcoin** looks up the OpenTimestamps proofs in Bitcoin's blocks. It's the only thing the page ever uses the network for.
 
@@ -57,7 +57,7 @@ In the verifier, an export made **With the text** has **Watch a chapter being wr
 4. **Read** shows it as it was. **Compare** shows what's changed since (or against another version, under **Compare with**): struck-through words are gone now, underlined ones are new.
 5. To get it back:
    - The whole chapter: **Restore This Version**. NEO first names a version of the book as it stands, so nothing is lost, and Ctrl+Z or ⌘Z undoes the restore.
-   - Just a passage: select it, click **Copy**, close the window and paste it where you want it.
+   - Just a passage: select it, click **Copy**, close the window, and paste it where you want it.
    - A chapter you deleted: pick it in the chapter list at the top (deleted chapters come after the book's), then **Restore as New Chapter**. It comes back in its old place (or at the end, if the chapter it followed is gone).
 
 Restored words keep their history: words you typed come back as typed, a paste comes back as a paste.
@@ -86,7 +86,7 @@ A hit that runs across formatting (half in italics, say) is never changed blind.
 
 ## Export in manuscript format
 
-For agents and editors who want standard manuscript format: double-spaced 12 point, one-inch margins, a title page with your contact details, and your surname, the title and the page number at the top of each page.
+For agents and editors who want standard manuscript format: double-spaced 12 point, one-inch margins, a title page with your contact details, and your surname, the title, and the page number at the top of each page.
 
 1. Open the book.
 2. Choose **File → Export → Manuscript Format…**
@@ -94,7 +94,7 @@ For agents and editors who want standard manuscript format: double-spaced 12 poi
 4. Check the byline and the header (surname and title), and pick Times New Roman or Courier.
 5. Click **Save as Word (.docx)** or **Save as PDF**.
 
-The word count on the title page is rounded the way agents expect ("about 90,000 words"). The copyright, dedication, contents, acknowledgments and about-the-author pages stay out.
+The word count on the title page is rounded the way agents expect ("about 90,000 words"). The copyright, dedication, contents, acknowledgments, and about-the-author pages stay out.
 
 ## Send your book to an editor and bring it back
 
@@ -135,7 +135,7 @@ A file passed from one editor to the next keeps each person's changes under thei
 
 The last five commands you used come first. To trim the list, hover over the box and click the pencil, then untick what you never use. Typing still finds a hidden command.
 
-## Write on two computers
+## Write on more than one computer
 
 1. On each computer, choose **File → Library Folder…** and pick the same synced folder (Google Drive, iCloud Drive, Dropbox, Syncthing).
 2. Write on either one. Each computer keeps its own chain in the log, so they never trip over each other.

@@ -975,6 +975,19 @@ test('a paragraph moved in Word (here to the chapter’s end) is one change, and
   await until(async () => (await sug((x) => x.id === mine[0].id))[0].status === 'accepted');
   const want = before.filter((x) => x !== X).concat(X);
   assert.deepEqual(await parasNow(), want);
+  // the log: the words arrived as a move, from where they were written,
+  // never as the editor's own
+  await js(`slogSaveAll()`);
+  await tick(600);
+  const dir = path.join(await bookDirOf(), 'scribes-log');
+  const slog = require('../slog.js');
+  const entries = fs.readdirSync(dir).filter(slog.isChunkName).sort().flatMap((n) => slog.parseChunk(fs.readFileSync(path.join(dir, n), 'utf8')).entries);
+  const arrived = entries.filter((e) => e.src === 'move' && e.cause === 'review');
+  assert.ok(arrived.length >= 1, 'a move entry');
+  const lastMove = arrived[arrived.length - 1];
+  assert.ok(lastMove.from && lastMove.from.length, 'it says where the words came from');
+  assert.ok(!entries.some((e) => e.src === 'editor' && e.x && (e.x.ins || []).join('').includes(X)), 'the moved words were never put in as the editor’s');
+  assert.ok(!entries.some((e) => e.src === 'unlogged'));
 });
 
 test('review.json written by another computer meanwhile: taken in, and never written over', async () => {

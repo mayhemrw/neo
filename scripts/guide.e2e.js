@@ -142,9 +142,14 @@ test('the FAQ link and tab switch guides; Help → FAQ… does too', async () =>
   assert.equal(await js(`document.querySelectorAll('#neo-guide').length`), 1, 'never two');
 });
 
-test('Esc closes it', async () => {
+test('Esc closes it; so does Done', async () => {
   await key('Escape');
   await until(async () => !(await isOpen()));
+  menuItem(['Help', 'FAQ…']).click();
+  await until(isOpen);
+  await js(`document.querySelector('#neo-guide .m-ok').click()`);
+  await tick(300);
+  assert.equal(await isOpen(), false, 'Done closes the window (it used to open it again)');
 });
 
 test('the command palette lists both, under Help', async () => {

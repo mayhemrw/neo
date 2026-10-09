@@ -1,6 +1,6 @@
 # FAQ
 
-Plain answers about the Scribe's Log, versions and the Word round-trip. For step-by-step recipes, see the [How-To Guide](HOW-TO.md).
+Plain answers about the Scribe's Log, versions, and the Word round-trip. For step-by-step recipes, see the [How-To Guide](HOW-TO.md).
 
 ## The Scribe's Log
 
@@ -14,7 +14,7 @@ It's on for every book unless you turn it off.
 
 No, and nothing honest can. Here's what it can and can't show.
 
-It **can** show that the log hasn't been altered since each outside timestamp, that the writing happened over the dates shown (not made up afterwards), which text was typed in NEO, moved within the book, pasted from outside or imported, and that it ends in exactly a given manuscript.
+It **can** show that the log hasn't been altered since each outside timestamp, that the writing happened over the dates shown (not made up afterwards), which text was typed in NEO, moved within the book, pasted from outside, or imported, and that it ends in exactly a given manuscript.
 
 It **can't** show that a person pressed the keys, that the ideas weren't a machine's, or anything about writing done outside NEO. Someone who retypes AI text by hand gets a real log of typing. It's a record of the writing process, not proof of authorship.
 
@@ -22,7 +22,7 @@ What it does well is make a fake expensive: because of the timestamps, faking a 
 
 ### Does the log say anything about my computer?
 
-Next to nothing. Computers are only numbered, in the order they first wrote to the book ("Device 1"); nothing about the machines themselves is recorded beyond which version of NEO wrote the log. The report shows the book's title, the author name on it, its chapter titles, the NEO version and the time zone its times are shown in, and none of the writing.
+Next to nothing. Computers are only numbered, in the order they first wrote to the book ("Device 1"); nothing about the machines themselves is recorded beyond which version of NEO wrote the log. The report shows the book's title, the author name on it, its chapter titles, the NEO version, and the time zone its times are shown in, and none of the writing.
 
 ### Who can see my log?
 
@@ -30,24 +30,24 @@ Anyone who can open your book's folder: it lives in the book's `scribes-log` fol
 
 ### Does anything leave my computer?
 
-Only fingerprints. Every 15 minutes while you write, and when a session ends, NEO sends a short hash of the log (a fingerprint that can't be turned back into words) to FreeTSA and to the OpenTimestamps servers, which anchor it in Bitcoin. None of your words, titles or names are sent.
+Only fingerprints. Every 15 minutes while you write, and when a session ends, NEO sends a short hash of the log (a fingerprint that can't be turned back into words) to FreeTSA and to the OpenTimestamps servers, which anchor it in Bitcoin. None of your words, titles, or names are sent.
 
 ### Do I need the internet?
 
 No. Without a connection NEO keeps writing the log and saves the timestamps it owes; they go out when you're back online. The writing in between is dated by your computer's clock until the next outside timestamp covers it, and the report says so.
 
-### What does a publisher, agent or contest get?
+### What does a publisher, agent, or contest get?
 
 Whatever you choose to send:
 
-- **The Verification Report** (**File → Scribe's Log → Verification Report…**): a page (and PDF, if you like) summing up where the text came from, how it was revised, when you wrote and the outside timestamps. No writing in it. You pick exact times, dates only or weeks only, and whether to name your editors.
+- **The Verification Report** (**File → Scribe's Log → Verification Report…**): a page (and PDF, if you like) summing up where the text came from, how it was revised, when you wrote, and the outside timestamps. No writing in it. You pick exact times, dates only, or weeks only, and whether to name your editors.
 - **An export** (**File → Scribe's Log → Export for Verification…**): the log itself, so they can check it, always with exact times. **Without the text** carries no words at all; **With the text** carries every word, deleted passages too. Either one comes with its own verifier page, which runs in any browser, offline, without NEO.
 
 ### What's in an export made "With the text"?
 
-Everything: every word you wrote in NEO, every passage you later deleted, every chapter title and every author name the book has had. Send it only to someone you'd trust with your drafts. **Without the text** is enough for almost every check, including matching a manuscript to the log.
+Everything: every word you wrote in NEO, every passage you later deleted, every chapter title, and every author name the book has had. Send it only to someone you'd trust with your drafts. **Without the text** is enough for almost every check, including matching a manuscript to the log.
 
-### What happens on two computers?
+### What happens when I write on more than one computer?
 
 Each computer keeps its own chain, so two computers writing between syncs never clash. When text written on one shows up on the other, NEO logs it as arrived and traces it back to the computer that wrote it, so typed stays typed and pasted stays pasted. The verifier checks every chain and follows text across them.
 
@@ -93,7 +93,9 @@ No. Open **View → Chapter History…**, pick it from the chapter list (deleted
 
 ### What do my editor's words show as?
 
-As "From an editor". When you accept a change, the words it brings in are logged as the editor's, never as typed by you, so the record stays honest both ways. If you turn down every wording and write your own, that's typed by you.
+As "From an editor", but only the words the editor actually wrote. When you accept a change, the new words it brings in are logged as the editor's, never as typed by you, so the record stays honest both ways.
+
+Words an editor only moved stay yours. Accepting a move logs it as a move, and moved words keep where they were first written, so a paragraph you typed is still typed by you wherever the editor puts it. Words the editor cut are simply deleted. If you turn down every wording and write your own, that's typed by you.
 
 ### Is my editor's name in the log?
 
@@ -135,7 +137,7 @@ Press Ctrl+K or ⌘K and type part of its name. Every menu command is there, wit
 
 ### Do these features work in NEO Pocket?
 
-Not yet. The Scribe's Log, Chapter History, the command palette, Manuscript Format and the Word round-trip are desktop only for now. Find and Replace works on both.
+Not yet. The Scribe's Log, Chapter History, the command palette, Manuscript Format, and the Word round-trip are desktop only for now. Find and Replace works on both.
 
 ### Are these guides in my language?
 

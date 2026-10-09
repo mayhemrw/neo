@@ -19,8 +19,8 @@ const C = require('../verifier/check.js');
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'neo-slog-editor-'));
 
-function setup() {
-  const dir = path.join(tmpRoot, 'book-a');
+function setup(name = 'book-a') {
+  const dir = path.join(tmpRoot, name);
   fs.mkdirSync(path.join(dir, 'chapters'), { recursive: true });
   const meta = { id: 'book-a', title: 'A Book', author: 'Ada', chapterOrder: ['ch-1'] };
   fs.writeFileSync(path.join(dir, 'book.json'), JSON.stringify(meta, null, 2));
@@ -44,6 +44,70 @@ describe('the log: an editor\'s text', { concurrency: 1 }, () => {
     assert.deepEqual(slog.cleanLabel({ src: 'editor', by: 'Dana Editor', cause: 'review' }), { src: 'editor', cause: 'review' });
     assert.deepEqual(slog.cleanLabel({ src: 'typed', by: 'Reviewer 1' }), { src: 'typed' });
     assert.deepEqual(slog.cleanLabel({ src: 'editor', by: 'Reviewer 0' }), { src: 'editor' });
+  });
+
+  test('words an editor only moved stay the writer\'s: a move keeps where they were first written', async () => {
+    const { dir, rec, save } = setup('book-moved');
+    const A = 'Mr. Williams shakes his head in defeat and goes back upstairs to find his glasses again';
+    const B = 'Sam bobs his head from side to side and says nothing at all for a long while';
+    rec.open(dir, 'book-a');
+    save(`<p>${A}.</p><p>${B}.</p>`, { src: 'typed', dur: 4000, ev: 40 });
+    // the editor moved A below B (Word's move, accepted in NEO) and added two
+    // words: as the Review tab puts it in, the words leaving and the
+    // editor's own first, then the moved words arriving, as a move
+    save(`<p>${B}, slowly.</p>`, { src: 'editor', by: 'Reviewer 1', cause: 'review' });
+    save(`<p>${B}, slowly.</p><p>${A}.</p>`, { src: 'move', cause: 'review' });
+    await rec.close('book-a');
+    const files = {};
+    const logDir = path.join(dir, slog.LOG_DIR);
+    for (const n of fs.readdirSync(logDir)) if (fs.statSync(path.join(logDir, n)).isFile()) files[n] = fs.readFileSync(path.join(logDir, n), 'utf8');
+    const res = await V.checkLog(files);
+    assert.equal(res.ok, true, JSON.stringify(res.problems));
+    const doc = Object.values(res.devices[0].traced).find((d) => d.text && d.text.includes(A));
+    const at = doc.text.indexOf(A);
+    assert.deepEqual([...new Set(slog.originsAt(doc, at, A.length).map(([, o]) => o))], ['typed'], 'the moved words are still typed: ' + JSON.stringify(res.devices[0].made));
+    assert.ok((res.devices[0].made['editor:Reviewer 1'] || 0) <= ', slowly'.length + 1, JSON.stringify(res.devices[0].made));
+  });
+
+  test('a short paragraph an editor moved stays the writer\'s too, however the diff draws its edges', async () => {
+    const { dir, rec, save } = setup('book-short');
+    const X = 'The night was cold.';
+    const Y = 'It was the Dover road that lay before the first of the persons.';
+    const Z = 'He walked uphill in the mire by the side of the mail.';
+    rec.open(dir, 'book-a');
+    save(`<p>${Y}</p><p>${X}</p><p>${Z}</p>`, { src: 'typed', dur: 3000, ev: 30 });
+    save(`<p>${Y}</p><p>${Z}</p>`, { src: 'editor', by: 'Reviewer 1', cause: 'review' });
+    save(`<p>${Y}</p><p>${Z}</p><p>${X}</p>`, { src: 'move', cause: 'review' });
+    await rec.close('book-a');
+    const files = {};
+    const logDir = path.join(dir, slog.LOG_DIR);
+    for (const n of fs.readdirSync(logDir)) if (fs.statSync(path.join(logDir, n)).isFile()) files[n] = fs.readFileSync(path.join(logDir, n), 'utf8');
+    const res = await V.checkLog(files);
+    assert.equal(res.ok, true, JSON.stringify(res.problems));
+    const doc = Object.values(res.devices[0].traced).find((d) => d.text && d.text.includes(X));
+    assert.deepEqual([...new Set(slog.originsAt(doc, doc.text.indexOf(X), X.length).map(([, o]) => o))], ['typed'], JSON.stringify(res.devices[0].made));
+    assert.equal(res.devices[0].made['editor:Reviewer 1'] || 0, 0);
+  });
+
+  test('a moved paragraph whose deletion the diff drew across the paragraph before it still keeps its origin', async () => {
+    // (as in the app: the paragraph before ends in "The", so the deletion
+    // reads "night was cold.</p><p>The " and the arrival "<p>The night was cold.</p>")
+    const { dir, rec, save } = setup('book-rot');
+    const X = 'The night was cold.';
+    const Y = 'It was the Dover road. The';
+    const Z = 'He walked uphill in the mire.';
+    rec.open(dir, 'book-a');
+    save(`<p>${Y}</p><p>${X}</p><p>${Z}</p>`, { src: 'typed', dur: 3000, ev: 30 });
+    save(`<p>${Y}</p><p>${Z}</p>`, { src: 'editor', by: 'Reviewer 1', cause: 'review' });
+    save(`<p>${Y}</p><p>${Z}</p><p>${X}</p>`, { src: 'move', cause: 'review' });
+    await rec.close('book-a');
+    const files = {};
+    const logDir = path.join(dir, slog.LOG_DIR);
+    for (const n of fs.readdirSync(logDir)) if (fs.statSync(path.join(logDir, n)).isFile()) files[n] = fs.readFileSync(path.join(logDir, n), 'utf8');
+    const res = await V.checkLog(files);
+    assert.equal(res.ok, true, JSON.stringify(res.problems));
+    const doc = Object.values(res.devices[0].traced).find((d) => d.text && d.text.includes(X));
+    assert.deepEqual([...new Set(slog.originsAt(doc, doc.text.lastIndexOf(X), X.length).map(([, o]) => o))], ['typed'], JSON.stringify(res.devices[0].made));
   });
 
   test('accepted text is the editor\'s in the log, the checker, the report and playback', async () => {
