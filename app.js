@@ -7482,7 +7482,7 @@ function scheduleNavRefresh() {
 // Hover behavior for both side panes:
 function wireHoverPane(hotzone, pane, isPinnable) {
   // (a menu opened from the Chapters pane keeps it open while it's up)
-  const pinned = () => (isPinnable && pane.dataset.pinned === '1') ||
+  const pinned = () => (isPinnable && pane.dataset.pinned === '1') || (pane.id === 'side-pane' && sideResizing) ||
     (pane.id === 'nav-pane' && (chapterDragActive || !!document.querySelector('.pop-menu')));
   hotzone.addEventListener('mouseenter', (e) => {
     if (e.buttons) return; // dragging something — stand down
@@ -7490,12 +7490,72 @@ function wireHoverPane(hotzone, pane, isPinnable) {
   });
   hotzone.addEventListener('mouseleave', (e) => {
     if (pinned()) return;
-    if (e.relatedTarget && pane.contains(e.relatedTarget)) return;
+    if (e.relatedTarget && (pane.contains(e.relatedTarget) || e.relatedTarget.id === 'side-resize')) return;
     pane.classList.remove('open');
   });
-  pane.addEventListener('mouseleave', () => {
+  pane.addEventListener('mouseleave', (e) => {
     if (pinned()) return;
+    // (onto its own resize edge: still the pane)
+    if (pane.id === 'side-pane' && e.relatedTarget && e.relatedTarget.id === 'side-resize') return;
     pane.classList.remove('open');
+  });
+  if (pane.id === 'side-pane') {
+    $('#side-resize').addEventListener('mouseleave', (e) => {
+      if (pinned() || sideResizing || (e.relatedTarget && pane.contains(e.relatedTarget))) return;
+      pane.classList.remove('open');
+    });
+  }
+}
+
+// The right-hand pane's width (Notes & Comments, Find's docked list, the
+// loose cards): dragged by its left edge, double-click for the usual
+// width, kept on this computer. The page moves over to match when the
+// pane is pinned or the list docked (styles.css, --side-w).
+const SIDE_W = { usual: 250, min: 200, max: 640 };
+const SIDE_W_KEY = 'neo-side-width';
+let sideResizing = false;
+function sideWidthMax() {
+  const zoom = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || 1;
+  return Math.max(SIDE_W.usual, Math.min(SIDE_W.max, Math.round(window.innerWidth / zoom * 0.42)));
+}
+function setSideWidth(w, keep = true) {
+  const px = Math.round(Math.max(SIDE_W.min, Math.min(sideWidthMax(), w)));
+  document.documentElement.style.setProperty('--side-w', px + 'px');
+  if (keep) { try { localStorage.setItem(SIDE_W_KEY, String(px)); } catch { /* fine: not remembered */ } }
+  return px;
+}
+if (!NO_HOVER) {
+  try { const w = +localStorage.getItem(SIDE_W_KEY); if (w) setSideWidth(w, false); } catch { /* the usual width */ }
+  const edge = $('#side-resize');
+  edge.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    edge.setPointerCapture(e.pointerId);
+    sideResizing = true;
+    edge.classList.add('dragging');
+    document.body.classList.add('side-resizing');
+  });
+  edge.addEventListener('pointermove', (e) => {
+    if (!sideResizing) return;
+    const zoom = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || 1;
+    setSideWidth((window.innerWidth - e.clientX) / zoom, false);
+  });
+  const done = (e) => {
+    if (!sideResizing) return;
+    sideResizing = false;
+    edge.classList.remove('dragging');
+    document.body.classList.remove('side-resizing');
+    try { edge.releasePointerCapture(e.pointerId); } catch { /* already */ }
+    setSideWidth(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--side-w')) || SIDE_W.usual);
+    if (findList.open) renderFindList();
+  };
+  edge.addEventListener('pointerup', done);
+  edge.addEventListener('pointercancel', done);
+  edge.addEventListener('dblclick', () => { setSideWidth(SIDE_W.usual); if (findList.open) renderFindList(); });
+  // a window made narrower keeps the pane within its share of it
+  window.addEventListener('resize', () => {
+    const w = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--side-w'));
+    if (w > sideWidthMax()) setSideWidth(w, false);
   });
 }
 wireHoverPane($('#nav-hotzone'), $('#nav-pane'), true);
@@ -11519,7 +11579,7 @@ async function showHistory(msg) {
               <button type="button" data-mode="play" aria-pressed="false" title="${escHtml(t('Watch the chapter being written, change by change'))}">${escHtml(t('Play'))}</button>
             </div>
             <span class="hv-named-tools" hidden>
-              <button type="button" class="btn-quiet hv-titles" title="${escHtml(t('Every chapter’s title as it was in this version'))}">${escHtml(t('Restore Titles'))}</button>
+              <button type="button" class="btn-quiet hv-titles" hidden title="${escHtml(t('Every chapter’s title as it was in this version. The text stays as it is.'))}">${escHtml(t('Restore All Chapter Titles'))}</button>
               <button type="button" class="btn-quiet hv-rename">${escHtml(t('Rename…'))}</button>
               <button type="button" class="btn-quiet hv-delete">${escHtml(t('Delete…'))}</button>
             </span>
@@ -11704,6 +11764,7 @@ async function showHistory(msg) {
     bd.querySelector('.hv-name').textContent = e.named ? e.name : historyDate(e.at);
     bd.querySelector('.hv-sub').textContent = [e.named ? historyDate(e.at) : '', historyDevice(st.data, e.dev), historyKindLabel(e)].filter(Boolean).join(' · ');
     bd.querySelector('.hv-named-tools').hidden = !e.named;
+    showTitlesButton(e, seq);
     restoreBtn.hidden = !h.restore || !!e.broken;
     restoreBtn.textContent = inBook() ? t('Restore This Version') : t('Restore as New Chapter');
     restoreBtn.disabled = true; // until its text is here (and differs from the chapter now)
@@ -11782,6 +11843,19 @@ async function showHistory(msg) {
       });
     }
     page.scrollTop = 0;
+  }
+
+  // Restore All Chapter Titles: on a named version, and only when its
+  // titles differ from the book's now (otherwise there's nothing to do)
+  const titlesDiffer = (got) => !!got && !got.error && Array.isArray(got.ids) &&
+    book.chapterOrder.some((id) => got.ids.includes(id) && String((got.titles || {})[id] || '').trim() !== String((book.chapterTitles || {})[id] || '').trim());
+  async function showTitlesButton(e, seq) {
+    const b = bd.querySelector('.hv-titles');
+    b.hidden = true;
+    if (!e.named || !h.titles) return;
+    const got = await titlesOf(e);
+    if (seq !== st.seq || !bd.isConnected || !book || book.id !== bookId) return;
+    b.hidden = !titlesDiffer(got);
   }
 
   // The chapter's title in the version, above its text: as it was then, or
@@ -11936,10 +12010,7 @@ async function showHistory(msg) {
     const got = await titlesOf(e);
     if (!bd.isConnected || !book || book.id !== bookId) return;
     if (!got || got.error) { toast(t('The titles can’t be read from this version: {why}', { why: (got && got.error) || '?' }), 6000); return; }
-    const then = got.titles || {};
-    const now = book.chapterTitles || {};
-    const differ = book.chapterOrder.some((id) => got.ids.includes(id) && String(then[id] || '').trim() !== String(now[id] || '').trim());
-    if (!differ) { toast(t('The chapter titles are already as they were in “{name}”.', { name: e.name }), 5000); return; }
+    if (!titlesDiffer(got)) { toast(t('The chapter titles are already as they were in “{name}”.', { name: e.name }), 5000); return; }
     await slogSaveAll();
     close();
     await historyRestoreTitles(got, e.name);
@@ -12981,6 +13052,7 @@ function openSearch(fromVim = false) {
   $('#searchbar').hidden = false;
   const inp = $('#search-input');
   if (preset) inp.value = preset;
+  findShowClears();
   inp.focus();
   inp.select();
   runSearch();
@@ -13203,10 +13275,25 @@ function gotoMatch(i) {
   paintHighlights();
   try {
     const rect = m[searchState.idx].range.getBoundingClientRect();
-    $('#paper-scroll').scrollTop += rect.top - window.innerHeight * 0.45;
+    $('#paper-scroll').scrollTop += rect.top - findHitTop(m[searchState.idx]);
   } catch { /* range collapsed by an edit; next search rebuilds */ }
   $('#search-count').textContent = t('{i} of {n}', { i: searchState.idx + 1, n: m.length });
   findListFollow();
+}
+
+// Where a hit gone to lands in the window: two lines below the results
+// list while it's open under the bar (so the list never covers it), else a
+// little above the middle
+function findHitTop(m) {
+  const list = $('#find-results');
+  if (!list || list.hidden || list.classList.contains('docked')) return window.innerHeight * 0.45;
+  let line = 28;
+  try {
+    const n = m.range.startContainer;
+    const cs = getComputedStyle(n.nodeType === Node.TEXT_NODE ? n.parentElement : n);
+    line = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.6 || line;
+  } catch { /* the default */ }
+  return list.getBoundingClientRect().bottom + line * 2;
 }
 
 function freshSearchIfStale() {
@@ -13368,7 +13455,7 @@ function replaceHits(ms, how, label) {
 // Replace (the bar's, or Enter in Replace with): the hit gone to, or the
 // first. One that crosses formatting asks how.
 async function findAskHow(n) {
-  const ask = optionModal(escHtml(n === 1 ? t('This one crosses italics or bold') : t('These cross italics or bold')),
+  const ask = optionModal(escHtml(n === 1 ? t('This one has mixed formatting') : t('These have mixed formatting')),
     escHtml(t('How should the new words go in?')), [
       { label: escHtml(t('Keep formatting')), desc: escHtml(t('Each new word takes the formatting of the word it replaces.')), value: 'keep' },
       { label: escHtml(t('Plain')), desc: escHtml(t('No bold, italic, underline or strikethrough. The paragraph’s own style stays.')), value: 'plain' }
@@ -13436,7 +13523,7 @@ async function replaceAllMatches() {
     runSearch();
     if (!searchState.matches.some((m) => !m.crosses)) {
       const left = searchState.matches.length;
-      toast(left ? t('0 replaced.') + ' ' + t('{n} left: they cross italics or bold (see the list).', { n: left }) : t('0 replaced'), left ? 8000 : undefined);
+      toast(left ? t('0 replaced.') + ' ' + t('{n} left: mixed formatting (see the list).', { n: left }) : t('0 replaced'), left ? 8000 : undefined);
       if (left) findShowCrossing();
       return;
     }
@@ -13462,7 +13549,7 @@ async function replaceAllMatches() {
     const inTitles = ms.filter((m) => m.title).length;
     const n = replaceHits(ms, 'keep', 'replace all');
     const parts = [n ? t('{n} replaced across the whole book', { n }) + (inTitles ? ' ' + t('({n} in chapter titles)', { n: inTitles }) : '') + '.' : t('0 replaced.')];
-    if (left) parts.push(t('{n} left: they cross italics or bold (see the list).', { n: left }));
+    if (left) parts.push(t('{n} left: mixed formatting (see the list).', { n: left }));
     if (n) parts.push(version ? t('{key} to undo, or the version “{name}” in Chapter History.', { key: KZ, name: version.name }) : t('{key} to undo.', { key: KZ }));
     toast(parts.join(' '), left || version ? 10000 : undefined);
     runSearch();
@@ -13615,8 +13702,13 @@ function findListEl() {
   });
   // a button pressed keeps the focus in the list, where the keys are
   sc.addEventListener('mousedown', (e) => { if (e.target.closest('.fr-acts button')) e.preventDefault(); });
-  // focus arriving from Tab or a click lands on the hit last gone to
+  // focus arriving from Tab lands on the hit last gone to. (Not from a
+  // press: redrawing the lines under the pointer then would lose the
+  // click, which goes where it was pressed.)
+  sc.addEventListener('pointerdown', () => { findList.pressing = true; });
+  window.addEventListener('pointerup', () => { setTimeout(() => { findList.pressing = false; }, 0); }, true);
   sc.addEventListener('focus', () => {
+    if (findList.pressing) return;
     if (findList.cursor < 0) findListPlace(findList.rowOf[searchState.idx] ?? findListStep(-1, 1));
   });
   sc.addEventListener('keydown', findListKeys);
@@ -13736,7 +13828,7 @@ function findRowEl(k) {
     d.setAttribute('role', 'presentation');
     const name = document.createElement('span');
     name.className = 'fr-gname';
-    name.textContent = r.head === 'crosses' ? t('Crosses formatting') : r.head === 'chapter' ? findChapterLabel(r.chId) : findTabLabel();
+    name.textContent = r.head === 'crosses' ? t('Mixed formatting') : r.head === 'chapter' ? findChapterLabel(r.chId) : findTabLabel();
     const n = document.createElement('span');
     n.className = 'fr-gn';
     n.textContent = String(r.n);
@@ -13906,6 +13998,7 @@ function refreshFindKeepingPlace() {
 }
 
 $('#search-input').addEventListener('input', () => {
+  findShowClears();
   clearTimeout(saveTimers.search);
   saveTimers.search = setTimeout(runSearch, 250);
 });
@@ -13917,20 +14010,30 @@ $('#search-input').addEventListener('keydown', (e) => {
     if (searchState.matches.length) { e.preventDefault(); findListFocus(); }
   }
   if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); returnFromSearch(); }
-  if (e.key === 'Tab' && !e.shiftKey) {
-    const m = searchState.matches[Math.max(0, searchState.idx)];
-    if (m) {
-      e.preventDefault();
-      const sel = window.getSelection();
-      const r = m.range.cloneRange();
-      r.collapse(false);
-      sel.removeAllRanges();
-      sel.addRange(r);
-      const body = m.range.startContainer.parentElement.closest('[contenteditable="true"]');
-      if (body) body.focus();
-    }
-  }
 });
+// Tab and Shift+Tab go round the bar (and its list, docked or not), never
+// into the book: Esc is the way back to the page, at the hit
+const findTabStops = () => [...$('#searchbar').querySelectorAll('input, button'), ...(findList.open ? [...$('#find-results').querySelectorAll('button, .fr-scroll')] : [])]
+  .filter((el, i, all) => all.indexOf(el) === i && el.tabIndex >= 0 && !el.disabled && !el.hidden && !el.closest('[hidden]') && el.offsetParent !== null && !el.closest('.fr-acts'));
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Tab' || e.ctrlKey || e.metaKey || e.altKey || $('#searchbar').hidden) return;
+  const at = document.activeElement;
+  if (!at || !(at.closest('#searchbar') || at.closest('#find-results'))) return;
+  const stops = findTabStops();
+  if (!stops.length) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const i = stops.indexOf(at);
+  stops[(i + (e.shiftKey ? -1 : 1) + stops.length) % stops.length].focus();
+}, true);
+// the ✕ in each box: shown while it has something in it, empties it
+function findShowClears() {
+  $('#search-clear').hidden = !$('#search-input').value;
+  $('#replace-clear').hidden = !$('#replace-input').value;
+}
+$('#replace-input').addEventListener('input', findShowClears);
+$('#search-clear').onclick = () => { $('#search-input').value = ''; findShowClears(); runSearch(); $('#search-input').focus(); };
+$('#replace-clear').onclick = () => { $('#replace-input').value = ''; findShowClears(); $('#replace-input').focus(); };
 $('#replace-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); replaceCurrent(); }
   if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); returnFromSearch(); }
@@ -13996,17 +14099,41 @@ function paletteScore(item, q) {
   return score;
 }
 // The commands for what's typed, best first (the menu's order between
-// equals, those that can't be used now after those that can). With nothing
-// typed: the last ones used first (recent: their ids, newest first), then
-// the rest in the menu's order.
-function paletteFilter(items, q, recent = []) {
+// equals, those that can't be used now after those that can), hidden ones
+// too: hiding only keeps a command out of the list as it opens. With
+// nothing typed: the last ones used first (recent: their ids, newest
+// first), then the rest in the menu's order, leaving out those the writer
+// hid (hidden: their ids).
+function paletteFilter(items, q, recent = [], hidden = []) {
   if (!paletteWords(q).length) {
-    const first = recent.map((r) => items.find((x) => paletteId(x) === r)).filter(Boolean);
-    return [...first, ...items.filter((x) => !first.includes(x))];
+    const hide = new Set(hidden);
+    const shown = items.filter((x) => !hide.has(paletteId(x)));
+    const first = recent.map((r) => shown.find((x) => paletteId(x) === r)).filter(Boolean);
+    return [...first, ...shown.filter((x) => !first.includes(x))];
   }
   return items.map((x, i) => ({ x, i, s: paletteScore(x, q) })).filter((o) => o.s !== null)
     .sort((a, b) => a.s - b.s || (a.x.enabled === false) - (b.x.enabled === false) || a.i - b.i)
     .map((o) => o.x);
+}
+// Commands in groups by where they live ("Edit › Spellcheck Language"),
+// in the menu's order, for choosing what the list shows: [{ key, items }]
+function paletteGroups(items) {
+  const groups = [];
+  const at = new Map();
+  for (const x of items) {
+    const key = (x.path || []).join(' › ');
+    if (!at.has(key)) { at.set(key, { key, items: [] }); groups.push(at.get(key)); }
+    at.get(key).items.push(x);
+  }
+  return groups;
+}
+// which commands the writer took out of the list, on this computer
+const PALETTE_HIDDEN = 'neo-palette-hidden';
+function paletteHidden() {
+  try { const r = JSON.parse(localStorage.getItem(PALETTE_HIDDEN) || '[]'); return Array.isArray(r) ? r.filter((x) => typeof x === 'string') : []; } catch { return []; }
+}
+function paletteSaveHidden(set) {
+  try { localStorage.setItem(PALETTE_HIDDEN, JSON.stringify([...set])); } catch { /* fine: it just won't be remembered */ }
 }
 const PALETTE_RECENT = 'neo-palette-recent';
 const PALETTE_RECENT_MAX = 5;
@@ -14041,16 +14168,26 @@ async function showPalette() {
   bd.className = 'modal-backdrop palette-backdrop';
   bd.innerHTML = `
     <div class="modal palette-modal" role="dialog" aria-modal="true" aria-label="${escHtml(t('Command Palette'))}">
-      <input class="pal-input" type="text" spellcheck="false" autocomplete="off" role="combobox" aria-expanded="true" aria-autocomplete="list" aria-controls="pal-list"
-        placeholder="${escHtml(t('Type a command'))}" aria-label="${escHtml(t('Type a command'))}" />
+      <div class="pal-top">
+        <input class="pal-input" type="text" spellcheck="false" autocomplete="off" role="combobox" aria-expanded="true" aria-autocomplete="list" aria-controls="pal-list"
+          placeholder="${escHtml(t('Type a command'))}" aria-label="${escHtml(t('Type a command'))}" />
+        <button type="button" class="pal-edit" aria-pressed="false" title="${escHtml(t('Choose what’s listed'))}" aria-label="${escHtml(t('Choose what’s listed'))}">&#9998;</button>
+      </div>
+      <p class="pal-note" hidden>${escHtml(t('Untick what you don’t need in the list. Hidden commands are still found when you type them.'))}</p>
       <div id="pal-list" class="pal-list" role="listbox" aria-label="${escHtml(t('Commands'))}"></div>
       <p class="pal-empty" hidden>${escHtml(t('No command by that name.'))}</p>
     </div>`;
+  const modal = bd.querySelector('.palette-modal');
   const input = bd.querySelector('.pal-input');
+  const editBtn = bd.querySelector('.pal-edit');
+  const note = bd.querySelector('.pal-note');
   const list = bd.querySelector('.pal-list');
   const empty = bd.querySelector('.pal-empty');
-  const st = { shown: [], cur: 0 };
+  // rows: { x } a command, or (choosing what's listed) { group } its place's heading
+  const st = { rows: [], cur: 0, edit: false };
   const recent = paletteRecent();
+  const hidden = new Set(paletteHidden());
+  const isShown = (x) => !hidden.has(paletteId(x));
 
   const close = (restore = true) => {
     document.removeEventListener('keydown', onKey, true);
@@ -14063,20 +14200,44 @@ async function showPalette() {
     }
   };
   bd.paletteClose = close;
+  const keyOf = (x) => (x.shortcut ? `<kbd class="pal-key">${escHtml(x.shortcut)}</kbd>` : '');
   const draw = () => {
     const q = input.value;
-    st.shown = paletteFilter(items, q, recent);
-    st.cur = Math.min(st.cur, Math.max(0, st.shown.length - 1));
-    const recentN = paletteWords(q).length ? 0 : st.shown.filter((x) => recent.includes(paletteId(x))).length;
-    list.innerHTML = st.shown.map((x, i) => `
-      <div class="pal-item${x.enabled === false ? ' off' : ''}${i === recentN - 1 ? ' pal-last-recent' : ''}" role="option" id="pal-i-${i}" data-i="${i}"
-        aria-selected="${i === st.cur}"${x.enabled === false ? ' aria-disabled="true"' : ''}>
-        <span class="pal-check" aria-hidden="true">${x.checked ? '✓' : ''}</span>
-        <span class="pal-name">${escHtml(x.label)}${x.path && x.path.length ? `<span class="pal-path">${escHtml(x.path.join(' › '))}</span>` : ''}</span>
-        ${x.shortcut ? `<kbd class="pal-key">${escHtml(x.shortcut)}</kbd>` : ''}
-      </div>`).join('');
-    empty.hidden = st.shown.length > 0;
-    list.hidden = !st.shown.length;
+    let html = '';
+    if (st.edit) {
+      // every command, hidden ones too, under its place; what's typed narrows it
+      const matched = paletteWords(q).length ? paletteFilter(items, q).slice().sort((a, b) => items.indexOf(a) - items.indexOf(b)) : items;
+      st.rows = paletteGroups(matched).flatMap((g) => [{ group: g }, ...g.items.map((x) => ({ x }))]);
+      html = st.rows.map((r, i) => {
+        if (r.group) {
+          const n = r.group.items.filter(isShown).length;
+          const all = n === r.group.items.length;
+          return `<div class="pal-item pal-group" role="option" id="pal-i-${i}" data-i="${i}" aria-selected="${i === st.cur}" aria-checked="${all ? 'true' : n ? 'mixed' : 'false'}">
+            <span class="pal-box" aria-hidden="true">${all ? '✓' : n ? '–' : ''}</span>
+            <span class="pal-name">${escHtml(r.group.key || t('Menus'))}</span>
+            <span class="pal-count">${escHtml(t('{n} of {all} shown', { n, all: r.group.items.length }))}</span></div>`;
+        }
+        const on = isShown(r.x);
+        return `<div class="pal-item pal-sub${on ? '' : ' pal-hidden'}" role="option" id="pal-i-${i}" data-i="${i}" aria-selected="${i === st.cur}" aria-checked="${on}">
+          <span class="pal-box" aria-hidden="true">${on ? '✓' : ''}</span>
+          <span class="pal-name">${escHtml(r.x.label)}</span>${keyOf(r.x)}</div>`;
+      }).join('');
+    } else {
+      const shown = paletteFilter(items, q, recent, [...hidden]);
+      st.rows = shown.map((x) => ({ x }));
+      const recentN = paletteWords(q).length ? 0 : shown.filter((x) => recent.includes(paletteId(x))).length;
+      html = shown.map((x, i) => `
+        <div class="pal-item${x.enabled === false ? ' off' : ''}${i === recentN - 1 ? ' pal-last-recent' : ''}" role="option" id="pal-i-${i}" data-i="${i}"
+          aria-selected="${i === st.cur}"${x.enabled === false ? ' aria-disabled="true"' : ''}>
+          <span class="pal-check" aria-hidden="true">${x.checked ? '✓' : ''}</span>
+          <span class="pal-name">${escHtml(x.label)}${x.path && x.path.length ? `<span class="pal-path">${escHtml(x.path.join(' › '))}</span>` : ''}</span>
+          ${keyOf(x)}
+        </div>`).join('');
+    }
+    st.cur = Math.min(st.cur, Math.max(0, st.rows.length - 1));
+    list.innerHTML = html;
+    empty.hidden = st.rows.length > 0;
+    list.hidden = !st.rows.length;
     mark();
   };
   const mark = () => {
@@ -14085,14 +14246,38 @@ async function showPalette() {
     if (el) { el.scrollIntoView({ block: 'nearest' }); input.setAttribute('aria-activedescendant', el.id); } else input.removeAttribute('aria-activedescendant');
   };
   const move = (to) => {
-    if (!st.shown.length) return;
-    st.cur = Math.max(0, Math.min(st.shown.length - 1, to));
+    if (!st.rows.length) return;
+    st.cur = Math.max(0, Math.min(st.rows.length - 1, to));
     mark();
+  };
+  // Choosing what's listed: the pencil (or Tab to it, then Enter) starts and ends it
+  const setEdit = (on) => {
+    st.edit = on;
+    st.cur = 0;
+    modal.classList.toggle('editing', on);
+    editBtn.setAttribute('aria-pressed', String(on));
+    editBtn.textContent = on ? t('Done') : '✎';
+    note.hidden = !on;
+    draw();
+    list.scrollTop = 0;
+  };
+  // one command, or a heading's whole group: shown ↔ hidden
+  const toggle = (i) => {
+    const r = st.rows[i];
+    if (!r) return;
+    if (r.group) {
+      const all = r.group.items.every(isShown);
+      for (const x of r.group.items) { if (all) hidden.add(paletteId(x)); else hidden.delete(paletteId(x)); }
+    } else if (hidden.has(paletteId(r.x))) hidden.delete(paletteId(r.x));
+    else hidden.add(paletteId(r.x));
+    paletteSaveHidden(hidden);
+    draw();
   };
   // The command runs once the palette is gone and the page has its caret
   // back, so Copy, Paste and Undo act where the writer was
   const run = async (i) => {
-    const x = st.shown[i];
+    const r = st.rows[i];
+    const x = r && r.x;
     if (!x) return;
     if (x.enabled === false) { toast(t('“{name}” can’t be used right now.', { name: x.label }), 3000); return; }
     paletteRemember(x);
@@ -14107,23 +14292,34 @@ async function showPalette() {
     if (top !== bd) return;
     e.stopPropagation();
     if (e.isComposing || e.keyCode === 229) return;
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      (document.activeElement === editBtn ? input : editBtn).focus();
+      return;
+    }
+    if (document.activeElement === editBtn && (e.key === 'Enter' || e.key === ' ')) {
+      e.preventDefault();
+      setEdit(!st.edit);
+      return;
+    }
     const page = Math.max(1, Math.floor(list.clientHeight / 38) - 1);
-    if (e.key === 'Escape') { e.preventDefault(); close(true); }
+    if (e.key === 'Escape') { e.preventDefault(); if (st.edit) { setEdit(false); input.focus(); } else close(true); }
     else if (e.key === 'ArrowDown') { e.preventDefault(); move(st.cur + 1); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); move(st.cur - 1); }
     else if (e.key === 'PageDown') { e.preventDefault(); move(st.cur + page); }
     else if (e.key === 'PageUp') { e.preventDefault(); move(st.cur - page); }
-    else if (e.key === 'Enter') { e.preventDefault(); run(st.cur); }
-    else if (e.key === 'Tab') e.preventDefault();
-    if (document.activeElement !== input) input.focus();
+    else if (e.key === 'Enter') { e.preventDefault(); if (st.edit) toggle(st.cur); else run(st.cur); }
+    if (document.activeElement !== input && document.activeElement !== editBtn) input.focus();
   };
   document.addEventListener('keydown', onKey, true);
   input.addEventListener('input', () => { st.cur = 0; draw(); list.scrollTop = 0; });
   list.addEventListener('mousedown', (e) => e.preventDefault()); // the box keeps the focus
   list.addEventListener('click', (e) => {
     const el = e.target.closest('.pal-item');
-    if (el) run(+el.dataset.i);
+    if (!el) return;
+    if (st.edit) { st.cur = +el.dataset.i; toggle(st.cur); } else run(+el.dataset.i);
   });
+  editBtn.addEventListener('click', () => { setEdit(!st.edit); input.focus(); });
   bd.addEventListener('mousedown', (e) => { if (e.target === bd) { e.preventDefault(); close(true); } });
   document.body.appendChild(bd);
   draw();
@@ -17478,6 +17674,8 @@ for (const id of ['#author-chip', '#goal-counter', '#word-counter', '#pos-counte
 document.addEventListener('mouseup', () => {
   const el = document.activeElement;
   if (!el || el === document.body || el.matches(':focus-visible') || el.closest('.modal-backdrop')) return;
+  // (Find's list docked in the pane keeps it: its keys, Esc back to the Find box, work after a click)
+  if (el.closest('#find-results')) return;
   if (el.closest('#bottombar, #nav-pane, #side-pane, #shelf-header, #shelves')) el.blur();
 }, true);
 

@@ -91,6 +91,8 @@
       </div>
       <div id="sticky-list"></div>
     </aside>
+    <!-- (the desktop drags the pane wider by this edge; touch has no hover, so it stays hidden here) -->
+    <div id="side-resize" aria-hidden="true" hidden></div>
 
     <!-- The manuscript -->
     <main id="paper-scroll">
@@ -143,7 +145,7 @@
 
     <!-- Find & replace -->
     <div id="searchbar" hidden>
-      <input id="search-input" data-i18n-placeholder placeholder="Find" data-i18n-label="Find" spellcheck="false" />
+      <span class="find-field"><input id="search-input" data-i18n-placeholder placeholder="Find" data-i18n-label="Find" spellcheck="false" /><button id="search-clear" class="find-clear" type="button" tabindex="-1" hidden data-i18n-title title="Clear" data-i18n-label="Clear">&#10005;</button></span>
       <button id="find-case" class="find-opt" aria-pressed="false" data-i18n-title title="Match case" data-i18n-label="Match case"></button>
       <button id="find-word" class="find-opt" aria-pressed="false" data-i18n-title title="Whole word" data-i18n-label="Whole word"><span class="find-word-mark"></span></button>
       <button id="find-titles" class="find-opt" aria-pressed="false" data-i18n-title title="Include chapter titles" data-i18n-label="Include chapter titles">§</button>
@@ -151,7 +153,7 @@
       <button id="search-prev" data-i18n-title title="Previous (⇧Enter)" data-i18n-label="Previous (⇧Enter)">&#8593;</button>
       <button id="search-next" data-i18n-title title="Next (Enter)" data-i18n-label="Next (Enter)">&#8595;</button>
       <button id="search-list" aria-pressed="false" data-i18n-title title="Every hit in a list" data-i18n>List</button>
-      <input id="replace-input" data-i18n-placeholder placeholder="Replace with" data-i18n-label="Replace with" spellcheck="false" />
+      <span class="find-field" id="replace-field"><input id="replace-input" data-i18n-placeholder placeholder="Replace with" data-i18n-label="Replace with" spellcheck="false" /><button id="replace-clear" class="find-clear" type="button" tabindex="-1" hidden data-i18n-title title="Clear" data-i18n-label="Clear">&#10005;</button></span>
       <button id="replace-one" data-i18n>Replace</button>
       <button id="replace-all" data-i18n>All</button>
       <button id="search-close" data-i18n-title title="Close (Esc)" data-i18n-label="Close (Esc)">&#10005;</button>

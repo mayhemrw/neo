@@ -239,6 +239,53 @@ test('the tabs, by name (View → Go To), and a checkbox command flips its tick'
   await key('Escape');
 });
 
+test('the pencil: untick a command or a whole group; hidden ones are still found by typing, and stay hidden', async () => {
+  wc.sendInputEvent({ type: 'mouseMove', x: 4, y: 600 }); // the pointer off the palette
+  await openPalette();
+  await tick(200);
+  assert.equal(await js(`getComputedStyle(document.querySelector('#command-palette .pal-edit')).opacity`), '0', 'out of sight until hovered');
+  const pen = await js(`(() => { const r = document.querySelector('#command-palette .pal-edit').getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })()`);
+  wc.sendInputEvent({ type: 'mouseMove', x: pen.x, y: pen.y });
+  await tick(250);
+  assert.equal(await js(`getComputedStyle(document.querySelector('#command-palette .pal-edit')).opacity`), '1', 'shown with the pointer on the palette');
+  await js(`document.querySelector('#command-palette .pal-edit').click()`);
+  await tick(100);
+  assert.equal(await js(`!document.querySelector('#command-palette .pal-note').hidden`), true);
+  const groupText = () => js(`[...document.querySelectorAll('#command-palette .pal-group')].map((g) => g.querySelector('.pal-name').textContent)`);
+  assert.ok((await groupText()).includes('Edit › Spellcheck Language'));
+  await shot('palette-choose');
+  // type to narrow, then the group's heading hides them all
+  await type('spellcheck language');
+  const head = await js(`[...document.querySelectorAll('#command-palette .pal-item')].findIndex((el) => el.classList.contains('pal-group') && el.textContent.includes('Edit › Spellcheck Language'))`);
+  assert.ok(head >= 0);
+  await js(`document.querySelectorAll('#command-palette .pal-item')[${head}].click()`);
+  assert.match(await js(`document.querySelectorAll('#command-palette .pal-item')[${head}].textContent`), /0 of \d+ shown/);
+  // one more, by the keyboard: Enter unticks the line it's on
+  await js(`(() => { const i = document.querySelector('#command-palette .pal-input'); i.value = 'markdown emphasis'; i.dispatchEvent(new Event('input')); })()`);
+  await tick(60);
+  await key('Down');
+  await key('Return');
+  assert.equal(await js(`document.querySelector('#command-palette .pal-sub').getAttribute('aria-checked')`), 'false');
+  // Esc leaves choosing, not the palette
+  await key('Escape');
+  assert.equal(await isOpen(), true);
+  assert.equal(await js(`document.querySelector('#command-palette .palette-modal').classList.contains('editing')`), false);
+  await js(`(() => { const i = document.querySelector('#command-palette .pal-input'); i.value = ''; i.dispatchEvent(new Event('input')); })()`);
+  await tick(60);
+  let names = (await rows()).map((r) => r.name);
+  assert.ok(!names.includes('English (US)') && !names.includes('Markdown Emphasis'), 'not in the list as it opens');
+  await key('Escape');
+  // and still so when it opens again; typing finds them
+  await openPalette();
+  names = (await rows()).map((r) => r.name);
+  assert.ok(!names.includes('English (UK)'));
+  await type('english uk');
+  assert.equal((await rows())[0].name, 'English (UK)');
+  await key('Escape');
+  // put them back for the rest
+  await js(`localStorage.removeItem('neo-palette-hidden')`);
+});
+
 test('Ctrl+K again closes it; a click outside does too', async () => {
   await openPalette();
   await key('k', [MOD]);

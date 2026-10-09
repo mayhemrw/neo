@@ -22,7 +22,7 @@ const plain = (x) => JSON.parse(JSON.stringify(x));
 
 const win = vm.createContext({});
 vm.runInContext(slice('app.js', '// a string\'s words without accents', 'const PALETTE_RECENT ='), win);
-vm.runInContext('this.api = { paletteScore, paletteFilter, paletteId, paletteWords };', win);
+vm.runInContext('this.api = { paletteScore, paletteFilter, paletteId, paletteWords, paletteGroups };', win);
 const { paletteScore, paletteId } = win.api;
 const filter = (...a) => plain(win.api.paletteFilter(...a)).map((x) => x.label);
 
@@ -154,4 +154,28 @@ test('a command chosen after the menu was rebuilt: found again by its name and p
   // greyed: never clicked
   assert.equal(run('1.1', 'Greyed', ['Edit']), false);
   assert.deepEqual(clicked, []);
+});
+
+test('hidden commands: out of the list as it opens, recent ones too, but still found by typing', () => {
+  const hidden = [paletteId(ITEMS[2]), paletteId(ITEMS[6])]; // Undo, Paragraph
+  const recent = [paletteId(ITEMS[2]), paletteId(ITEMS[3])];
+  const empty = filter(ITEMS, '', recent, hidden);
+  assert.deepEqual(empty.slice(0, 2), ['Find & Replace', 'Export for Verification…']);
+  assert.ok(!empty.includes('Undo') && !empty.includes('Paragraph'));
+  assert.equal(empty.length, ITEMS.length - 2);
+  assert.deepEqual(filter(ITEMS, 'undo', recent, hidden), ['Undo']);
+  assert.deepEqual(filter(ITEMS, 'focus par', recent, hidden), ['Paragraph']);
+});
+
+test('groups for choosing what\'s listed: by place, in the menu\'s order', () => {
+  const g = plain(win.api.paletteGroups(ITEMS)).map((x) => [x.key, x.items.map((i) => i.label)]);
+  assert.deepEqual(g, [
+    ['File › Scribe\'s Log', ['Export for Verification…']],
+    ['File', ['Name This Version…']],
+    ['Edit', ['Undo', 'Find & Replace']],
+    ['View', ['Chapter History…']],
+    ['Help', ['Chapter History Notes']],
+    ['View › Focus Mode', ['Paragraph']],
+    ['Format', ['Café Lights']]
+  ]);
 });

@@ -157,9 +157,11 @@ test('a phrase never runs across a paragraph break', async () => {
 
 // ---- the results list (milestone 2)
 const key = async (keyCode, n = 1) => {
+  const modifiers = Array.isArray(n) ? n : [];
+  if (Array.isArray(n)) n = 1;
   for (let i = 0; i < n; i++) {
-    wc.sendInputEvent({ type: 'keyDown', keyCode });
-    wc.sendInputEvent({ type: 'keyUp', keyCode });
+    wc.sendInputEvent({ type: 'keyDown', keyCode, modifiers });
+    wc.sendInputEvent({ type: 'keyUp', keyCode, modifiers });
     await tick(30);
   }
   await tick(60);
@@ -230,7 +232,7 @@ test('hits that cross formatting come first, under their own heading, in their f
   await find('the old house');
   const rows = await listRows();
   assert.deepEqual(rows.map((r) => r.head), [true, false, true, false]);
-  assert.equal(rows[0].text, 'Crosses formatting1');
+  assert.equal(rows[0].text, 'Mixed formatting1');
   // it says which chapter, and shows the italic word in italics
   assert.match(rows[1].text, /^Chapter 1.*She came back to the old house at dusk\.$/);
   assert.ok(rows[1].html.includes('<mark>the </mark><mark><i>old</i></mark><mark> house</mark>'), rows[1].html);
@@ -475,11 +477,11 @@ test('Replace All honors Match case and Whole word, and leaves what crosses ital
   await tick(300);
   const toast = await toastText();
   assert.match(toast, /^1 replaced across the whole book\./);
-  assert.match(toast, /1 left: they cross italics or bold \(see the list\)\./);
+  assert.match(toast, /1 left: mixed formatting \(see the list\)\./);
   assert.equal((await versionsNamed()).length, 2, 'a version every time');
-  // the list opens on the one left, under Crosses formatting
+  // the list opens on the one left, under Mixed formatting
   const rows = await listRows();
-  assert.equal(rows[0].text.startsWith('Crosses formatting'), true, rows[0].text);
+  assert.equal(rows[0].text.startsWith('Mixed formatting'), true, rows[0].text);
   assert.equal(rows.find((x) => x.cur).k, 1);
   assert.ok((await bodyText(0)).includes('to the old house'), 'the phrase across italics kept as it was');
   assert.ok((await bodyText(1)).includes('since the new home burned.'));
@@ -531,7 +533,7 @@ test('in the list: K keeps formatting, P goes plain, each one step; the heading 
   if (!(await listPlace()).shown) await press('search-list');
   await js(`$('#replace-input').value = 'the new home'; findListFocus()`);
   let rows = await listRows();
-  assert.deepEqual(rows.filter((r) => r.head).map((r) => r.text), ['Crosses formatting2']);
+  assert.deepEqual(rows.filter((r) => r.head).map((r) => r.text), ['Mixed formatting2']);
   // the buttons are there on the line the keyboard is on
   assert.equal(await js(`getComputedStyle(document.querySelector('#find-results .fr-hit.cur .fr-acts')).display`), 'flex');
   await shot('list-crossing');
@@ -614,7 +616,9 @@ test('Restore Titles on a named version sets every title back as it was then', a
   await js(`showHistory({ chapterId: ${JSON.stringify(ch2)} })`);
   await until(() => js(`!!document.querySelector('#chapter-history .hv-item.named')`));
   await js(`[...document.querySelectorAll('#chapter-history .hv-item.named')].find((x) => /Before replacing ‘mill’/.test(x.textContent)).click()`);
-  await until(() => js(`!document.querySelector('#chapter-history .hv-named-tools').hidden`));
+  // shown, and named for what it does, because this version's titles differ from now
+  await until(() => js(`!document.querySelector('#chapter-history .hv-titles').hidden`));
+  assert.equal(await js(`document.querySelector('#chapter-history .hv-titles').textContent`), 'Restore All Chapter Titles');
   await js(`document.querySelector('#chapter-history .hv-titles').click()`);
   await until(() => js(`!document.querySelector('#chapter-history')`));
   await tick(600);
@@ -624,6 +628,15 @@ test('Restore Titles on a named version sets every title back as it was then', a
   assert.match(await toastText(), /^1 chapter title is back as it was in “Before replacing ‘mill’/);
   // on disk too
   assert.equal(JSON.parse(fs.readFileSync(path.join(LIB, bookId, 'book.json'), 'utf8')).chapterTitles[ch2], 'The Old Mill');
+  // now the titles match that version, so the button stays out of sight
+  await js(`showHistory({ chapterId: ${JSON.stringify(ch2)} })`);
+  await until(() => js(`!!document.querySelector('#chapter-history .hv-item.named')`));
+  await js(`[...document.querySelectorAll('#chapter-history .hv-item.named')].find((x) => /Before replacing ‘mill’/.test(x.textContent)).click()`);
+  await until(() => js(`!document.querySelector('#chapter-history .hv-named-tools').hidden && !document.querySelector('#chapter-history .hv-page').classList.contains('loading')`));
+  await tick(300);
+  assert.equal(await js(`document.querySelector('#chapter-history .hv-titles').hidden`), true);
+  await key('Escape');
+  await until(() => js(`!document.querySelector('#chapter-history')`));
 });
 
 test('Replace after an edit earlier in the same paragraph: the right words change', async () => {
@@ -662,6 +675,107 @@ test('Replace All stays in the manuscript, even if the tab changes while its ver
   await tick(400);
   assert.equal(await bodyText(0), before, 'the manuscript untouched');
   await js(`closeSearch()`);
+});
+
+test('Esc after clicking a line in the docked list goes back to the Find box', async () => {
+  await js(`closeSearch(); library.findDock = true; openSearch()`);
+  await find('colour');
+  await js(`toggleFindList(true)`);
+  await tick(200);
+  assert.equal(await js(`$('#find-results').parentElement.id`), 'side-pane');
+  // a real click (pressed and let go, as a hand does), the first on the list
+  const at = await js(`(() => { const b = document.querySelectorAll('#find-results .fr-hit')[1].getBoundingClientRect(); return { x: Math.round(b.left + 30), y: Math.round(b.top + 8) }; })()`);
+  wc.sendInputEvent({ type: 'mouseMove', x: at.x, y: at.y });
+  await tick(50);
+  wc.sendInputEvent({ type: 'mouseDown', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+  await tick(60);
+  wc.sendInputEvent({ type: 'mouseUp', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+  await tick(200);
+  assert.equal(await js(`searchState.idx`), 1, 'the click went there');
+  assert.equal(await js(`document.activeElement.className`), 'fr-scroll', 'the list kept the keyboard');
+  await key('Escape');
+  assert.equal(await js(`$('#searchbar').hidden`), false, 'Find stays open');
+  assert.equal(await js(`document.activeElement.id`), 'search-input');
+  await js(`closeSearch(); library.findDock = false`);
+});
+
+test('Tab and Shift+Tab go round the bar, never into the book', async () => {
+  await js(`openSearch()`);
+  await find('colour');
+  await js(`$('#search-input').focus()`);
+  await key('Tab');
+  assert.equal(await js(`document.activeElement.id`), 'find-case');
+  await js(`$('#search-input').focus()`);
+  await key('Tab', ['shift']);
+  assert.equal(await js(`document.activeElement.id`), 'search-close', 'from the first, back to the last');
+  const seen = new Set();
+  for (let i = 0; i < 16; i++) {
+    await key('Tab');
+    const at = await js(`(() => { const a = document.activeElement; return { id: a.id || a.className, inBar: !!a.closest('#searchbar') }; })()`);
+    assert.ok(at.inBar, `stays in the bar (${at.id})`);
+    seen.add(at.id);
+  }
+  for (const id of ['search-input', 'find-case', 'find-word', 'find-titles', 'search-prev', 'search-next', 'search-list', 'replace-input', 'replace-one', 'replace-all', 'search-close']) assert.ok(seen.has(id), id);
+  assert.ok(!seen.has('search-clear'), 'the ✕ is for the mouse');
+  await js(`closeSearch()`);
+});
+
+test('the ✕ in each box shows while it has something in it, and empties it', async () => {
+  await js(`openSearch(); $('#search-input').value = ''; $('#replace-input').value = ''; findShowClears(); $('#search-input').focus()`);
+  assert.deepEqual(await js(`[$('#search-clear').hidden, $('#replace-clear').hidden]`), [true, true]);
+  for (const ch of 'colour') { wc.sendInputEvent({ type: 'char', keyCode: ch }); await tick(20); }
+  await tick(400);
+  assert.equal(await js(`$('#search-clear').hidden`), false);
+  assert.ok((await js(`searchState.matches.length`)) > 0);
+  await js(`$('#search-clear').click()`);
+  await tick(100);
+  assert.deepEqual(await js(`({ v: $('#search-input').value, x: $('#search-clear').hidden, n: searchState.matches.length, at: document.activeElement.id })`), { v: '', x: true, n: 0, at: 'search-input' });
+  await js(`$('#replace-input').focus()`);
+  for (const ch of 'dog') { wc.sendInputEvent({ type: 'char', keyCode: ch }); await tick(20); }
+  assert.equal(await js(`$('#replace-clear').hidden`), false);
+  await js(`$('#replace-clear').click()`);
+  assert.deepEqual(await js(`[$('#replace-input').value, $('#replace-clear').hidden, document.activeElement.id]`), ['', true, 'replace-input']);
+  await js(`closeSearch()`);
+});
+
+test('the right-hand pane is wider or narrower by its edge, kept for this computer; double-click for the usual', async () => {
+  await js(`pinPane('side', true)`);
+  await tick(300);
+  const before = await js(`({ w: $('#side-pane').getBoundingClientRect().width, page: $('#paper-scroll').getBoundingClientRect().left })`);
+  assert.ok(Math.abs(before.w - 250) < 2, String(before.w));
+  const edge = await js(`(() => { const r = $('#side-resize').getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + 200), shown: getComputedStyle($('#side-resize')).display }; })()`);
+  assert.equal(edge.shown, 'block');
+  wc.sendInputEvent({ type: 'mouseMove', x: edge.x, y: edge.y });
+  await tick(30);
+  wc.sendInputEvent({ type: 'mouseDown', x: edge.x, y: edge.y, button: 'left', clickCount: 1 });
+  for (let dx = 20; dx <= 100; dx += 20) { wc.sendInputEvent({ type: 'mouseMove', x: edge.x - dx, y: edge.y, modifiers: ['leftButtonDown'] }); await tick(30); }
+  wc.sendInputEvent({ type: 'mouseUp', x: edge.x - 100, y: edge.y, button: 'left', clickCount: 1 });
+  await tick(200);
+  const after = await js(`({ w: $('#side-pane').getBoundingClientRect().width, page: $('#paper-scroll').getBoundingClientRect().left, kept: localStorage.getItem('neo-side-width') })`);
+  assert.ok(Math.abs(after.w - 350) < 6, `wider by the drag (${after.w})`);
+  assert.ok(Math.abs((before.page - after.page) - 50) < 6, 'the page moved over by half of it');
+  assert.ok(Math.abs(+after.kept - 350) < 6, 'kept');
+  await shot('pane-wider');
+  // never wider than its share of the window
+  await js(`setSideWidth(5000)`);
+  assert.ok((await js(`$('#side-pane').getBoundingClientRect().width`)) <= 640);
+  await js(`$('#side-resize').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+  await tick(150);
+  assert.ok(Math.abs((await js(`$('#side-pane').getBoundingClientRect().width`)) - 250) < 2);
+  assert.equal(await js(`localStorage.getItem('neo-side-width')`), '250');
+  await js(`pinPane('side', false)`);
+});
+
+test('the toast is the opposite of what\'s under it, in every theme', async () => {
+  const bg = (setup) => js(`(() => { ${setup}; applyFonts(); toast('Testing the toast'); return getComputedStyle($('#hint')).backgroundColor; })()`);
+  const LIGHT = 'rgb(236, 230, 216)';
+  const DARK = 'rgb(35, 33, 30)';
+  assert.equal(await bg(`library.pageTheme = 'night'`), LIGHT, 'Night: a light pill on the dark page');
+  assert.equal(await bg(`library.pageTheme = 'paper'`), DARK, 'Paper: a dark pill on the cream page');
+  assert.equal(await bg(`library.pageTheme = 'light'`), DARK, 'Light: a dark pill');
+  // Paper's shelf is the dark room: a light pill there
+  assert.equal(await js(`(() => { library.pageTheme = 'paper'; applyFonts(); $('#bookshelf-view').hidden = false; const c = getComputedStyle($('#hint')).backgroundColor; $('#bookshelf-view').hidden = true; return c; })()`), LIGHT);
+  await js(`library.pageTheme = 'night'; applyFonts()`);
 });
 
 test('the log: replacements logged, nothing unlogged, and it checks', async () => {
@@ -720,6 +834,13 @@ test('a long book: 5,000 hits, and only the lines on screen are drawn', async ()
   assert.ok(await drawn() < 80);
   const last = await js(`[...document.querySelectorAll('#find-results .fr-hit')].pop().textContent`);
   assert.match(last, /boats knocked together\.$/);
+  // a hit gone to lands just below the list, never under it
+  await js(`gotoMatch(2400)`);
+  await tick(200);
+  const place = await js(`(() => { const hit = searchState.matches[2400].range.getBoundingClientRect(); const list = $('#find-results').getBoundingClientRect(); return { hit: hit.top, bottom: list.bottom, below: !$('#find-results').classList.contains('docked') }; })()`);
+  assert.equal(place.below, true);
+  assert.ok(place.hit >= place.bottom && place.hit < place.bottom + 90, `the hit at ${place.hit}, the list's bottom at ${place.bottom}`);
+  await shot('hit-below-list');
   await js(`$('#find-results .fr-scroll').scrollTop = findList.total / 2`);
   await tick(150);
   const mid = await listRows();

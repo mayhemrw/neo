@@ -17,6 +17,8 @@
   --page-w: clamp(680px, 44vw, 760px);
   /* the room the scrollbar and the page's own shadow need beside it */
   --page-gutter: 80px;
+  /* the right-hand pane's width: dragged wider or narrower by its left edge, kept per computer */
+  --side-w: 250px;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -914,7 +916,7 @@ body.light #editor-view.board-on #outline-views button.on { color: #2b2926; }
 /* the board takes the whole window, in the room rather than on a page */
 #editor-view.board-on #paper-scroll { left: 0; right: 0; width: auto; transform: none; }
 #editor-view.board-on.nav-pinned #paper-scroll { left: 248px; }
-#editor-view.board-on.side-pinned #paper-scroll { right: 250px; }
+#editor-view.board-on.side-pinned #paper-scroll { right: var(--side-w); }
 #editor-view.board-on #aux-paper {
   width: auto; max-width: none; background: none; box-shadow: none; border: none;
   margin: 0; padding: 30px clamp(18px, 3vw, 44px) 90px; min-height: 0; color: var(--muted);
@@ -1238,12 +1240,22 @@ body.focus-mode .walk-note { opacity: 0.6; }
 /* --- Right side pane --- */
 #side-hotzone { position: fixed; right: 0; top: 0; bottom: 40px; z-index: 60; }
 #side-pane {
-  position: fixed; right: 0; top: 0; bottom: 40px; width: 250px;
+  position: fixed; right: 0; top: 0; bottom: 40px; width: var(--side-w);
   background: var(--pane); border-left: 1px solid #2c2c2c;
   transform: translateX(100%); transition: transform 0.18s ease;
   z-index: 70; overflow-y: auto; padding: 36px 0 20px;
 }
 #side-pane.open { transform: translateX(0); }
+/* its left edge, while it's open: drag to make it wider or narrower,
+   double-click for the usual width (app.js, the pane's width) */
+#side-resize {
+  position: fixed; top: 0; bottom: calc(40px * var(--ui-zoom)); right: calc(var(--side-w) * var(--ui-zoom) - 4px); width: 8px;
+  z-index: 72; cursor: ew-resize; display: none;
+}
+#side-pane.open ~ #side-resize { display: block; }
+#side-resize::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; transition: background 0.15s ease; }
+#side-resize:hover::after, #side-resize.dragging::after { background: var(--accent); }
+body.side-resizing, body.side-resizing * { cursor: ew-resize !important; user-select: none !important; }
 #side-head {
   display: flex; justify-content: space-between; align-items: center;
   padding: 0 16px 14px; font-size: 12px; text-transform: uppercase;
@@ -1320,8 +1332,13 @@ body.full-screen.focus-mode #bottombar:not(:hover):not(.attn) { opacity: 0; }
   color: #eee; font-size: 13px; padding: 6px 10px; width: 170px;
 }
 #searchbar input:focus { outline: none; border-color: var(--accent); }
+/* the ✕ that empties a box, inside its right end while it has something in it */
+.find-field { position: relative; display: inline-flex; }
+#searchbar .find-field input { padding-right: 24px; }
+#searchbar .find-clear { position: absolute; right: 3px; top: 50%; transform: translateY(-50%); border: none; background: none; padding: 2px 6px; font-size: 10px; color: var(--muted); line-height: 1; }
+#searchbar .find-clear:hover { color: var(--accent); }
 /* outside the manuscript Find only finds */
-#searchbar.find-only #replace-input, #searchbar.find-only #replace-one, #searchbar.find-only #replace-all { display: none; }
+#searchbar.find-only #replace-field, #searchbar.find-only #replace-one, #searchbar.find-only #replace-all { display: none; }
 #searchbar button {
   background: none; border: 1px solid #3a3a3a; border-radius: 5px;
   color: #aaa; font-size: 12px; padding: 5px 9px;
@@ -1344,7 +1361,7 @@ body.full-screen.focus-mode #bottombar:not(:hover):not(.attn) { opacity: 0; }
 #find-results {
   position: absolute; top: calc(100% + 6px); left: 50%; transform: translateX(-50%);
   width: min(calc(var(--page-w) * var(--page-zoom, 1) / var(--ui-zoom)), calc(100vw / var(--ui-zoom) - 24px));
-  max-height: calc(56vh / var(--ui-zoom));
+  max-height: calc(42vh / var(--ui-zoom));
   display: flex; flex-direction: column;
   background: #262626; border: 1px solid #3a3a3a; border-radius: 8px;
   box-shadow: 0 6px 24px rgba(0,0,0,0.5); overflow: hidden;
@@ -1397,9 +1414,9 @@ body.full-screen.focus-mode #bottombar:not(:hover):not(.attn) { opacity: 0; }
   background: none; border: none; border-radius: 0; box-shadow: none;
 }
 /* …and the bar moves over with the page, wrapping rather than reach the pane */
-#editor-view.find-docked #searchbar { left: calc(50% - 125px); max-width: calc(100vw / var(--ui-zoom) - 274px); flex-wrap: wrap; }
+#editor-view.find-docked #searchbar { left: calc(50% - var(--side-w) / 2); max-width: calc(100vw / var(--ui-zoom) - var(--side-w) - 24px); flex-wrap: wrap; }
 #editor-view.find-docked #searchbar input { width: 130px; }
-#editor-view.find-docked.nav-pinned #searchbar { left: 50%; max-width: calc(100vw / var(--ui-zoom) - 524px); }
+#editor-view.find-docked.nav-pinned #searchbar { left: calc(50% + (248px - var(--side-w)) / 2); max-width: calc(100vw / var(--ui-zoom) - 248px - var(--side-w) - 24px); }
 #find-results.docked .fr-line { white-space: normal; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 
 #goal-counter.goal-met { color: var(--accent); }
@@ -1637,12 +1654,21 @@ body.bright .new-book { border-color: #8a8a8a; color: #8a8a8a; }
 body.bright #add-shelf-btn, body.bright #import-btn { color: #b4b4b4; border-color: #555; }
 
 /* --- Hint toast --- */
+/* The toast is the opposite of what's under it, so it never blends in
+   (each pair is 12.8:1 or more against what it sits on, 14:1 for its
+   words): a light pill over a dark page or room (Night; Paper's shelf and
+   the Outline's cards), a dark one over a light page (Paper's page, all of
+   Light). Brighter Interface sets it a little larger. */
 #hint {
   position: fixed; bottom: 54px; left: 50%; transform: translateX(-50%);
-  background: #2b2b2b; color: #bbb; font-size: 12px;
+  background: #ece6d8; color: #1c1a17; border: 1px solid #c9a86a; font-size: 12.5px;
   padding: 8px 18px; border-radius: 20px; z-index: 200;
-  box-shadow: 0 3px 14px rgba(0,0,0,0.4);
+  box-shadow: 0 4px 18px rgba(0,0,0,0.55);
 }
+body:not(.night) #hint { background: #23211e; color: #f3efe6; border-color: #b8975a; box-shadow: 0 4px 18px rgba(0,0,0,0.3); }
+body:not(.night):not(.light) #bookshelf-view:not([hidden]) ~ #hint,
+body:not(.night):not(.light) #editor-view.board-on:not([hidden]) ~ #hint { background: #ece6d8; color: #1c1a17; border-color: #c9a86a; box-shadow: 0 4px 18px rgba(0,0,0,0.55); }
+body.bright #hint { font-size: 13.5px; padding: 9px 20px; }
 
 /* 11px to grab, the thumb drawn 7px inside it (the border is see-through) */
 ::-webkit-scrollbar { width: 11px; height: 11px; }
@@ -1656,7 +1682,7 @@ body.bright .show-scrollbar::-webkit-scrollbar-thumb { background-color: rgba(25
 body.bright .show-scrollbar::-webkit-scrollbar-thumb:hover { background-color: rgba(255, 255, 255, 0.4); }
 
 /* pinned notes pane: the page column shifts left to clear the pane */
-#editor-view.side-pinned #paper-scroll { left: calc(50% - 125px); }
+#editor-view.side-pinned #paper-scroll { left: calc(50% - var(--side-w) / 2); }
 
 /* ================================================================== */
 /* ACCESSIBILITY                                                        */
@@ -1757,14 +1783,14 @@ body.bright .pop-menu button:disabled { color: #8a8a8a; }
 :root { --ui-zoom: 1; }
 #bookshelf-view, #nav-pane, #side-pane, #bottombar, #searchbar, #hint, .modal { zoom: var(--ui-zoom); }
 #paper-scroll, #nav-hotzone, #side-hotzone { bottom: calc(40px * var(--ui-zoom)); }
-#editor-view.side-pinned #paper-scroll { left: calc(50% - 125px * var(--ui-zoom)); }
+#editor-view.side-pinned #paper-scroll { left: calc(50% - var(--side-w) / 2 * var(--ui-zoom)); }
 #editor-view.nav-pinned #paper-scroll { left: calc(50% + 124px * var(--ui-zoom)); }
-#editor-view.nav-pinned.side-pinned #paper-scroll { left: calc(50% - 1px * var(--ui-zoom)); }
+#editor-view.nav-pinned.side-pinned #paper-scroll { left: calc(50% + (248px - var(--side-w)) / 2 * var(--ui-zoom)); }
 /* …except the Outline's cards, which fill the room between whichever panes
    are pinned (these come after the page rules above, so they win, #312) */
-#editor-view.board-on.side-pinned #paper-scroll { left: 0; right: calc(250px * var(--ui-zoom)); }
+#editor-view.board-on.side-pinned #paper-scroll { left: 0; right: calc(var(--side-w) * var(--ui-zoom)); }
 #editor-view.board-on.nav-pinned #paper-scroll { left: calc(248px * var(--ui-zoom)); }
-#editor-view.board-on.nav-pinned.side-pinned #paper-scroll { left: calc(248px * var(--ui-zoom)); right: calc(250px * var(--ui-zoom)); }
+#editor-view.board-on.nav-pinned.side-pinned #paper-scroll { left: calc(248px * var(--ui-zoom)); right: calc(var(--side-w) * var(--ui-zoom)); }
 .modal { max-height: calc(85vh / var(--ui-zoom)); max-width: calc(100vw / var(--ui-zoom) - 32px); }
 .font-list { max-height: calc(50vh / var(--ui-zoom)); }
 .shortcuts-modal {
@@ -1846,7 +1872,19 @@ body.light .modal-backdrop { background: rgba(60,55,45,0.28); }
 /* The command palette (app.js, COMMAND PALETTE): narrow, near the top */
 .modal-backdrop.palette-backdrop { align-items: flex-start; padding-top: calc(12vh / var(--ui-zoom)); }
 .palette-modal { width: 560px; padding: 10px; display: flex; flex-direction: column; overflow: hidden; max-height: calc(70vh / var(--ui-zoom)); box-shadow: 0 18px 60px rgba(0,0,0,0.5); }
-.palette-modal .pal-input { margin: 0 0 8px; font-size: 15px; padding: 10px 12px; }
+.pal-top { display: flex; gap: 8px; align-items: center; margin: 0 0 8px; }
+.palette-modal .pal-input { margin: 0; font-size: 15px; padding: 10px 12px; flex: 1; }
+/* the pencil: shown while the pointer is on the palette, or it has the keyboard */
+.pal-edit { flex: none; background: none; border: 1px solid #3a3a3a; border-radius: 6px; color: var(--muted); font-size: 14px; padding: 6px 10px; opacity: 0; transition: opacity 0.12s ease; }
+.palette-modal:hover .pal-edit, .pal-edit:focus-visible, .palette-modal.editing .pal-edit { opacity: 1; }
+.pal-edit:hover, .pal-edit:focus-visible { color: var(--accent); border-color: var(--accent); outline: none; }
+.palette-modal.editing .pal-edit { color: var(--accent); border-color: var(--accent); font-size: 12.5px; }
+.pal-note { margin: 0 4px 8px !important; font-size: 12px !important; color: var(--muted); }
+.pal-box { width: 16px; height: 16px; flex: none; border: 1px solid #555; border-radius: 3px; font-size: 11px; line-height: 14px; text-align: center; color: var(--accent); }
+.pal-group { margin-top: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+.pal-group .pal-count { text-transform: none; letter-spacing: 0; font-size: 11px; }
+.pal-sub { padding-left: 26px; }
+.pal-item.pal-hidden .pal-name, .pal-item.pal-hidden .pal-key { opacity: 0.45; }
 .pal-list { overflow-y: auto; min-height: 0; flex: 1; }
 .pal-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 13.5px; color: #ddd; }
 .pal-item[aria-selected="true"] { background: rgba(201,168,106,0.16); box-shadow: inset 2px 0 0 var(--accent); }
@@ -1863,6 +1901,8 @@ body.light .pal-item.off { color: #9a958c; }
 body.light .pal-item:hover { background: rgba(0,0,0,0.04); }
 body.light .pal-item[aria-selected="true"] { background: rgba(124,93,38,0.12); }
 body.light .pal-key { border-color: #d6d1c7; }
+body.light .pal-edit { border-color: #d6d1c7; }
+body.light .pal-box { border-color: #b9b3a8; }
 body.light .pal-item.pal-last-recent { border-bottom-color: #e2ddd4; }
 body.light .modal-backdrop.font-picker { background: none; }
 body.light .modal { border-color: #dcd7ce; box-shadow: 0 18px 60px rgba(0,0,0,0.18); }
@@ -1935,7 +1975,7 @@ body.light .fr-hit mark { background: rgba(124,93,38,0.22); }
 body.light .fr-acts, body.light #find-results .fr-acts button { background: #fff; box-shadow: -10px 0 10px #fff; }
 body.light #find-results .fr-acts button { box-shadow: none; }
 body.light #searchbar #search-list[aria-pressed="true"] { background: rgba(124,93,38,0.12); }
-body.light #hint { background: #2b2926; color: #f0ede7; box-shadow: 0 3px 14px rgba(0,0,0,0.2); }
+body.light #hint { background: #23211e; color: #f3efe6; border-color: #b8975a; box-shadow: 0 4px 18px rgba(0,0,0,0.22); }
 
 /* Goals, the shortcuts */
 body.light .stats-row input, body.light .stats-row select { background: #fff; border-color: #cfcac0; color: #1c1a17; }
