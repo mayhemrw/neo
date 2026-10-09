@@ -16331,9 +16331,21 @@ function reviewWithThreads(entries, data, review) {
   const list = [];
   const kept = [];
   let left = 0;
+  // a thread on no chapter of the book (on the title page, on a part of a
+  // file NEO couldn't place, or on a chapter no longer in the book) goes
+  // back over the file's first line, the book's title: every comment goes
+  const top = model.paragraphs.find((p) => p.before && p.before.trim());
   for (const th of threads) {
     const sec = numOf.has(th.chapter) ? secs.get(numOf.get(th.chapter)) : null;
-    if (!sec) { left++; continue; }
+    if (!sec) {
+      if (!top) { left++; continue; }
+      list.push({
+        start: { p: top.index, o: 0 }, end: { p: top.index, o: top.before.length }, resolved: !!th.resolved,
+        comments: th.comments.map((c) => ({ author: c.mine ? (c.by || me) : (c.by || ''), date: c.at, text: c.text || '' }))
+      });
+      kept.push(th);
+      continue;
+    }
     const st = ReviewMatch.streamOf(sec);
     const f = th.anchor ? ReviewMatch.findAnchor(st.before, th.anchor) : null;
     // an offset in the section's text → a paragraph of the file
@@ -17582,8 +17594,8 @@ function reviewMarginHtml(threads) {
     if (why === 'missing') flags.push(`<span class="rv-flag rv-stale">${escHtml(t('chapter gone'))}</span>`);
     if (why === 'unplaced') {
       flags.push(th.front
-        ? `<span class="rv-flag" title="${escAttr(t('On the title page, which isn’t a chapter in NEO. Kept here; it stays out of the next file for an editor.'))}">${escHtml(t('title page'))}</span>`
-        : `<span class="rv-flag" title="${escAttr(t('On a part of the file NEO couldn’t match to a chapter. Kept here; it stays out of the next file for an editor.'))}">${escHtml(t('not placed'))}</span>`);
+        ? `<span class="rv-flag" title="${escAttr(t('On the title page, which isn’t a chapter in NEO. It goes back to the editor on the book’s title.'))}">${escHtml(t('title page'))}</span>`
+        : `<span class="rv-flag" title="${escAttr(t('On a part of the file NEO couldn’t match to a chapter. It goes back to the editor on the book’s title.'))}">${escHtml(t('not placed'))}</span>`);
     }
     const quote = th.anchor && th.anchor.exact ? `<div class="rv-quote">${escHtml(reviewSnip(th.anchor.exact, 90))}</div>` : '';
     const first = th.comments[0];

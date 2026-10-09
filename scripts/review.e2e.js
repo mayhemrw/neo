@@ -1010,6 +1010,51 @@ test('review.json written by another computer meanwhile: taken in, and never wri
   assert.equal(await js(`rvs.data.editors.includes('From the laptop')`), true);
 });
 
+test('a comment on the title page comes in, and goes back to the editor on the title, with the reply', async () => {
+  const file = path.join(tmp, 'title-comment.docx');
+  await sendTo('Dana Editor', file);
+  const zip = await JSZip.loadAsync(fs.readFileSync(file));
+  let doc = await zip.file('word/document.xml').async('string');
+  const i = doc.indexOf('A Tale of Two Cities');
+  assert.ok(i > 0);
+  const rs = Math.max(doc.lastIndexOf('<w:r>', i), doc.lastIndexOf('<w:r ', i));
+  const re = doc.indexOf('</w:r>', i) + 6;
+  doc = doc.slice(0, rs) + '<w:commentRangeStart w:id="901"/>' + doc.slice(rs, re) + '<w:commentRangeEnd w:id="901"/><w:r><w:commentReference w:id="901"/></w:r>' + doc.slice(re);
+  zip.file('word/document.xml', doc);
+  const cm = zip.file('word/comments.xml');
+  const one = '<w:comment w:id="901" w:author="Dana Editor" w:date="2026-10-10T10:00:00Z"><w:p><w:r><w:t>Better title?</w:t></w:r></w:p></w:comment>';
+  if (cm) zip.file('word/comments.xml', (await cm.async('string')).replace('</w:comments>', one + '</w:comments>'));
+  else {
+    zip.file('word/comments.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' + one + '</w:comments>');
+    const rels = await zip.file('word/_rels/document.xml.rels').async('string');
+    zip.file('word/_rels/document.xml.rels', rels.replace('</Relationships>', '<Relationship Id="rId901" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>'));
+    const ct = await zip.file('[Content_Types].xml').async('string');
+    zip.file('[Content_Types].xml', ct.replace('</Types>', '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>'));
+  }
+  const back = path.join(tmp, 'title-comment-back.docx');
+  fs.writeFileSync(back, await zip.generateAsync({ type: 'nodebuffer' }));
+  await importIt(back);
+  const th = await thread((x) => x.comments[0].text === 'Better title?');
+  assert.ok(th && th.front && !th.chapter, JSON.stringify(th));
+  // the writer answers it
+  await js(`(async () => {
+    const th = rvs.data.threads.find((x) => x.id === ${JSON.stringify(th.id)});
+    th.comments.push({ by: book.author, at: new Date().toISOString(), text: 'Keep it.', mine: true });
+    await reviewSave(book.id, rvs.data);
+  })()`);
+  const again = path.join(tmp, 'title-comment-again.docx');
+  await sendTo('Dana Editor', again);
+  const m = await readDocx(again);
+  const c = m.comments.find((x) => x.text === 'Better title?');
+  assert.ok(c, 'the title page comment went back');
+  assert.match(m.paragraphs[c.start.p].before, /A Tale of Two Cities/, 'over the title');
+  const reply = m.comments.find((x) => x.text === 'Keep it.');
+  assert.ok(reply && reply.parent != null, 'the reply under it');
+  // and read back, it's the same thread
+  await importIt(again);
+  assert.equal((await reviewJson()).threads.filter((x) => x.comments[0].text === 'Better title?').length, 1);
+});
+
 test('on the Review tab the left edge doesn’t slide the Chapters pane over the list', async () => {
   const hover = (tab) => js(`(() => {
     goToTab(${JSON.stringify(tab)});
