@@ -465,3 +465,35 @@ describe('the right book', () => {
     assert.equal(M.overlap(file([{ title: 'Chapter 1', paras: ['Too short.'] }]), sent([{ id: 'c1', title: 'Chapter 1', paras: other }])), null, 'too short to tell');
   });
 });
+
+describe('Word’s own way of moving a block of paragraphs', () => {
+  // as Word 365 wrote it (the shape of a real file): the paragraph before
+  // the block gets an inserted mark, the block's paragraphs moved marks,
+  // and a blank paragraph after them keeps the old mark; blank lines added
+  // elsewhere are inserted marks on empty paragraphs
+  const A = (id) => `w:id="${id}" w:author="Ryan" w:date="2026-10-09T12:44:00Z"`;
+  const markIns = (id) => `<w:rPr><w:ins ${A(id)}/></w:rPr>`;
+  const p = (text, rpr = '') => ({ xml: `<w:p><w:pPr>${rpr}</w:pPr>${text ? run(text) : ''}</w:p>` });
+  const from = (text, id) => ({ xml: `<w:p><w:pPr><w:rPr><w:moveFrom ${A(id)}/></w:rPr></w:pPr><w:moveFrom ${A(id + 1)}><w:r><w:delText xml:space="preserve">${text}</w:delText></w:r></w:moveFrom></w:p>` });
+  const to = (text, id) => ({ xml: `<w:p><w:pPr><w:rPr><w:moveTo ${A(id)}/></w:rPr></w:pPr><w:moveTo ${A(id + 1)}>${run(text)}</w:moveTo></w:p>` });
+  const wrapFrom = (list) => [{ xml: `<w:moveFromRangeStart ${A(90)} w:name="move1"/>` + list[0].xml }, ...list.slice(1, -1), { xml: list[list.length - 1].xml + '<w:moveFromRangeEnd w:id="90"/>' }];
+  const wrapTo = (list) => [{ xml: `<w:moveToRangeStart ${A(91)} w:name="move1"/>` + list[0].xml }, ...list.slice(1, -1), { xml: list[list.length - 1].xml + '<w:moveToRangeEnd w:id="91"/>' }];
+  test('one move of three paragraphs, the blank lines ignored, nothing out of place', () => {
+    const block = ['Mr. Williams shakes his head.', 'Ash laughs.', '“How’s school?”'];
+    const paras = ['Those words surprise him.', ...block, 'Sam bobs his head.', '“Good on you.”', 'Sam just nods.', '“Still hoping for MU?”', '“Yes, sir.”'];
+    const m = file([{ title: 'Chapter 1', paras: [
+      paras[0], ...wrapFrom(block.map((x, i) => from(x, 10 + i * 2))), paras[4],
+      p(paras[5], markIns(20)), ...wrapTo(block.map((x, i) => to(x, 30 + i * 2))), p(''),
+      paras[6], p(paras[7], markIns(40)), p('', markIns(41)), p('', markIns(42)), p(''), paras[8]
+    ] }]);
+    const r = M.match(m, sent([{ id: 'c1', title: 'Chapter 1', paras }]), { fallback: 'Ryan' });
+    assert.deepEqual(r.suggestions.map((s) => s.kind), ['move']);
+    const s = r.suggestions[0];
+    const text = paras.join(P);
+    const f = M.findAnchor(text, s.anchor);
+    const t = M.findAnchor(text, s.to);
+    const out = text.slice(0, f.o) + text.slice(f.o + f.len);
+    const at = t.o < f.o ? t.o : t.o - f.len;
+    assert.equal(out.slice(0, at) + s.ins + out.slice(at), [paras[0], paras[4], paras[5], ...block, paras[6], paras[7], paras[8]].join(P));
+  });
+});

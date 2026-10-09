@@ -77,9 +77,27 @@
     for (const s of sections) {
       s.title = s.heading ? s.heading.after.replace(/\s+/g, ' ').trim() : '';
       s.titleBefore = s.heading ? s.heading.before.replace(/\s+/g, ' ').trim() : '';
-      // the paragraphs that are the section's text: not the blank one NEO
-      // puts under a heading, unless the editor wrote in it
-      s.paras = s.paras.filter((p) => !(blank(p.after) && blank(p.before) && !p.segs.some(changed)));
+      // the paragraphs that are the section's text: not blank ones (the one
+      // NEO puts under a heading, blank lines an editor added or Word made
+      // in moving text), unless the editor wrote in them. NEO's text has no
+      // blank lines, so a blank paragraph's mark joins the mark before it:
+      // two paragraphs are apart before the changes if any mark between
+      // them was there before, and after if any is still there after.
+      const kept = [];
+      for (const p of s.paras) {
+        if (blank(p.after) && blank(p.before) && !p.segs.some(changed)) {
+          const last = kept[kept.length - 1];
+          if (last) {
+            last.mark = {
+              ins: last.mark.ins >= 0 && p.mark.ins >= 0 ? last.mark.ins : -1,
+              del: last.mark.del >= 0 && p.mark.del >= 0 ? last.mark.del : -1
+            };
+          }
+          continue;
+        }
+        kept.push(Object.assign({}, p, { mark: Object.assign({}, p.mark) }));
+      }
+      s.paras = kept;
     }
     return { how: marked ? 'bookmarks' : model.paragraphs.some((p) => p.heading) ? 'headings' : 'none', sections };
   }
@@ -247,7 +265,7 @@
       }
       lastMove = null;
       // …or right before them (a paragraph moved to or from a chapter's end)
-      if (c && c.moved) {
+      if (c && (c.moved || c.type === 'markIns')) {
         const next = pieces[pieces.indexOf(pc) + 1];
         const nc = next ? (next.ins >= 0 ? changes[next.ins] : next.del >= 0 ? changes[next.del] : null) : null;
         if (nc && nc.move && ((c.type === 'markDel' && nc.type === 'moveFrom') || (c.type === 'markIns' && nc.type === 'moveTo'))) {
