@@ -11790,8 +11790,21 @@ async function showHistory(msg) {
   page.addEventListener('copy', (ev) => {
     const range = pageSelection();
     if (!range) return;
+    // A selection inside one styled stretch (a line all in italics) clones
+    // as bare text: its <i>, <b>, <u>, <s> are put back around it, up to
+    // its paragraph.
+    let piece = range.cloneContents();
+    for (let n = range.commonAncestorContainer; n && n !== page; n = n.parentNode) {
+      if (n.nodeType !== Node.ELEMENT_NODE) continue;
+      if (n.tagName === 'P') break;
+      if (/^(I|EM|B|STRONG|U|S)$/.test(n.tagName)) {
+        const wrap = n.cloneNode(false);
+        wrap.appendChild(piece);
+        piece = wrap;
+      }
+    }
     const holder = document.createElement('div');
-    holder.appendChild(range.cloneContents());
+    holder.appendChild(piece);
     holder.querySelectorAll('.hv-fold, del').forEach((x) => x.remove());
     holder.querySelectorAll('ins').forEach((x) => x.replaceWith(...x.childNodes));
     holder.querySelectorAll('p').forEach((p) => { if (!p.textContent.trim()) p.remove(); });

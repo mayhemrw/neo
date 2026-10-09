@@ -450,6 +450,32 @@ test('a passage copied out of a version and pasted into the book: a restore', as
   await js(`slogSaveAll()`);
 });
 
+test('a line all in italics copies out of a version in italics', async () => {
+  await openHistory(ids[0]);
+  await pick((await items()).findIndex((x) => x.kind === 'Imported'));
+  // (the import has no italics: one line of the page is set in them, as a version with them shows it)
+  await js(`(() => {
+    const p = [...${hv('.hv-page')}.querySelectorAll('p')].find((x) => x.textContent === 'Nets hung drying on the wall.');
+    p.innerHTML = '<i>Nets hung drying on the wall.</i>';
+    const r = document.createRange();
+    r.selectNodeContents(p.querySelector('i').firstChild);
+    getSelection().removeAllRanges();
+    getSelection().addRange(r);
+  })()`);
+  await js(`${hv('.hv-copy')}.click()`);
+  await tick(200);
+  const { clipboard } = require('electron');
+  assert.equal(clipboard.readText(), 'Nets hung drying on the wall.');
+  assert.match(clipboard.readHTML(), /<i>Nets hung drying on the wall\.<\/i>/);
+  await key('Escape');
+  await caretEnd(1, 0);
+  await type(' ');
+  wc.paste();
+  await until('pasted', `chapterHTML[${JSON.stringify(ids[1])}].includes('<i>Nets hung drying on the wall.</i>')`);
+  await pause();
+  await js(`slogSaveAll()`);
+});
+
 test('Restore as New Chapter: a deleted chapter back in its old place', async () => {
   await openHistory(ids[2]);
   await pick(0); // its last version before it was deleted
