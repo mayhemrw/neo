@@ -8,7 +8,7 @@ The writer sends the book to an editor as a Word file (**File → Export → Wor
 
 ## What the writer sees
 
-- **Sending:** File → Export → Word for an Editor… asks for the editor's name (remembered per book, a short list to pick from), then saves the .docx in standard manuscript format (phase 5's pages) with the open comment threads and the writer's replies. The version "Sent to Dana (Oct 9)" shows in Chapter History like any named version.
+- **Sending:** File → Export → Word for an Editor… asks for the editor's name (remembered per book, a short list to pick from), then saves the .docx in NEO's regular Word layout (decision 4) with the comment threads (open, and resolved ones marked done) and the writer's replies. The version "Sent to Dana (Oct 9)" shows in Chapter History like any named version.
 - **Bringing it back:** File → Import Review… (or a .docx dropped on the open book's page) picks the file, says what it found ("Dana: 212 changes, 31 comments, 4 changes made without Track Changes"), and opens the Review view. A file that's not from NEO, or from a round it can't find, can still be imported: NEO asks which version it was sent from, defaulting to the closest by text.
 - **The Review view** (View → Review, also in Ctrl+K; it appears as a tab only while the book has open suggestions or comments):
   - The book read-only, with each suggestion inline: insertions underlined, deletions struck, in the reviewer's color. Moves show as one suggestion.
@@ -19,7 +19,7 @@ The writer sends the book to an editor as a Word file (**File → Export → Wor
   - A suggestion whose passage the writer has rewritten since is marked "out of date" and shows the editor's wording beside today's; the writer can still apply it by hand.
   - Two reviewers who changed the same passage (parallel rounds) show side by side; the writer picks one, or writes their own.
   - A file passed from one editor to the next (sequential rounds) keeps each person's changes under their own name, as Word stamped them.
-- **Comments:** threads with replies, as Word had them. The writer replies (typed in NEO) or resolves. Resolved threads stay in review.json but leave the margin.
+- **Comments:** threads with replies, as Word had them. The writer replies (typed in NEO), resolves, or resolves and deletes (decision 6). Resolved threads fold up in the margin and go back to the editor marked done; deleted ones move to "Deleted comments".
 - **The writing page** never shows any of this. A small count in the Review tab's label is the only sign there's something waiting.
 
 ## Under the hood
@@ -27,7 +27,7 @@ The writer sends the book to an editor as a Word file (**File → Export → Wor
 | Piece | Where |
 |---|---|
 | Reading Word's review markup: `w:ins`, `w:del`, `w:moveFrom`/`w:moveTo`, `w:rPrChange`/`w:pPrChange`, `comments.xml`, `commentsExtended.xml` (replies, done), `commentsIds.xml`, `people.xml`. A DOM-free XML tokenizer, not regexes over `<w:p>`. Gives each paragraph two texts (as the editor left it, and before their changes) plus the change spans and comment ranges. | new `review-docx.js` (plain JS, runs in Node and the browser) |
-| Writing the review export: phase 5's `docxEntries` plus `docProps/custom.xml` (the round id, `NEO.ReviewRound`), a hidden bookmark at each chapter start (`_NEO_ch_<n>`), `w14:paraId` on paragraphs, and the comment parts for threads going back. | `manuscript.js` (options), `review-docx.js` |
+| Writing the review export: NEO's regular Word export (`buildDocxEntries`, decision 4) plus `docProps/custom.xml` (the round id, `NEO.ReviewRound`), a hidden bookmark at each chapter start (`_NEO_ch_<n>`), `w14:paraId` on paragraphs, and the comment parts for threads going back. | `app.js` DOCX section (options), `review-docx.js` |
 | Matching an import to its version: by the round id, else by the writer's choice. Chapters by bookmark, else by heading, else by text. Paragraphs matched with `SlogDiff.compare`'s paragraph matcher. Untracked changes: the "before" text compared with the version's text. | `review-match.js` (plain JS) |
 | `review.json` (book folder, through `json:write`): `rounds` (id, sent at, to whom, version ref, files imported), `reviewers` (name, color), `suggestions` (id, round, reviewer, chapter, anchor, kind, del, ins, untracked, date, status), `threads` (id, round, chapter, anchor, comments [{by, at, text}], resolved). Anchors are text quotes (exact plus 32 characters each side, and a paragraph hint), found again in today's text whenever shown. | `app.js` REVIEW section |
 | Copies of the reviewed files: `reviews/<round>-<reviewer>.docx` in the book folder (decision 5), through a new `review:` IPC with `libName()`. Daily backup zips them with the book; Duplicate leaves them. | `main.js`, `preload.js` |
@@ -42,9 +42,9 @@ Reply with the number and letter to change one ("2b, 7b"), or "defaults fine".
 1. **The Review view:** (a) a tab beside Manuscript, Notes and the rest, shown only while there's something to review *(default)*; (b) a separate full-window view opened from the menu only.
 2. **Reviewer names in the Scribe's Log:** (a) the name Word stamped, as written, so a publisher can see which words were the editor's *(default)*; (b) "Reviewer 1", "Reviewer 2" in the log, real names only in the book's review file.
 3. **Formatting-only changes** (italics or bold turned on or off): (a) as the spec says, applied at import without asking, after a version "Before Dana's review (Oct 9)" is named, and listed in the import summary *(default)*; (b) shown as suggestions like text changes.
-4. **What goes to the editor:** (a) standard manuscript format, phase 5's pages (double-spaced, header, page numbers) *(default)*; (b) NEO's regular Word layout.
+4. **What goes to the editor:** **Ryan chose (b), Oct 9: NEO's regular Word layout** (the existing Word export, `buildDocxEntries` in app.js), not manuscript format.
 5. **A copy of each reviewed .docx in the book folder** (`reviews/`): (a) yes, so a file can be read again later *(default)*; (b) no.
-6. **Resolved comment threads on the next export:** (a) left out; only open threads, with your replies, go back *(default)*; (b) sent back marked done.
+6. **Resolved comment threads on the next export:** **Ryan chose (b), Oct 9: sent back marked done.** And two buttons on every thread: **Resolve** (marked done, kept, goes back to the editor marked done) and **Resolve and Delete** (gone from the margin and from every later export). Words are never lost: a deleted thread moves to a "Deleted comments" list at the bottom of the Review view's margin, where it can be put back, and Ctrl+Z undoes it; the toast says where it went.
 7. **Pocket:** (a) desktop only for now; Pocket's bridge has no history, which the round-trip needs *(default)*; (b) reading and replying to comments on Pocket too (a later phase).
 8. **Accept All:** (a) names a version first, like Replace All *(default)*; (b) no version, Ctrl+Z only.
 
@@ -91,5 +91,7 @@ Running the Electron tests in the cloud: `timeout 600 xvfb-run -a -s "-screen 0 
 (none yet)
 
 ## Progress log
+
+- Oct 9, 7:40 AM PT: Ryan chose 4b and 6b (with Resolve and Resolve and Delete). Others still on defaults while he reads the explanation of 1 to 3.
 
 - Oct 9, 7:30 AM PT: plan written; branch cut from `main` at `2ad5154`.
