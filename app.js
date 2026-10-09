@@ -226,7 +226,7 @@ function writeLibrary(lib = library) {
 // library's copy is the last device's, so a device opening the library for
 // the first time starts out the way the writer last had it, and from then on
 // keeps its own.
-const DEVICE_LOOK = ['pageTheme', 'uiBright', 'uiBrightAside', 'uiZoom', 'editorFontSize', 'typewriter', 'focus', 'posMode', 'outlineView', 'vimKeys', 'findCase', 'findWord', 'findTitles'];
+const DEVICE_LOOK = ['pageTheme', 'uiBright', 'uiBrightAside', 'uiZoom', 'editorFontSize', 'typewriter', 'focus', 'posMode', 'outlineView', 'vimKeys', 'findCase', 'findWord', 'findTitles', 'findDock'];
 const DEVICE_LOOK_KEY = 'neo-device-look';
 function deviceLookOf(lib) {
   const out = {};
@@ -7132,6 +7132,7 @@ function resolveSticky(sid) {
 }
 
 function focusSticky(sid) {
+  if (findList.open && findDocked()) toggleFindList(false); // a note needs its pane back
   $('#side-pane').classList.add('open');
   const el = document.querySelector(`.sticky[data-sid="${sid}"] textarea`);
   if (el) el.focus();
@@ -12386,6 +12387,7 @@ setInterval(() => { if (book) flushAllSaves('tick'); }, 20000);
 
 async function backToShelf() {
   if (reading) stopReadAloud(false);
+  if (!$('#searchbar').hidden) closeSearch(); // its hits were this book's
   flushAllSaves();
   slogClose();
   tabPlaces = {};
@@ -12895,6 +12897,7 @@ function openSearch(fromVim = false) {
 }
 
 function closeSearch() {
+  if (findList.open) toggleFindList(false); // a docked list gives Notes back
   $('#searchbar').hidden = true;
   searchState = { matches: [], idx: -1, query: '' };
   searchFromVim = false;
@@ -13092,12 +13095,14 @@ function runSearch() {
   if (!q) {
     $('#search-count').textContent = '';
     paintHighlights();
+    renderFindList();
     return;
   }
   searchState.matches = findMatches(q);
   const n = searchState.matches.length;
   $('#search-count').textContent = n ? t('{n} found', { n }) : t('none');
   paintHighlights();
+  renderFindList();
 }
 
 // only runs when the user asks (Enter / arrows)
@@ -13111,6 +13116,7 @@ function gotoMatch(i) {
     $('#paper-scroll').scrollTop += rect.top - window.innerHeight * 0.45;
   } catch { /* range collapsed by an edit; next search rebuilds */ }
   $('#search-count').textContent = t('{i} of {n}', { i: searchState.idx + 1, n: m.length });
+  findListFollow();
 }
 
 function freshSearchIfStale() {
@@ -13199,12 +13205,407 @@ function replaceAllMatches() {
   runSearch();
 }
 
+// ---- The results list: every hit in context, grouped by chapter, in a
+// panel below the bar or docked in the right-hand pane over Notes &
+// Comments. Hidden until the bar's List button asks for it; where it was
+// last (below or docked) is kept per device (library.findDock).
+
+const findList = { open: false, rows: [], tops: [], total: 0, rowOf: [], cursor: -1, key: '', sideWas: null };
+// rows have fixed heights, so a long book's 5,000 hits draw only what's on
+// screen: a hit is one line below the bar, three in the narrower pane
+const FIND_ROW_H = { head: 30, hit: 26, hitDocked: 60 };
+const FIND_CONTEXT = 40;
+const findDocked = () => !!(library && library.findDock) && !NO_HOVER;
+
+// A hit's line: up to n characters each side of it, cut at a space where
+// there is one so no word is halved; before and after say whether the
+// paragraph goes on past the cut (an … there).
+function findContext(text, s, e, n = FIND_CONTEXT) {
+  let a = Math.max(0, s - n);
+  let z = Math.min(text.length, e + n);
+  if (a > 0) {
+    const cut = text.slice(a, s).search(/\s/);
+    if (cut >= 0 && cut < s - a - 1) a += cut + 1;
+  }
+  if (z < text.length) {
+    const cut = text.slice(e, z).search(/\s\S*$/);
+    if (cut > 0) z = e + cut;
+  }
+  return { a, z, before: a > 0, after: z < text.length };
+}
+
+// The list's rows, heads and hits, from Find's matches. In the manuscript
+// the hits that cross formatting come first, under their own head (the
+// writer decides those), then each chapter's under its heading, a title's
+// hit first as Find finds it. Elsewhere one head holds them all.
+// [{ head: 'crosses' | 'chapter' | 'tab', chId, n } | { i, cross }]
+function findRows(matches, manuscript) {
+  const rows = [];
+  if (!matches.length) return rows;
+  if (!manuscript) {
+    rows.push({ head: 'tab', n: matches.length });
+    matches.forEach((m, i) => rows.push({ i }));
+    return rows;
+  }
+  const cross = [];
+  matches.forEach((m, i) => { if (m.crosses) cross.push(i); });
+  if (cross.length) {
+    rows.push({ head: 'crosses', n: cross.length });
+    for (const i of cross) rows.push({ i, cross: true });
+  }
+  let head = null;
+  matches.forEach((m, i) => {
+    if (m.crosses) return;
+    if (!head || head.chId !== m.chId) { head = { head: 'chapter', chId: m.chId, n: 0 }; rows.push(head); }
+    head.n++;
+    rows.push({ i });
+  });
+  return rows;
+}
+
+// The rows to draw for where the list is scrolled: from the row at the
+// top of the view to the last one in it, and a few more each side.
+// tops[k] is row k's top; [from, to) in rows.
+function findWindow(tops, scrollTop, height, extra = 8) {
+  if (!tops.length) return [0, 0];
+  let lo = 0;
+  let hi = tops.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (tops[mid] <= scrollTop) lo = mid;
+    else hi = mid - 1;
+  }
+  let end = lo;
+  while (end < tops.length && tops[end] < scrollTop + height) end++;
+  return [Math.max(0, lo - extra), Math.min(tops.length, end + extra)];
+}
+
+// a chapter's heading in the list: "Chapter 3 — The Harbor"
+function findChapterLabel(chId) {
+  if (!chId || !book) return '';
+  if (chapterKind(chId) === 'unnumbered') return stickyChapterLabel(chId);
+  const title = ((book.chapterTitles || {})[chId] || '').trim();
+  return title ? chapterName(chId) + ' ' + headingDash() + ' ' + title : chapterName(chId);
+}
+const findTabLabel = () => (currentTab === 'notes' ? t('Notes') : currentTab === 'outline' ? t('Outline') : t('Darlings'));
+
+function findListEl() {
+  let el = $('#find-results');
+  if (el) return el;
+  el = document.createElement('div');
+  el.id = 'find-results';
+  el.hidden = true;
+  el.setAttribute('role', 'region');
+  el.setAttribute('aria-label', t('Find results'));
+  const head = document.createElement('div');
+  head.className = 'fr-head';
+  const sum = document.createElement('span');
+  sum.className = 'fr-sum';
+  const dock = document.createElement('button');
+  dock.className = 'fr-dock';
+  dock.onclick = () => dockFindList(!findDocked());
+  const close = document.createElement('button');
+  close.className = 'fr-close';
+  close.textContent = '✕';
+  close.title = t('Hide the list');
+  close.setAttribute('aria-label', close.title);
+  close.onclick = () => { toggleFindList(false); $('#search-input').focus(); };
+  head.append(sum, dock, close);
+  const note = document.createElement('div');
+  note.className = 'fr-note';
+  note.hidden = true;
+  const empty = document.createElement('div');
+  empty.className = 'fr-empty';
+  empty.hidden = true;
+  const sc = document.createElement('div');
+  sc.className = 'fr-scroll';
+  sc.tabIndex = 0;
+  sc.setAttribute('role', 'listbox');
+  sc.setAttribute('aria-label', t('Find results'));
+  const space = document.createElement('div');
+  space.className = 'fr-space';
+  sc.append(space);
+  el.append(head, note, empty, sc);
+  let drawing = 0;
+  sc.addEventListener('scroll', () => {
+    if (drawing) return;
+    drawing = requestAnimationFrame(() => { drawing = 0; drawFindList(); });
+  });
+  // a click goes to the hit, like ↑ ↓ in the bar
+  sc.addEventListener('click', (e) => {
+    const row = e.target.closest('.fr-hit');
+    if (row) findListGo(+row.dataset.k);
+  });
+  // focus arriving from Tab or a click lands on the hit last gone to
+  sc.addEventListener('focus', () => {
+    if (findList.cursor < 0) findListPlace(findList.rowOf[searchState.idx] ?? findListStep(-1, 1));
+  });
+  sc.addEventListener('keydown', findListKeys);
+  $('#searchbar').append(el);
+  return el;
+}
+
+// The List button: the list opens where it was last, or goes away (a
+// docked list gives the right-hand pane back as it was)
+function toggleFindList(on = !findList.open) {
+  findList.open = on;
+  $('#search-list').setAttribute('aria-pressed', String(on));
+  placeFindList();
+  if (!on) return;
+  freshSearchIfStale();
+  renderFindList();
+  findListFollow();
+}
+function dockFindList(on) {
+  library.findDock = on;
+  writeLibrary(library);
+  placeFindList();
+  renderFindList();
+  findListFollow();
+  $('#find-results .fr-scroll').focus({ preventScroll: true });
+}
+// Below the bar, or docked: in the right-hand pane, over the notes, kept
+// open while it's there and the page moved over as if the pane were
+// pinned. Undocking puts the pane back the way the writer had it.
+function placeFindList() {
+  const el = findListEl();
+  const pane = $('#side-pane');
+  const view = $('#editor-view');
+  const dock = findList.open && findDocked();
+  if (dock && el.parentElement !== pane) {
+    findList.sideWas = { pinned: pane.dataset.pinned === '1' };
+    pane.dataset.pinned = '1';
+    pane.classList.add('open', 'find-docked');
+    view.classList.add('side-pinned', 'find-docked');
+    pane.append(el);
+  } else if (!dock && el.parentElement === pane) {
+    $('#searchbar').append(el);
+    const was = findList.sideWas || { pinned: false };
+    findList.sideWas = null;
+    pane.classList.remove('find-docked');
+    view.classList.remove('find-docked');
+    pane.dataset.pinned = was.pinned ? '1' : '0';
+    view.classList.toggle('side-pinned', was.pinned);
+    pane.classList.toggle('open', was.pinned || pane.matches(':hover'));
+  }
+  el.hidden = !findList.open;
+  el.classList.toggle('docked', dock);
+  const b = el.querySelector('.fr-dock');
+  b.hidden = NO_HOVER;
+  b.textContent = dock ? t('Undock') : t('Dock');
+  b.title = dock ? t('Put the list back under the find bar') : t('Keep the list in the right-hand pane');
+  b.setAttribute('aria-label', b.title);
+}
+
+// The rows for the matches Find has now. A new search starts the list at
+// the top; the same search found again (after a replace, or an edit on
+// the page) keeps it where it was.
+function renderFindList() {
+  if (!findList.open) return;
+  const el = findListEl();
+  const ms = searchState.matches;
+  const hitH = el.classList.contains('docked') ? FIND_ROW_H.hitDocked : FIND_ROW_H.hit;
+  const rows = findRows(ms, currentTab === 'manuscript');
+  const tops = [];
+  const rowOf = new Array(ms.length).fill(-1);
+  let y = 0;
+  rows.forEach((r, k) => {
+    tops.push(y);
+    if (r.head) y += FIND_ROW_H.head;
+    else { rowOf[r.i] = k; y += hitH; }
+  });
+  Object.assign(findList, { rows, tops, total: y, rowOf, hitH });
+  const sc = el.querySelector('.fr-scroll');
+  const key = [searchState.query, searchState.tab, searchState.opts].join('\n');
+  if (key !== findList.key) { findList.key = key; findList.cursor = -1; sc.scrollTop = 0; }
+  if (!rows[findList.cursor] || rows[findList.cursor].head) findList.cursor = -1;
+  el.querySelector('.fr-space').style.height = y + 'px';
+  el.querySelector('.fr-sum').textContent = ms.length ? t('{n} found', { n: ms.length }) : '';
+  const empty = el.querySelector('.fr-empty');
+  empty.textContent = searchState.query ? t('No matches') : t('Type what to find.');
+  empty.hidden = ms.length > 0;
+  sc.hidden = !ms.length;
+  // docked over Notes & Comments while in the Notes tab: say which notes
+  const note = el.querySelector('.fr-note');
+  note.hidden = !(el.classList.contains('docked') && currentTab === 'notes');
+  note.textContent = t('Finding in the Notes tab, not in Notes & Comments.');
+  drawFindList();
+}
+
+// Only the rows in view (and a few either side) are in the page
+function drawFindList() {
+  const el = $('#find-results');
+  if (!el || el.hidden) return;
+  const sc = el.querySelector('.fr-scroll');
+  const space = el.querySelector('.fr-space');
+  const [from, to] = findWindow(findList.tops, sc.scrollTop, sc.clientHeight || 600);
+  const frag = document.createDocumentFragment();
+  for (let k = from; k < to; k++) frag.append(findRowEl(k));
+  space.replaceChildren(frag);
+  const cur = findList.cursor;
+  if (cur >= from && cur < to) sc.setAttribute('aria-activedescendant', 'fr-row-' + cur);
+  else sc.removeAttribute('aria-activedescendant');
+}
+
+function findRowEl(k) {
+  const r = findList.rows[k];
+  const d = document.createElement('div');
+  d.style.top = findList.tops[k] + 'px';
+  d.id = 'fr-row-' + k;
+  if (r.head) {
+    d.className = 'fr-group' + (r.head === 'crosses' ? ' fr-crosses' : '');
+    d.setAttribute('role', 'presentation');
+    const name = document.createElement('span');
+    name.className = 'fr-gname';
+    name.textContent = r.head === 'crosses' ? t('Crosses formatting') : r.head === 'chapter' ? findChapterLabel(r.chId) : findTabLabel();
+    const n = document.createElement('span');
+    n.className = 'fr-gn';
+    n.textContent = String(r.n);
+    d.append(name, n);
+    return d;
+  }
+  const m = searchState.matches[r.i];
+  d.className = 'fr-hit' + (r.cross ? ' fr-cross' : '') + (r.i === searchState.idx ? ' at' : '') + (k === findList.cursor ? ' cur' : '');
+  d.style.height = findList.hitH + 'px';
+  d.dataset.k = k;
+  d.setAttribute('role', 'option');
+  d.setAttribute('aria-selected', String(k === findList.cursor));
+  const line = document.createElement('span');
+  line.className = 'fr-line';
+  // a hit that crosses formatting says which chapter (its group doesn't);
+  // a title's hit says it's the title
+  const where = r.cross ? chapterName(m.chId) : m.title ? t('Title') : '';
+  if (where) {
+    const tag = document.createElement('span');
+    tag.className = 'fr-tag';
+    tag.textContent = where;
+    line.append(tag);
+  }
+  findLineInto(line, m, r.cross);
+  d.append(line);
+  return d;
+}
+
+// A hit's line of context, the hit in bold. One that crosses formatting
+// shows the formatting (the italic word in italics) and marks the hit.
+function findLineInto(line, m, formatted) {
+  const { text, nodes, root } = m.block;
+  const c = findContext(text, m.start, m.end);
+  const clean = (x) => x.replace(/\s+/g, ' ');
+  if (c.before) line.append('…');
+  if (!formatted) {
+    const b = document.createElement('b');
+    b.textContent = clean(text.slice(m.start, m.end));
+    line.append(clean(text.slice(c.a, m.start)), b, clean(text.slice(m.end, c.z)));
+  } else {
+    nodes.forEach(({ node, at }, x) => {
+      const ns = Math.max(at, c.a);
+      const ne = Math.min(x + 1 < nodes.length ? nodes[x + 1].at : text.length, c.z);
+      if (ne <= ns) return;
+      const style = findStyleOf(node, root);
+      const cuts = [ns, ...[m.start, m.end].filter((p) => p > ns && p < ne), ne];
+      for (let p = 0; p + 1 < cuts.length; p++) {
+        let piece = document.createTextNode(clean(text.slice(cuts[p], cuts[p + 1])));
+        for (const tag of style) { const w = document.createElement(tag); w.append(piece); piece = w; }
+        if (cuts[p] >= m.start && cuts[p + 1] <= m.end) { const mk = document.createElement('mark'); mk.append(piece); piece = mk; }
+        line.append(piece);
+      }
+    });
+  }
+  if (c.after) line.append('…');
+}
+
+// Going to a hit from the list: the same as ↑ ↓ in the bar
+function findListGo(k) {
+  const r = findList.rows[k];
+  if (!r || r.head) return;
+  findList.cursor = k;
+  gotoMatch(r.i);
+}
+// The list keeps up with the bar: the hit gone to is marked, and
+// scrolled into view with its chapter's heading
+function findListFollow() {
+  if (!findList.open) return;
+  const k = findList.rowOf[searchState.idx];
+  if (k == null || k < 0) { drawFindList(); return; }
+  findListPlace(k);
+}
+function findListPlace(k) {
+  const sc = $('#find-results .fr-scroll');
+  if (!sc || k == null || k < 0 || !findList.rows[k]) return;
+  findList.cursor = k;
+  const top = findList.tops[k] - (k > 0 && findList.rows[k - 1].head ? FIND_ROW_H.head : 0);
+  const bottom = findList.tops[k] + findList.hitH;
+  if (top < sc.scrollTop) sc.scrollTop = top;
+  else if (bottom > sc.scrollTop + sc.clientHeight) sc.scrollTop = bottom - sc.clientHeight;
+  drawFindList();
+}
+// the next hit row from k, n hits along (heads skipped); the last one there is
+function findListStep(k, n) {
+  const rows = findList.rows;
+  const dir = n < 0 ? -1 : 1;
+  let at = -1;
+  for (let j = k + dir, left = Math.abs(n); j >= 0 && j < rows.length && left > 0; j += dir) {
+    if (rows[j].head) continue;
+    at = j;
+    left--;
+  }
+  return at < 0 ? (k >= 0 && rows[k] && !rows[k].head ? k : -1) : at;
+}
+function findListFocus() {
+  const sc = findListEl().querySelector('.fr-scroll');
+  findListPlace(findList.rowOf[searchState.idx] >= 0 ? findList.rowOf[searchState.idx] : findListStep(-1, 1));
+  sc.focus({ preventScroll: true });
+}
+// In the list: ↑ ↓ move, Page Up/Down a screen, Home End, Enter goes,
+// Esc back to the Find box
+function findListKeys(e) {
+  if (e.altKey || e.metaKey || e.ctrlKey) return;
+  const sc = e.currentTarget;
+  const page = Math.max(1, Math.floor(sc.clientHeight / findList.hitH) - 1);
+  const k = findList.cursor;
+  let to = null;
+  if (e.key === 'ArrowDown') to = findListStep(k, 1);
+  else if (e.key === 'ArrowUp') to = k < 0 ? findListStep(-1, 1) : findListStep(k, -1);
+  else if (e.key === 'PageDown') to = findListStep(k, page);
+  else if (e.key === 'PageUp') to = findListStep(k, -page);
+  else if (e.key === 'Home') to = findListStep(-1, 1);
+  else if (e.key === 'End') to = findListStep(findList.rows.length, -1);
+  else if (e.key === 'Enter') { e.preventDefault(); findListGo(k < 0 ? findListStep(-1, 1) : k); return; }
+  else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); $('#search-input').focus(); return; }
+  else return;
+  e.preventDefault();
+  if (to >= 0) findListPlace(to);
+}
+
+// Find again after the page changed, keeping the place: the hit last gone
+// to (if it's still there) and the list where it was
+function refreshFindKeepingPlace() {
+  if ($('#searchbar').hidden) return;
+  const old = searchState.idx >= 0 && searchState.matches[searchState.idx];
+  runSearch();
+  if (!old || !old.range.startContainer.isConnected) return;
+  const i = searchState.matches.findIndex((m) => {
+    try { return m.range.compareBoundaryPoints(Range.START_TO_START, old.range) === 0; } catch { return false; }
+  });
+  if (i < 0) return;
+  searchState.idx = i;
+  paintHighlights();
+  $('#search-count').textContent = t('{i} of {n}', { i: i + 1, n: searchState.matches.length });
+  if (findList.open) { findList.cursor = findList.rowOf[i]; drawFindList(); }
+}
+
 $('#search-input').addEventListener('input', () => {
   clearTimeout(saveTimers.search);
   saveTimers.search = setTimeout(runSearch, 250);
 });
 $('#search-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); freshSearchIfStale(); gotoMatch(searchState.idx + (e.shiftKey ? -1 : 1)); }
+  // ↓ goes into the list, when it's up
+  if (e.key === 'ArrowDown' && findList.open && !e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+    freshSearchIfStale();
+    if (searchState.matches.length) { e.preventDefault(); findListFocus(); }
+  }
   if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); returnFromSearch(); }
   if (e.key === 'Tab' && !e.shiftKey) {
     const m = searchState.matches[Math.max(0, searchState.idx)];
@@ -13232,6 +13633,14 @@ $('#search-close').onclick = closeSearch;
 $('#find-case').onclick = () => toggleFindOpt('findCase');
 $('#find-word').onclick = () => toggleFindOpt('findWord');
 $('#find-titles').onclick = () => toggleFindOpt('findTitles');
+$('#search-list').onclick = () => toggleFindList();
+// the page changed under an open list: look again in a moment, keeping
+// the place (the hit last gone to, and where the list was scrolled)
+$('#paper-scroll').addEventListener('input', () => {
+  if (!findList.open || $('#searchbar').hidden) return;
+  clearTimeout(saveTimers.findList);
+  saveTimers.findList = setTimeout(refreshFindKeepingPlace, 700);
+});
 
 /* ================================================================== */
 /*  IMPORT                                                             */
@@ -16682,7 +17091,7 @@ const REGIONS = [
   },
   {
     box: () => $('#side-pane'),
-    enter: () => openPaneFromKeyboard($('#side-pane'), $('#sticky-list textarea') || $('#side-pin'))
+    enter: () => openPaneFromKeyboard($('#side-pane'), $('#side-pane .fr-scroll') || $('#sticky-list textarea') || $('#side-pin'))
   },
   { box: () => $('#bottombar'), enter: () => ($('.tab.active') || $('#back-to-shelf')).focus() }
 ];

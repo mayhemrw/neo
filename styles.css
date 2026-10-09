@@ -1334,7 +1334,65 @@ body.full-screen.focus-mode #bottombar:not(:hover):not(.attn) { opacity: 0; }
 #find-case::before { content: "Aa"; }
 #searchbar .find-word-mark::before { content: "ab"; }
 #searchbar .find-word-mark { border-bottom: 1px solid currentColor; border-left: 1px solid currentColor; border-right: 1px solid currentColor; padding: 0 2px; line-height: 1; }
-#search-count { font-size: 11px; color: var(--muted); min-width: 52px; text-align: center; }
+#search-count { font-size: 11px; color: var(--muted); min-width: 52px; text-align: center; white-space: nowrap; }
+#searchbar #search-list[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: rgba(201,168,106,0.14); }
+
+/* The results list (app.js, the results list): a panel under the bar, as
+   wide as the page column, or docked in the right-hand pane over Notes &
+   Comments. Rows have fixed heights (FIND_ROW_H) so only those in view are
+   drawn: a hit is one line under the bar, three lines in the pane. */
+#find-results {
+  position: absolute; top: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+  width: min(calc(var(--page-w) * var(--page-zoom, 1) / var(--ui-zoom)), calc(100vw / var(--ui-zoom) - 24px));
+  max-height: calc(56vh / var(--ui-zoom));
+  display: flex; flex-direction: column;
+  background: #262626; border: 1px solid #3a3a3a; border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.5); overflow: hidden;
+  font-size: 12.5px; color: #c8c8c8; text-align: left;
+}
+.fr-head {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding: 6px 8px 6px 12px; border-bottom: 1px solid #333;
+  font-size: 11px; color: var(--muted);
+}
+.fr-sum { flex: 1; }
+#find-results button {
+  background: none; border: 1px solid #3a3a3a; border-radius: 5px;
+  color: #aaa; font-size: 11px; padding: 3px 8px;
+}
+#find-results button:hover { color: var(--accent); border-color: var(--accent); }
+.fr-note { flex: none; padding: 6px 12px 0; font-size: 11px; line-height: 1.4; color: var(--muted); font-style: italic; }
+.fr-empty { padding: 12px; color: var(--muted); font-style: italic; }
+.fr-scroll { flex: 1; min-height: 0; overflow-y: auto; outline: none; padding-bottom: 6px; }
+.fr-space { position: relative; }
+.fr-group, .fr-hit { position: absolute; left: 0; right: 0; }
+.fr-group {
+  height: 30px; display: flex; align-items: flex-end; gap: 8px; padding: 0 12px 5px;
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted);
+}
+.fr-gname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fr-gn { margin-left: auto; letter-spacing: 0; }
+.fr-group.fr-crosses { color: var(--accent); }
+.fr-hit { padding: 4px 12px 4px 10px; line-height: 18px; cursor: pointer; border-left: 2px solid transparent; overflow: hidden; }
+.fr-line { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fr-hit:hover { background: rgba(255,255,255,0.05); }
+.fr-hit.at { border-left-color: var(--accent); background: rgba(201,168,106,0.10); }
+.fr-scroll:focus .fr-hit.cur { box-shadow: inset 0 0 0 1px var(--accent); }
+.fr-hit b { color: #f3ead6; font-weight: 700; }
+.fr-hit mark { background: rgba(201,168,106,0.35); color: inherit; border-radius: 2px; }
+.fr-tag { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--accent); margin-right: 6px; }
+/* docked: the pane's own head and notes step aside while it's there */
+#side-pane.find-docked { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 0; }
+#side-pane.find-docked > :not(#find-results) { display: none; }
+#find-results.docked {
+  position: static; transform: none; width: auto; max-height: none; flex: 1; min-height: 0;
+  background: none; border: none; border-radius: 0; box-shadow: none;
+}
+/* …and the bar moves over with the page, wrapping rather than reach the pane */
+#editor-view.find-docked #searchbar { left: calc(50% - 125px); max-width: calc(100vw / var(--ui-zoom) - 274px); flex-wrap: wrap; }
+#editor-view.find-docked #searchbar input { width: 130px; }
+#editor-view.find-docked.nav-pinned #searchbar { left: 50%; max-width: calc(100vw / var(--ui-zoom) - 524px); }
+#find-results.docked .fr-line { white-space: normal; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 
 #goal-counter.goal-met { color: var(--accent); }
 #import-btn {
@@ -1828,6 +1886,16 @@ body.light #searchbar input { background: #faf9f6; border-color: #cfcac0; color:
 body.light #searchbar input:focus { border-color: var(--accent); }
 body.light #searchbar button { border-color: #d6d1c7; color: #5a564e; }
 body.light #searchbar button:hover { color: var(--accent); border-color: var(--accent); }
+body.light #find-results { background: #fff; border-color: #d9d4ca; box-shadow: 0 6px 24px rgba(0,0,0,0.12); color: #3a3732; }
+body.light #find-results.docked { background: none; }
+body.light .fr-head { border-bottom-color: #e6e2da; }
+body.light #find-results button { border-color: #d6d1c7; color: #5a564e; }
+body.light #find-results button:hover { color: var(--accent); border-color: var(--accent); }
+body.light .fr-hit b { color: #1c1a17; }
+body.light .fr-hit:hover { background: rgba(0,0,0,0.04); }
+body.light .fr-hit.at { background: rgba(124,93,38,0.10); }
+body.light .fr-hit mark { background: rgba(124,93,38,0.22); }
+body.light #searchbar #search-list[aria-pressed="true"] { background: rgba(124,93,38,0.12); }
 body.light #hint { background: #2b2926; color: #f0ede7; box-shadow: 0 3px 14px rgba(0,0,0,0.2); }
 
 /* Goals, the shortcuts */

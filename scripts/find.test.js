@@ -93,3 +93,59 @@ test('matches never overlap and the pattern can be used again', () => {
   assert.deepEqual(findIn('a a', re), [[0, 1], [2, 3]]);
   assert.deepEqual(findIn('a a', re), [[0, 1], [2, 3]]);
 });
+
+// ---- the results list: a hit's line of context, the rows, and which of
+// them to draw (app.js, the results list)
+const listCtx = vm.createContext({});
+vm.runInContext(app.slice(app.indexOf('const FIND_ROW_H'), app.indexOf('// a chapter\'s heading in the list')), listCtx);
+vm.runInContext('this.api = { findContext, findRows, findWindow };', listCtx);
+const plain = (x) => JSON.parse(JSON.stringify(x));
+const findContext = (...a) => plain(listCtx.api.findContext(...a));
+const findRows = (...a) => plain(listCtx.api.findRows(...a));
+const findWindow = (...a) => plain(listCtx.api.findWindow(...a));
+const line = (text, q) => {
+  const s = text.indexOf(q);
+  const c = findContext(text, s, s + q.length);
+  return (c.before ? '…' : '') + text.slice(c.a, c.z) + (c.after ? '…' : '');
+};
+
+test('a hit\'s line: about 40 characters each side, cut between words', () => {
+  assert.equal(line('A short one with the word.', 'word'), 'A short one with the word.');
+  const long = 'In the beginning of the long summer the harbor was quiet and the boats rocked at their moorings while the gulls slept.';
+  assert.equal(line(long, 'quiet'), '…of the long summer the harbor was quiet and the boats rocked at their moorings…');
+  // never half a word at either cut
+  const c = findContext(long, long.indexOf('quiet'), long.indexOf('quiet') + 5);
+  assert.ok(/\s/.test(long[c.a - 1]) && /\s/.test(long[c.z]));
+  // a word longer than the room is cut where it must be
+  const run = 'x'.repeat(60) + ' hit ' + 'y'.repeat(60);
+  const r = findContext(run, 61, 64);
+  assert.equal(r.a, 21);
+  assert.ok(r.before && r.after);
+  assert.equal(r.z, 104);
+});
+
+test('the rows: hits across formatting first, then each chapter\'s under its heading', () => {
+  const m = (chId, crosses = false, title = false) => ({ chId, crosses, title });
+  const rows = findRows([m('a', false, true), m('a'), m('a', true), m('b'), m('c', true), m('c')], true);
+  assert.deepEqual(rows, [
+    { head: 'crosses', n: 2 }, { i: 2, cross: true }, { i: 4, cross: true },
+    { head: 'chapter', chId: 'a', n: 2 }, { i: 0 }, { i: 1 },
+    { head: 'chapter', chId: 'b', n: 1 }, { i: 3 },
+    { head: 'chapter', chId: 'c', n: 1 }, { i: 5 }
+  ]);
+  // no crossing hits, no such heading
+  assert.equal(findRows([m('a'), m('b')], true)[0].head, 'chapter');
+  // outside the manuscript one heading holds every hit, in order
+  assert.deepEqual(findRows([m(null), m(null, true)], false), [{ head: 'tab', n: 2 }, { i: 0 }, { i: 1 }]);
+  assert.deepEqual(findRows([], true), []);
+});
+
+test('which rows to draw: those in view and a few each side, however long the list', () => {
+  const tops = Array.from({ length: 5000 }, (_, k) => k * 26);
+  assert.deepEqual(findWindow(tops, 0, 260), [0, 18]);
+  assert.deepEqual(findWindow(tops, 26 * 1000 + 5, 260), [992, 1019]);
+  assert.deepEqual(findWindow(tops, 26 * 4995, 260), [4987, 5000]);
+  assert.deepEqual(findWindow([], 0, 260), [0, 0]);
+  // rows of two heights (headings and hits)
+  assert.deepEqual(findWindow([0, 30, 56, 82, 112], 60, 30, 0), [2, 4]);
+});

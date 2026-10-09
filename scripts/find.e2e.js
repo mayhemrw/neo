@@ -135,6 +135,245 @@ test('a phrase never runs across a paragraph break', async () => {
   assert.equal((await find('gone.She')).found.length, 0);
 });
 
+// ---- the results list (milestone 2)
+const key = async (keyCode, n = 1) => {
+  for (let i = 0; i < n; i++) {
+    wc.sendInputEvent({ type: 'keyDown', keyCode });
+    wc.sendInputEvent({ type: 'keyUp', keyCode });
+    await tick(30);
+  }
+  await tick(60);
+};
+// the rows drawn now: heads and hits, as the writer reads them
+const listRows = () => js(`[...document.querySelectorAll('#find-results .fr-space > div')].map((d) => ({
+  head: d.classList.contains('fr-group'),
+  text: d.textContent,
+  html: d.querySelector('.fr-line') ? d.querySelector('.fr-line').innerHTML : '',
+  at: d.classList.contains('at'),
+  cur: d.classList.contains('cur'),
+  k: +d.id.slice(7)
+}))`);
+const listPlace = () => js(`(() => {
+  const el = $('#find-results');
+  const pane = $('#side-pane');
+  return {
+    shown: !!el && !el.hidden,
+    parent: el && el.parentElement.id,
+    pressed: $('#search-list').getAttribute('aria-pressed'),
+    paneOpen: pane.classList.contains('open'),
+    panePinned: pane.dataset.pinned,
+    sidePinned: $('#editor-view').classList.contains('side-pinned'),
+    notesShown: getComputedStyle($('#sticky-list')).display !== 'none',
+    dock: el ? el.querySelector('.fr-dock').textContent : '',
+    kept: JSON.parse(localStorage.getItem('neo-device-look') || '{}').findDock
+  };
+})()`);
+
+test('the list is hidden until asked for; List opens it below the bar, as wide as the page', async () => {
+  await find('colour');
+  let p = await listPlace();
+  assert.equal(p.shown, false, 'no list until asked');
+  assert.equal(p.pressed, 'false');
+  await press('search-list');
+  p = await listPlace();
+  assert.equal(p.shown, true);
+  assert.equal(p.parent, 'searchbar');
+  assert.equal(p.pressed, 'true');
+  assert.equal(p.dock, 'Dock');
+  const box = await js(`(() => {
+    const r = $('#find-results').getBoundingClientRect();
+    const bar = $('#searchbar').getBoundingClientRect();
+    const page = document.querySelector('.chapter.sheet').getBoundingClientRect();
+    return { top: r.top, barBottom: bar.bottom, w: r.width, pageW: page.width, mid: r.left + r.width / 2, pageMid: page.left + page.width / 2 };
+  })()`);
+  assert.ok(box.top >= box.barBottom, 'below the bar');
+  assert.ok(Math.abs(box.w - box.pageW) < 40, `as wide as the page (${box.w} vs ${box.pageW})`);
+  await shot('list-below');
+});
+
+test('hits grouped under their chapters, with a count and the match in bold', async () => {
+  await find('colour');
+  const rows = await listRows();
+  const heads = rows.filter((r) => r.head).map((r) => r.text);
+  const labels = await js(`book.chapterOrder.map(findChapterLabel)`);
+  assert.deepEqual(heads, [labels[0] + '2', labels[1] + '1']);
+  assert.match(labels[1], /The Old Mill$/);
+  const hits = rows.filter((r) => !r.head);
+  assert.equal(hits.length, 3);
+  assert.equal(hits[0].html, '<b>Colour</b> ran off the walls. The colour was gone.');
+  // about 40 characters each side, cut between words, … where it goes on
+  assert.equal(hits[2].text, 'Nobody had seen the colour of its water since the old house…');
+  assert.ok(hits[2].html.includes('<b>colour</b>'));
+});
+
+test('hits that cross formatting come first, under their own heading, in their formatting', async () => {
+  await find('the old house');
+  const rows = await listRows();
+  assert.deepEqual(rows.map((r) => r.head), [true, false, true, false]);
+  assert.equal(rows[0].text, 'Crosses formatting1');
+  // it says which chapter, and shows the italic word in italics
+  assert.match(rows[1].text, /^Chapter 1.*She came back to the old house at dusk\.$/);
+  assert.ok(rows[1].html.includes('<mark>the </mark><mark><i>old</i></mark><mark> house</mark>'), rows[1].html);
+  assert.match(rows[2].text, /The Old Mill1$/);
+  assert.ok(rows[3].html.includes('<b>the old house</b>'));
+});
+
+test('a title is listed first under its chapter, marked Title', async () => {
+  await press('find-titles');
+  await find('mill');
+  const rows = await listRows();
+  assert.deepEqual(rows.map((r) => r.head), [true, false, false]);
+  assert.match(rows[1].text, /^Title/);
+  assert.ok(rows[1].html.includes('<b>Mill</b>'));
+  await press('find-titles');
+});
+
+test('a click on a line goes there, like the arrows', async () => {
+  await find('colour');
+  await js(`document.querySelectorAll('#find-results .fr-hit')[2].click()`);
+  await tick(100);
+  assert.equal(await js(`searchState.idx`), 2);
+  assert.equal(await js(`$('#search-count').textContent`), '3 of 3');
+  assert.equal(await js(`[...CSS.highlights.get('neo-search-current')][0].toString()`), 'colour');
+  const rows = await listRows();
+  assert.equal(rows.filter((r) => r.at).length, 1);
+  assert.equal(rows.find((r) => r.at).text, 'Nobody had seen the colour of its water since the old house…');
+  // and ↑ in the bar moves the mark in the list
+  await js(`$('#search-prev').click()`);
+  await tick(60);
+  assert.equal(await js(`searchState.idx`), 1);
+  assert.equal((await listRows()).find((r) => r.at).html, 'Colour ran off the walls. The <b>colour</b> was gone.');
+});
+
+test('the keyboard: ↓ from the Find box into the list, ↑ ↓ move, Enter goes, Esc back to the box', async () => {
+  await find('colour');
+  await js(`$('#search-input').focus()`);
+  await key('Down');
+  assert.equal(await js(`document.activeElement.className`), 'fr-scroll');
+  let rows = await listRows();
+  assert.equal(rows.filter((r) => r.cur).length, 1, 'a line is picked');
+  assert.match(rows.find((r) => r.cur).html, /^<b>Colour<\/b>/);
+  await key('Down', 2);
+  rows = await listRows();
+  assert.equal(rows.find((r) => r.cur).text, 'Nobody had seen the colour of its water since the old house…', 'the heading skipped');
+  assert.equal(await js(`searchState.idx`), -1, 'moving alone goes nowhere');
+  await key('Return');
+  assert.equal(await js(`searchState.idx`), 2);
+  await key('Home');
+  await key('Return');
+  assert.equal(await js(`searchState.idx`), 0);
+  await key('End');
+  assert.equal((await listRows()).find((r) => r.cur).k, await js(`findList.rows.length - 1`));
+  await key('Escape');
+  assert.equal(await js(`document.activeElement.id`), 'search-input');
+  assert.equal(await js(`$('#searchbar').hidden`), false, 'the bar stays open');
+});
+
+test('Dock moves the list into the right-hand pane, over the notes; Undock puts the pane back', async () => {
+  await find('colour');
+  let p = await listPlace();
+  assert.equal(p.panePinned === '1', false, 'the pane starts unpinned');
+  await js(`$('#find-results .fr-dock').click()`);
+  await tick(250);
+  p = await listPlace();
+  assert.equal(p.parent, 'side-pane');
+  assert.equal(p.paneOpen, true);
+  assert.equal(p.sidePinned, true, 'the page moves over, as for a pinned pane');
+  assert.equal(p.notesShown, false, 'over the notes');
+  assert.equal(p.dock, 'Undock');
+  assert.equal(p.kept, true, 'kept for this computer');
+  const box = await js(`(() => { const r = $('#find-results').getBoundingClientRect(); return { h: r.height, win: innerHeight }; })()`);
+  assert.ok(box.h > box.win * 0.75, 'as tall as the window');
+  assert.equal((await listRows()).filter((r) => !r.head).length, 3);
+  // three lines a hit in the narrower pane
+  assert.equal(await js(`document.querySelector('#find-results .fr-hit').offsetHeight`), 60);
+  // the pane stays while the pointer is elsewhere
+  await js(`closeUnpinnedPanes()`);
+  assert.equal((await listPlace()).paneOpen, true);
+  // the bar moves over with the page, clear of the pane
+  const clear = await js(`(() => {
+    const bar = $('#searchbar').getBoundingClientRect();
+    const pane = $('#side-pane').getBoundingClientRect();
+    const sum = $('#find-results .fr-sum').getBoundingClientRect();
+    return { bar: bar.right, pane: pane.left, sumBelow: sum.top >= bar.bottom || sum.left >= bar.right };
+  })()`);
+  assert.ok(clear.bar <= clear.pane, `the bar (to ${clear.bar}) clear of the pane (from ${clear.pane})`);
+  assert.ok(clear.sumBelow);
+  await tick(300);
+  await shot('list-docked');
+  await js(`$('#find-results .fr-dock').click()`);
+  await tick(250);
+  p = await listPlace();
+  assert.equal(p.parent, 'searchbar');
+  assert.equal(p.panePinned, '0');
+  assert.equal(p.sidePinned, false);
+  assert.equal(p.notesShown, true);
+  assert.equal(p.kept, false);
+});
+
+test('a pinned pane stays pinned after the list leaves it; closing Find undocks too', async () => {
+  await js(`pinPane('side', true)`);
+  await js(`$('#find-results .fr-dock').click()`);
+  await tick(200);
+  assert.equal((await listPlace()).parent, 'side-pane');
+  await js(`closeSearch()`);
+  await tick(200);
+  const p = await listPlace();
+  assert.equal(p.shown, false);
+  assert.equal(p.panePinned, '1');
+  assert.equal(p.sidePinned, true);
+  assert.equal(p.paneOpen, true);
+  assert.equal(p.notesShown, true);
+  await js(`pinPane('side', false)`);
+  // the next Find: hidden until asked, then where it was last (docked)
+  await js(`openSearch()`);
+  await find('colour');
+  assert.equal((await listPlace()).shown, false);
+  await press('search-list');
+  assert.equal((await listPlace()).parent, 'side-pane');
+});
+
+test('docked in the Notes tab: the list says it searches the Notes tab', async () => {
+  await js(`switchTab('notes')`);
+  await tick(400);
+  await js(`(() => { const ed = $('#aux-editor'); ed.focus(); const r = document.createRange(); r.selectNodeContents(ed); r.collapse(false); getSelection().removeAllRanges(); getSelection().addRange(r); })()`);
+  wc.insertText('The colour of the sea.');
+  await tick(1200);
+  await find('colour');
+  const rows = await listRows();
+  assert.deepEqual(rows.map((r) => r.head ? r.text : r.html), ['Notes1', 'The <b>colour</b> of the sea.']);
+  assert.equal(await js(`!$('#find-results .fr-note').hidden`), true);
+  assert.match(await js(`$('#find-results .fr-note').textContent`), /Notes tab/);
+  await js(`switchTab('manuscript')`);
+  await tick(400);
+  assert.equal(await js(`$('#find-results .fr-note').hidden`), true);
+  assert.equal((await listRows()).filter((r) => !r.head).length, 3, 'the list follows the tab');
+  await js(`$('#find-results .fr-dock').click()`);
+  await tick(200);
+});
+
+test('the list keeps up with the page, and keeps its place', async () => {
+  await find('colour');
+  await js(`gotoMatch(1)`);
+  // a new "colour" typed at the end of chapter 2
+  await js(`(() => {
+    const ps = document.querySelectorAll('.chapter-body')[1].querySelectorAll('p');
+    const p = ps[ps.length - 1];
+    p.closest('.chapter-body').focus();
+    const r = document.createRange(); r.selectNodeContents(p); r.collapse(false);
+    getSelection().removeAllRanges(); getSelection().addRange(r);
+  })()`);
+  wc.insertText(' A colour.');
+  await tick(1300);
+  const r = await js(`({ n: searchState.matches.length, idx: searchState.idx, count: $('#search-count').textContent })`);
+  assert.equal(r.n, 4);
+  assert.equal(r.idx, 1, 'still on the hit it was on');
+  assert.equal(r.count, '2 of 4');
+  assert.equal((await listRows()).filter((x) => !x.head).length, 4);
+  await js(`$('#search-list').click()`);
+  assert.equal((await listPlace()).shown, false);
+});
+
 test('Include chapter titles: found when asked, first in its chapter', async () => {
   assert.equal((await find('mill')).found.filter((m) => m.title).length, 0);
   await press('find-titles');
@@ -240,6 +479,52 @@ test('the log: replacements logged, nothing unlogged, and it checks', async () =
   let errors = '';
   try { errors = fs.readFileSync(path.join(LIB, 'neo-errors.log'), 'utf8'); } catch { /* none */ }
   assert.equal(errors, '');
+});
+
+test('a long book: 5,000 hits, and only the lines on screen are drawn', async () => {
+  const md = path.join(tmp, 'long.md');
+  const para = 'The tide came in over the stones, and the gulls rose. The harbor light turned. The boats knocked together.';
+  const chapters = [];
+  for (let c = 0; c < 10; c++) chapters.push(`# Tide ${c + 1}`, ...Array.from({ length: 84 }, () => para));
+  fs.writeFileSync(md, chapters.join('\n\n'));
+  await js(`(async () => {
+    const results = await window.neo.importFiles([${JSON.stringify(md)}]);
+    await addImportedBooks(results, library.shelves[0]);
+    const ids = library.shelves[0].bookIds;
+    await openBook(ids[ids.length - 1]);
+  })()`);
+  await tick(1500);
+  await js(`openSearch()`);
+  const took = await js(`(() => {
+    $('#search-input').value = 'the';
+    const t0 = performance.now();
+    runSearch();
+    if (!findList.open) toggleFindList(true);
+    return { ms: performance.now() - t0, n: searchState.matches.length };
+  })()`);
+  assert.ok(took.n >= 5000, `${took.n} hits`);
+  await tick(100);
+  const drawn = () => js(`document.querySelectorAll('#find-results .fr-space > div').length`);
+  assert.ok(await drawn() < 80, `${await drawn()} rows drawn`);
+  // the list is as tall as every row would be
+  assert.equal(await js(`$('#find-results .fr-space').offsetHeight`), await js(`findList.total`));
+  console.log(`     (${took.n} hits found and listed in ${Math.round(took.ms)} ms)`);
+  // to the end and back: the lines there are drawn, and Enter goes to the last
+  await js(`$('#find-results .fr-scroll').focus()`);
+  await key('End');
+  await key('Return');
+  assert.equal(await js(`searchState.idx`), took.n - 1);
+  assert.ok(await drawn() < 80);
+  const last = await js(`[...document.querySelectorAll('#find-results .fr-hit')].pop().textContent`);
+  assert.match(last, /boats knocked together\.$/);
+  await js(`$('#find-results .fr-scroll').scrollTop = findList.total / 2`);
+  await tick(150);
+  const mid = await listRows();
+  assert.ok(mid.length > 5 && mid.length < 80);
+  assert.ok(mid.some((r) => r.head && /^Chapter 6/.test(r.text)), mid.filter((r) => r.head).map((r) => r.text).join(', '));
+  await shot('list-long');
+  await js(`closeSearch(); backToShelf()`);
+  await tick(500);
 });
 
 async function main() {
