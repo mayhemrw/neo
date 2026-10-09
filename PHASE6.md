@@ -84,7 +84,7 @@ Running the Electron tests in the cloud: `timeout 600 xvfb-run -a -s "-screen 0 
 ## Claim
 
 - Scheduled task: `trig_01G2ZxJvq3EbmHSLDeaCnd9t` ("NEO phase 6 builder", hourly at :36 Pacific, automatic approval, push notifications). A session may also start the next one at once with `fire_trigger` on this id once its milestone is pushed and the claim cleared.
-- Claimed: M2, session started 2026-10-09 14:37 UTC, heartbeat 2026-10-09 15:02 UTC
+- Claimed: M2, session started 2026-10-09 14:37 UTC, heartbeat 2026-10-09 14:50 UTC
 
 ## Open questions
 
@@ -92,7 +92,7 @@ Running the Electron tests in the cloud: `timeout 600 xvfb-run -a -s "-screen 0 
 
 ## Progress log
 
-- Oct 9, 7:55 AM PT (M1 done): `review-docx.js`, Word's review markup read by its own XML tokenizer (namespaces resolved by URI, so any prefix reads): insertions, deletions, one editor's deletion inside another's insertion, moves paired by name (one move counts once, ranges across paragraphs), bold/italic changes with what they were (run, character style, paragraph style), paragraph formatting changes, paragraph marks inserted or deleted (split and joined paragraphs, `joined(model, 'after'|'before')`), whole paragraphs added or removed, comments with ranges in both texts, replies (`paraIdParent`), resolved (`done`), UTC dates (`commentsExtensible`), `people.xml`, NEO's round id from `docProps/custom.xml`, bookmarks, tables; drawings, text boxes, field codes and footnotes kept out of the text (counted in `notes`). `summary` counts by author for the import's sentence; `readDocx` unzips with `slog-zip.js`. Fixtures: hand-written OOXML in `scripts/review-docx.test.js` (28 tests) and `scripts/fixtures/review/lo-tracked.docx`, written by LibreOffice 24.2 from `lo-tracked.fodt` (two reviewers, a comment). The existing import still reads a tracked file as the editor left it (new test in `import.test.js`). `npm test` 384 pass; lint 29 (under the 31 baseline). AGENTS.md has a row for the file.
+- Oct 9, 7:44 AM PT (M1 done): `review-docx.js`, Word's review markup read by its own XML tokenizer (namespaces resolved by URI, so any prefix reads): insertions, deletions, one editor's deletion inside another's insertion, moves paired by name (one move counts once, ranges across paragraphs), bold/italic changes with what they were (run, character style, paragraph style), paragraph formatting changes, paragraph marks inserted or deleted (split and joined paragraphs, `joined(model, 'after'|'before')`), whole paragraphs added or removed, comments with ranges in both texts, replies (`paraIdParent`), resolved (`done`), UTC dates (`commentsExtensible`), `people.xml`, NEO's round id from `docProps/custom.xml`, bookmarks, tables; drawings, text boxes, field codes and footnotes kept out of the text (counted in `notes`). `summary` counts by author for the import's sentence; `readDocx` unzips with `slog-zip.js`. Fixtures: hand-written OOXML in `scripts/review-docx.test.js` (28 tests) and `scripts/fixtures/review/lo-tracked.docx`, written by LibreOffice 24.2 from `lo-tracked.fodt` (two reviewers, a comment). The existing import still reads a tracked file as the editor left it (new test in `import.test.js`). `npm test` 384 pass; lint 29 (under the 31 baseline). AGENTS.md has a row for the file.
 
 - Oct 9, 7:40 AM PT: Ryan chose 4b and 6b (with Resolve and Resolve and Delete). Others still on defaults while he reads the explanation of 1 to 3.
 

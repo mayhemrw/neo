@@ -302,3 +302,54 @@ describe('the file as a whole', () => {
     assert.equal(m.paragraphs[0].before, '');
   });
 });
+
+describe('sending (a file for an editor)', () => {
+  const entries = () => [
+    { path: '[Content_Types].xml', content: '<?xml version="1.0"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n<Override PartName="/word/document.xml" ContentType="x"/>\n</Types>' },
+    { path: '_rels/.rels', content: '<?xml version="1.0"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n<Relationship Id="rId1" Type="t" Target="word/document.xml"/>\n</Relationships>' },
+    { path: 'word/_rels/document.xml.rels', content: '<?xml version="1.0"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n<Relationship Id="rId1" Type="s" Target="styles.xml"/>\n</Relationships>' },
+    { path: 'word/document.xml', content: '<?xml version="1.0"?>\n<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
+      R.withBookmark('<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>One</w:t></w:r></w:p>', 1, R.chapterMark(1)) +
+      '<w:p><w:pPr></w:pPr><w:r><w:t>Text.</w:t></w:r></w:p>' + R.withBookmark('<w:p><w:r><w:t>Two</w:t></w:r></w:p>', 2, R.chapterMark(2)) + '</w:body></w:document>' }
+  ];
+
+  test('a round id is the day and six hex digits', () => {
+    assert.equal(R.roundId(Date.UTC(2026, 9, 9, 23), 0.5), 'r20261009-800000');
+    assert.match(R.roundId(Date.now()), /^r\d{8}-[0-9a-f]{6}$/);
+  });
+
+  test('paragraph ids count up below 0x80000000 and wrap past zero', () => {
+    const next = R.paraIds(0x7FFFFFFD);
+    assert.deepEqual([next(), next(), next()], ['7FFFFFFE', '00000001', '00000002']);
+  });
+
+  test('forReview: ids on every paragraph, the round, Track Changes on; the parts named; the input untouched', async () => {
+    const before = entries();
+    const out = R.forReview(before, { round: 'r20261009-abcdef', start: 0x100 });
+    assert.equal(before.length, 4, 'not changed in place');
+    assert.ok(!before[3].content.includes('paraId'));
+    const parts = {};
+    for (const e of out) parts[e.path] = e.content;
+    assert.match(parts['word/settings.xml'], /<w:trackRevisions\/>/);
+    assert.match(parts['[Content_Types].xml'], /PartName="\/word\/settings.xml"/);
+    assert.match(parts['[Content_Types].xml'], /PartName="\/docProps\/custom.xml"/);
+    assert.match(parts['word/_rels/document.xml.rels'], /Id="rId2" Type="[^"]+\/settings" Target="settings.xml"/);
+    assert.match(parts['_rels/.rels'], /Id="rId2" Type="[^"]+\/custom-properties" Target="docProps\/custom.xml"/);
+    const m = R.parse(parts);
+    assert.equal(m.round, 'r20261009-abcdef');
+    assert.deepEqual(m.paragraphs.map((p) => p.paraId), ['00000101', '00000102', '00000103']);
+    assert.deepEqual(m.paragraphs.map((p) => p.bookmarks.map((b) => b.name)), [['_NEO_ch_1'], [], ['_NEO_ch_2']]);
+    assert.equal(m.paragraphs[0].heading, true);
+    // and it zips and reads back
+    const bytes = Z.zip(out.map((e) => ({ name: e.path, data: e.content })), { deflateRawSync: (b) => zlib.deflateRawSync(b) });
+    assert.equal((await R.readDocx(bytes, Z, (b) => zlib.inflateRawSync(b))).round, 'r20261009-abcdef');
+  });
+
+  test('forReview keeps a settings part that is there, and needs a round', () => {
+    const e = entries();
+    e.push({ path: 'word/settings.xml', content: '<w:settings xmlns:w="w"><w:zoom w:percent="100"/></w:settings>' });
+    const out = R.forReview(e, { round: 'r1' });
+    assert.equal(out.find((x) => x.path === 'word/settings.xml').content, '<w:settings xmlns:w="w"><w:trackRevisions/><w:zoom w:percent="100"/></w:settings>');
+    assert.throws(() => R.forReview(entries(), {}), /round/);
+  });
+});

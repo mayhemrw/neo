@@ -1017,12 +1017,13 @@ ipcMain.handle('slog:status', (_e, bookId) => slogTap((s) => s.status(bookDir(bo
 // Named versions. mark: File → Name This Version… (the window has saved
 // everything first). named: the book's named versions, oldest first, each
 // with whether this computer made it. rename / remove: one version's file.
-// (auto: 'replace' when Replace All names one before it changes anything)
+// (auto: 'replace' when Replace All names one before it changes anything,
+// 'word' when a Word file goes to an editor)
 ipcMain.handle('history:mark', async (_e, bookId, name, auto) => {
   const clean = slogHistory.cleanName(name);
   if (!clean) return { error: t('A version needs a name.') };
   try {
-    return await history.mark(bookId, clean, auto === 'replace' ? 'replace' : null);
+    return await history.mark(bookId, clean, auto === 'replace' || auto === 'word' ? auto : null);
   } catch (err) {
     logError('versions', err);
     return { error: t('The version wasn\'t saved: {why}', { why: err.message }) };
@@ -2993,6 +2994,8 @@ function buildMenu() {
             { label: t('Paperback for KDP…'), click: () => sendToWindow({ type: 'export', format: 'paperback' }) },
             // agents' and editors' format, as Word or PDF (phase 5)
             { label: t('Manuscript Format…'), click: () => sendToWindow({ type: 'export', format: 'manuscript' }) },
+            // a Word file whose tracked changes and comments come back in (phase 6)
+            { label: t('Word for an Editor…'), click: () => sendToWindow({ type: 'export', format: 'review' }) },
             { type: 'separator' },
             {
               id: 'export-custom-chapter-titles',

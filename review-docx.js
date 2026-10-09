@@ -787,6 +787,101 @@
     return model;
   }
 
+  // -------------------------------------------------------------------------
+  // Sending: what a review export adds to NEO's own Word file
+  // -------------------------------------------------------------------------
+
+  // A round's id: "r20261009-1a2b3c" (the day it was sent, then six random
+  // hex digits). `rand` is a number in [0, 1), for tests.
+  function roundId(at, rand) {
+    const d = new Date(at);
+    const pad = (n) => String(n).padStart(2, '0');
+    const r = Math.floor((rand === undefined ? Math.random() : rand) * 0x1000000).toString(16).padStart(6, '0');
+    return 'r' + d.getUTCFullYear() + pad(d.getUTCMonth() + 1) + pad(d.getUTCDate()) + '-' + r;
+  }
+
+  // Paragraph ids as Word makes them: eight hex digits below 0x80000000,
+  // each different. `start` is where to begin (random, so two exports don't
+  // share ids); they count up from there.
+  function paraIds(start) {
+    let n = (start === undefined ? Math.floor(Math.random() * 0x40000000) : start) >>> 0;
+    return () => {
+      n = (n + 1) % 0x7FFFFFFF || 1;
+      return n.toString(16).toUpperCase().padStart(8, '0');
+    };
+  }
+
+  const escAttr = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  // The bookmark NEO puts at a section's first paragraph, so the file finds
+  // its chapters again whatever the editor did to the headings
+  const chapterMark = (num) => '_NEO_ch_' + num;
+  // inside a paragraph NEO wrote (<w:p><w:pPr>…</w:pPr>…), after its
+  // properties, where the schema has it
+  function withBookmark(pXml, id, name) {
+    const mark = '<w:bookmarkStart w:id="' + id + '" w:name="' + escAttr(name) + '"/><w:bookmarkEnd w:id="' + id + '"/>';
+    const at = pXml.indexOf('</w:pPr>');
+    if (at >= 0) return pXml.slice(0, at + 8) + mark + pXml.slice(at + 8);
+    const open = pXml.indexOf('>');
+    return pXml.slice(0, open + 1) + mark + pXml.slice(open + 1);
+  }
+
+  // NEO's Word export's parts (`entries`: [{ path, content }]) made into a
+  // file for an editor: every paragraph given a w14:paraId, the round's id
+  // in docProps/custom.xml (NEO.ReviewRound), and Track Changes switched on
+  // in word/settings.xml, so the editor's changes are tracked from the
+  // first keystroke. Returns new entries; `entries` is left as it was.
+  function forReview(entries, { round, start } = {}) {
+    if (!round) throw new Error('a review export needs its round');
+    const next = paraIds(start);
+    const out = entries.map((e) => ({ path: e.path, content: e.content }));
+    const get = (p) => out.find((e) => e.path === p);
+    const doc = get('word/document.xml');
+    if (!doc) throw new Error('no word/document.xml to send');
+    doc.content = doc.content
+      .replace(/<w:document\b([^>]*)>/, (m, attrs) => {
+        let a = attrs;
+        if (!/xmlns:w14=/.test(a)) a += ' xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
+        if (!/xmlns:mc=/.test(a)) a += ' xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"';
+        if (!/mc:Ignorable=/.test(a)) a += ' mc:Ignorable="w14"';
+        return '<w:document' + a + '>';
+      })
+      .replace(/<w:p>/g, () => '<w:p w14:paraId="' + next() + '">');
+    const settings = get('word/settings.xml');
+    const TRACK = '<w:trackRevisions/>';
+    if (settings) {
+      if (!settings.content.includes(TRACK)) settings.content = settings.content.replace(/(<w:settings\b[^>]*>)/, '$1' + TRACK);
+    } else {
+      out.push({ path: 'word/settings.xml', content: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' + TRACK + '</w:settings>' });
+      addRel(get('word/_rels/document.xml.rels'), 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings', 'settings.xml');
+      addType(get('[Content_Types].xml'), '/word/settings.xml', 'application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml');
+    }
+    out.push({
+      path: 'docProps/custom.xml',
+      content: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">' +
+        '<property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="2" name="NEO.ReviewRound"><vt:lpwstr>' + escAttr(round) + '</vt:lpwstr></property></Properties>'
+    });
+    addRel(get('_rels/.rels'), 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties', 'docProps/custom.xml');
+    addType(get('[Content_Types].xml'), '/docProps/custom.xml', 'application/vnd.openxmlformats-officedocument.custom-properties+xml');
+    return out;
+  }
+  function addRel(entry, type, target) {
+    if (!entry) return;
+    const ids = [...entry.content.matchAll(/Id="rId(\d+)"/g)].map((m) => +m[1]);
+    const id = 'rId' + ((ids.length ? Math.max(...ids) : 0) + 1);
+    entry.content = entry.content.replace('</Relationships>', '<Relationship Id="' + id + '" Type="' + type + '" Target="' + target + '"/>\n</Relationships>');
+  }
+  function addType(entry, part, type) {
+    if (!entry || entry.content.includes('PartName="' + part + '"')) return;
+    entry.content = entry.content.replace('</Types>', '<Override PartName="' + part + '" ContentType="' + type + '"/>\n</Types>');
+  }
+
+  exports.roundId = roundId;
+  exports.paraIds = paraIds;
+  exports.chapterMark = chapterMark;
+  exports.withBookmark = withBookmark;
+  exports.forReview = forReview;
+
   exports.tokens = tokens;
   exports.parse = parse;
   exports.joined = joined;

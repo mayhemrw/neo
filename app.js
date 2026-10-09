@@ -15702,11 +15702,14 @@ function exportChapters() {
   const solo = soloStory();
   const sections = [];
   const toc = [];
-  const push = (sec) => { sec.num = sections.length + 1; sections.push(sec); return sec; };
+  // (every section knows its chapter: a Word file for an editor marks where each starts)
+  let curId = null;
+  const push = (sec) => { sec.num = sections.length + 1; if (!sec.chId) sec.chId = curId; sections.push(sec); return sec; };
   let parts = 0;
   let inPart = false;
   let contentsAt = -1;
   for (const chId of book.chapterOrder) {
+    curId = chId;
     const kind = chapterKind(chId);
     if (kind === 'part') { parts += 1; inPart = true; } else if (BACK_KINDS.includes(kind)) inPart = false;
     if (kind === 'contents') { if (contentsAt < 0) contentsAt = sections.length; continue; }
@@ -15971,6 +15974,161 @@ async function manuscriptRun(sections) {
   } catch (err) {
     window.neo.logError('export manuscript: ' + (err && err.stack || err));
     toast(t('Couldn’t export: {error}', { error: plainError(err) }), 8000);
+  }
+}
+
+/* ================================================================== */
+/*  REVIEW                                                             */
+/*  The Word round-trip (phase 6). File → Export → Word for an         */
+/*  Editor… sends the open book as NEO's own Word file, marked so it   */
+/*  can find its way home: a round id inside it, a hidden bookmark at  */
+/*  each chapter, an id on every paragraph, and Track Changes on. A    */
+/*  version of the book is named as it goes ("Sent to Dana (Oct 9)").  */
+/*  What came back and what was decided lives in review.json (rounds,  */
+/*  reviewers, suggestions, threads); the reading is review-docx.js.   */
+/*  Desktop only: Pocket's bridge has no history.                      */
+/* ================================================================== */
+
+// review.json as the window keeps it. Every list is there, whatever the
+// file held (an older or hand-edited one), so callers needn't check.
+function reviewBlank() {
+  return { v: 1, editors: [], rounds: [], reviewers: [], suggestions: [], threads: [] };
+}
+function reviewNormal(data) {
+  const r = reviewBlank();
+  if (data && typeof data === 'object') {
+    for (const k of ['editors', 'rounds', 'reviewers', 'suggestions', 'threads']) if (Array.isArray(data[k])) r[k] = data[k];
+  }
+  r.editors = r.editors.filter((x) => typeof x === 'string' && x.trim());
+  return r;
+}
+async function reviewLoad(bookId) {
+  return reviewNormal(await window.neo.readJSON(bookId, 'review', null));
+}
+async function reviewSave(bookId, data) {
+  await window.neo.writeJSON(bookId, 'review', data);
+}
+
+// The editor's name, from the names this book was sent to before (the
+// last one first). Resolves to the name, or null.
+function reviewEditorDialog(names) {
+  return new Promise((resolve) => {
+    const bd = document.createElement('div');
+    bd.className = 'modal-backdrop';
+    bd.id = 'review-send-dialog';
+    bd.innerHTML = `
+      <div class="modal rv-send" role="dialog" aria-modal="true" aria-labelledby="rv-send-title">
+        <h2 id="rv-send-title">${escHtml(t('Word for an Editor'))}</h2>
+        <p class="rv-lead">${escHtml(t('NEO saves the book as a Word file with Track Changes on, and names a version of it now. When the file comes back, File → Import Review… shows each change for you to take or leave.'))}</p>
+        <label>${escHtml(t('Who is it for?'))}<input type="text" class="rv-name" spellcheck="false" autocomplete="off" placeholder="${escAttr(t('The editor’s name'))}"></label>
+        <div class="rv-names"></div>
+        <p class="rv-why" hidden></p>
+        <div class="rv-actions">
+          <button class="m-cancel btn-quiet">${escHtml(t('Cancel'))}</button>
+          <button class="btn-gold rv-go">${escHtml(t('Save as Word (.docx)'))}</button>
+        </div>
+      </div>`;
+    const input = bd.querySelector('.rv-name');
+    const list = bd.querySelector('.rv-names');
+    for (const n of names.slice(0, 6)) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'rv-chip';
+      b.textContent = n;
+      b.onclick = () => { input.value = n; input.focus(); };
+      list.appendChild(b);
+    }
+    input.value = names[0] || '';
+    const done = (val) => { bd.remove(); resolve(val); };
+    const go = () => {
+      const name = input.value.trim();
+      if (!name) {
+        const why = bd.querySelector('.rv-why');
+        why.textContent = t('Who is it for? The name goes in the version, so you can tell rounds apart.');
+        why.hidden = false;
+        input.focus();
+        return;
+      }
+      done(name);
+    };
+    bd.querySelector('.m-cancel').onclick = () => done(null);
+    bd.querySelector('.rv-go').onclick = go;
+    input.addEventListener('keydown', (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Enter') { e.preventDefault(); go(); }
+    });
+    bd.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); done(null); } });
+    document.body.appendChild(bd);
+    input.focus();
+    input.select();
+  });
+}
+
+// File → Export → Word for an Editor…: the name, then the file, then the
+// version and the round. The file is saved before the version is named, so
+// a cancelled save names nothing; nothing can change the book in between
+// (everything was saved first, and the save dialog holds the window).
+let reviewSending = false;
+async function exportForEditor() {
+  if (!book) { toast(t('Open a book first')); return; }
+  if (isScript()) { toast(t('A script has its own format: Export → PDF.')); return; }
+  const h = window.neo && window.neo.history;
+  if (!window.ReviewDocx || !h || !h.mark || reviewSending) return;
+  if (document.querySelector('.modal-backdrop:not([hidden])')) return;
+  reviewSending = true;
+  const bookId = book.id;
+  try {
+    flushAllSaves();
+    let review;
+    try { review = await reviewLoad(bookId); } catch (err) {
+      window.neo.logError('review: ' + (err && err.stack || err));
+      toast(t('Couldn’t read this book’s review file: {error}', { error: plainError(err) }), 8000);
+      return;
+    }
+    const to = await reviewEditorDialog(review.editors);
+    if (!to || !book || book.id !== bookId) return;
+    await slogSaveAll();
+    if (!book || book.id !== bookId) return;
+    const at = Date.now();
+    const round = ReviewDocx.roundId(at);
+    const data = bookExportData();
+    if (!data.sections.length) { toast(t('There’s nothing in this book to export yet')); return; }
+    const entries = ReviewDocx.forReview(buildDocxEntries(data, { marks: true }), { round });
+    const day = new Date(at).toLocaleDateString(NeoI18n.getLocale(), { month: 'short', day: 'numeric' });
+    const defaultName = safeName(book.title) + '-' + safeName(to);
+    let saved;
+    try {
+      saved = await window.neo.exportSave({ format: 'docx', defaultName, zipEntries: entries });
+    } catch (err) {
+      window.neo.logError('export for an editor: ' + (err && err.stack || err));
+      toast(t('Couldn’t export: {error}', { error: plainError(err) }), 8000);
+      return;
+    }
+    if (!saved) return;
+    // the version the file was made from: what its changes will be read against
+    let version = null;
+    let why = '';
+    try {
+      const res = await h.mark(bookId, t('Sent to {name} ({date})', { name: to, date: day }), 'word');
+      if (res && !res.error) version = res; else why = (res && res.error) || '';
+    } catch (err) { why = plainError(err); }
+    review.editors = [to, ...review.editors.filter((n) => n !== to)].slice(0, 12);
+    review.rounds.push({
+      id: round, at, to,
+      file: saved.split(/[\\/]/).pop(),
+      version: version ? { file: version.file, name: version.name, dev: version.dev || null, n: version.n === undefined ? null : version.n, h: version.h || null, copy: version.copy || null } : null,
+      chapters: data.sections.filter((s) => s.chId).map((s) => ({ num: s.num, id: s.chId, kind: s.kind || 'chapter', title: s.heading || '' })),
+      imports: []
+    });
+    try { await reviewSave(bookId, review); } catch (err) {
+      window.neo.logError('review: ' + (err && err.stack || err));
+      why = why || plainError(err);
+    }
+    const file = saved.split(/[\\/]/).pop();
+    if (version && !why) toast(t('Saved {file} for {name}. The book as it was sent is the version “{version}” in Chapter History.', { file, name: to, version: version.name }), 8000);
+    else toast(t('Saved {file} for {name}, but NEO couldn’t keep a note of what was sent ({why}). The file still comes back; NEO will ask which version it was.', { file, name: to, why }), 10000);
+  } finally {
+    reviewSending = false;
   }
 }
 
@@ -16768,7 +16926,10 @@ function docxP(runs, opts = {}) {
   return `<w:p><w:pPr>${pPr.join('')}</w:pPr>${rXml}</w:p>`;
 }
 
-function buildDocxEntries(data) {
+// opts.marks (a file for an editor, phase 6): a hidden bookmark at each
+// section's first paragraph (ReviewDocx.chapterMark(num)), so the file
+// finds its chapters again when it comes back
+function buildDocxEntries(data, opts = {}) {
   const d = data || bookExportData();
   const body = [];
   // headings carry Word's own heading styles, so the navigation pane and a
@@ -16795,6 +16956,11 @@ function buildDocxEntries(data) {
   let placed = !(d.contents && d.toc && d.toc.length);
   d.sections.forEach((ch) => {
     if (!placed && !ch.front) { contents(); placed = true; }
+    const first = body.length;
+    sectionDocx(ch);
+    if (opts.marks && body.length > first) body[first] = ReviewDocx.withBookmark(body[first], ch.num, ReviewDocx.chapterMark(ch.num));
+  });
+  function sectionDocx(ch) {
     const kind = ch.kind || 'chapter';
     if (kind === 'copyright') {
       ch.paras.forEach((p, i) => body.push(docxP(p.sceneBreak ? [] : paraRuns(p.html), { pageBreak: i === 0, spaceBefore: i === 0 ? 6000 : 0, spaceAfter: 120, size: 18 })));
@@ -16833,7 +16999,7 @@ function buildDocxEntries(data) {
       else if (p.align === 'center' || p.align === 'right') body.push(docxP(paraRuns(p.html), { style: 'BodyTextNoIndent', align: p.align }));
       else body.push(docxP(paraRuns(p.html), { style: p.flush ? 'BodyTextNoIndent' : 'BodyText' }));
     }
-  });
+  }
   if (!placed) contents();
   const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body.join('')}
@@ -17420,6 +17586,7 @@ async function doExport(format, chId = null) {
   if (!book) { toast(t('Open a book first')); return; }
   if (format === 'paperback') { await printPaperback(); return; }
   if (format === 'manuscript') { await exportManuscript(); return; }
+  if (format === 'review') { await exportForEditor(); return; }
   // a script leaves as a PDF set the way scripts print, or as Fountain
   if (isScript()) { await spExport(['pdf', 'fdx'].includes(format) ? format : 'fountain'); return; }
   flushAllSaves();
