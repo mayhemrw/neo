@@ -678,7 +678,7 @@ const DEL_MAX = 32 * 1024 * 1024; // and no more than this much text in all
 const VERSIONS_DIR = 'versions';
 const NAMED_RE = /^\d{8}T\d{6}Z-[0-9a-f]{8}(?:-\d+)?\.json$/;
 const COPY_RE = /^\d{8}T\d{6}Z-[0-9a-f]{8}(?:-\d+)?\.json\.gz$/;
-const AUTO = new Set(['restore', 'replace', 'word']);
+const AUTO = new Set(['restore', 'replace', 'word', 'review']);
 const NAME_MAX = 120;
 
 // A version's name as the writer typed it: one line, no control

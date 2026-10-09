@@ -1024,7 +1024,7 @@ ipcMain.handle('history:mark', async (_e, bookId, name, auto) => {
   const clean = slogHistory.cleanName(name);
   if (!clean) return { error: t('A version needs a name.') };
   try {
-    return await history.mark(bookId, clean, auto === 'replace' || auto === 'word' ? auto : null);
+    return await history.mark(bookId, clean, auto === 'replace' || auto === 'word' || auto === 'review' ? auto : null);
   } catch (err) {
     logError('versions', err);
     return { error: t('The version wasn\'t saved: {why}', { why: err.message }) };
@@ -3289,6 +3289,13 @@ function buildMenu() {
           ]
         },
         { type: 'separator' },
+        // an editor's changes and comments, to take or leave (phase 6)
+        {
+          label: t('Review'),
+          accelerator: 'CmdOrCtrl+Alt+R',
+          enabled: !!slogMenu.bookId,
+          click: () => sendToWindow({ type: 'tab', value: 'review' })
+        },
         // the open book's chapters as they were (slog-history.js)
         {
           label: t('Chapter History…'),
