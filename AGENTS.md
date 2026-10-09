@@ -44,9 +44,18 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before adding a feature. The product is 
 | `pocket/` | Capacitor shell. It does not contain its own editor |
 | `print/` | Vendored Paged.js and hyphenation patterns for paperback PDFs |
 
-`app.js` section banners look like `/*  SAVING  */`. Start there: bookshelf, bound shelves, editor open, typing, poetry, screenplays, placeholders, nav, tabs, outline, outline cards, darlings, counters, saving, refresh, structural undo, find, import, spellcheck, focus, goals, export.
+`app.js` section banners look like `/*  SAVING  */`. Start there: bookshelf, bound shelves, editor open, typing, poetry, screenplays, placeholders, nav, tabs, outline, outline cards, darlings, counters, saving, refresh, structural undo, find, command palette, import, spellcheck, focus, goals, export.
 
 Menus are built in `buildMenu()` in `main.js`. A menu click sends `{ type, ... }` to the window; `app.js` handles it on `window.neo.onMenu`.
+
+## Command palette
+
+⌘K / Ctrl+K (View → Command Palette…; COMMAND PALETTE in `app.js`) lists every command in NEO's menus by name, as the menu has it right now. `paletteItems` in `main.js` walks `Menu.getApplicationMenu()` into `{ key, label, path, shortcut, enabled, checked }` (`key` is where it sits, menu indexes like `"2.5.0"`; `shortcut` the accelerator as the platform shows it, `accelText`, or the text after a label's tab; a greyed submenu's commands, hidden items, separators, items whose id starts `info-` and the palette itself are left out). Choosing one (`palette:run`) clicks that very menu item in main, found by its key and checked by its name (by name alone if the menu was rebuilt), so the palette can't disagree with the menus; edit roles run as the menu runs them. The window closes the palette and gives the page its caret back first, so Copy, Paste and Undo act on the page.
+
+- **From here on, every new feature gets a menu item instead of a button**, and so a palette entry. Commands the window catches itself (tabs, chapters) are in View → Go To, their accelerators shown but not registered (`registerAccelerator: false`).
+- Searching (`paletteFilter`, `paletteScore`): every typed word must start a word of the name (best), start a word of its place, or be found anywhere; accents and case don't matter. Nothing typed: the last five used first (`neo-palette-recent` in `localStorage`, per device), then the menu in order. Greyed commands are listed greyed and say they can't be used now.
+- It owns the keyboard while it's up: ↑ ↓, Page Up/Down, Enter, Esc (closes and puts the caret back), and ⌘K again closes it. It never opens over another dialog. Desktop only: Pocket's bridge has no `palette`.
+- `scripts/palette.test.js` (matching, ordering, recent, `accelText`, the menu walk on a stand-in menu); `npm run test:palette` (`scripts/palette.e2e.js`, Electron) drives it on NEO's real menu.
 
 ## Outline cards
 
@@ -240,6 +249,7 @@ npm run test:verifier      # the verifier page, in Electron (xvfb-run without a 
 npm run test:devices       # two computers on one library, end to end (add -- --live for the real services)
 npm run test:history       # the History window, in Electron (xvfb-run without a display)
 npm run test:find          # Find and Replace, in Electron (xvfb-run without a display)
+npm run test:palette       # the command palette, in Electron (xvfb-run without a display)
 npm run build:verifier     # writes verifier/verifier.html
 npm run bundle             # Hugh: brings in the newest .bundle from ~/Downloads and pushes main
 npm run release            # Hugh: next version (x.y.9 → x.(y+1).0), commit, push, tag (npm run release -- 2.0.0 for another)

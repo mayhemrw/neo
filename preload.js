@@ -78,6 +78,11 @@ contextBridge.exposeInMainWorld('neo', {
     report: (bookId, opts) => ipcRenderer.invoke('slog:report', bookId, opts)
   },
 
+  // the command palette: the menu's commands, and one clicked (main.js; Pocket has none)
+  palette: {
+    items: () => ipcRenderer.invoke('palette:items'),
+    run: (key, label) => ipcRenderer.invoke('palette:run', key, label)
+  },
   // versions (main.js and slog-history.js; Pocket has none)
   history: {
     mark: (bookId, name, auto) => ipcRenderer.invoke('history:mark', bookId, name, auto),

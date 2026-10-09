@@ -1843,6 +1843,27 @@ body.light .ps-paper { box-shadow: 0 20px 60px rgba(0,0,0,0.22); }
 
 /* dialogs */
 body.light .modal-backdrop { background: rgba(60,55,45,0.28); }
+/* The command palette (app.js, COMMAND PALETTE): narrow, near the top */
+.modal-backdrop.palette-backdrop { align-items: flex-start; padding-top: calc(12vh / var(--ui-zoom)); }
+.palette-modal { width: 560px; padding: 10px; display: flex; flex-direction: column; overflow: hidden; max-height: calc(70vh / var(--ui-zoom)); box-shadow: 0 18px 60px rgba(0,0,0,0.5); }
+.palette-modal .pal-input { margin: 0 0 8px; font-size: 15px; padding: 10px 12px; }
+.pal-list { overflow-y: auto; min-height: 0; flex: 1; }
+.pal-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 13.5px; color: #ddd; }
+.pal-item[aria-selected="true"] { background: rgba(201,168,106,0.16); box-shadow: inset 2px 0 0 var(--accent); }
+.pal-item:hover { background: rgba(255,255,255,0.05); }
+.pal-item.off { color: #777; }
+.pal-item.pal-last-recent { margin-bottom: 6px; border-bottom: 1px solid #333; border-radius: 6px 6px 0 0; }
+.pal-check { width: 12px; flex: none; color: var(--accent); font-size: 12px; }
+.pal-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pal-path { margin-left: 10px; font-size: 11.5px; color: var(--muted); }
+.pal-key { flex: none; font: 11.5px -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; color: var(--muted); border: 1px solid #3a3a3a; border-radius: 4px; padding: 1px 6px; }
+.pal-empty { margin: 8px 10px 4px !important; color: var(--muted); font-style: italic; font-size: 13px !important; }
+body.light .pal-item { color: #2b2926; }
+body.light .pal-item.off { color: #9a958c; }
+body.light .pal-item:hover { background: rgba(0,0,0,0.04); }
+body.light .pal-item[aria-selected="true"] { background: rgba(124,93,38,0.12); }
+body.light .pal-key { border-color: #d6d1c7; }
+body.light .pal-item.pal-last-recent { border-bottom-color: #e2ddd4; }
 body.light .modal-backdrop.font-picker { background: none; }
 body.light .modal { border-color: #dcd7ce; box-shadow: 0 18px 60px rgba(0,0,0,0.18); }
 body.light .font-picker .modal { box-shadow: 0 8px 30px rgba(0,0,0,0.16); }

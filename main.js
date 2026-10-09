@@ -2847,6 +2847,77 @@ ipcMain.on('style:state', (_e, style) => {
   try { buildMenu(); } catch (err) { logError('menu', err); }
 });
 
+// The command palette (phase 4): the application menu as it stands, walked
+// into one flat list. Each command is { key, label, path, shortcut,
+// enabled, checked }: key is where it sits (menu indexes, "2.5.0"), path
+// the menus above it ("File › Scribe's Log"), shortcut its accelerator as
+// this platform shows it. Separators, hidden items, the menus themselves,
+// lines that only tell something (id info-…) and the palette itself are
+// left out. Choosing one clicks that very item (paletteRun), so the
+// palette can't disagree with the menus.
+const ACCEL_MAC = { CmdOrCtrl: '⌘', CommandOrControl: '⌘', Cmd: '⌘', Command: '⌘', Ctrl: '⌃', Control: '⌃', Alt: '⌥', Option: '⌥', Shift: '⇧' };
+const ACCEL_KEYS = { Plus: '+', Minus: '−', Right: '→', Left: '←', Up: '↑', Down: '↓', Return: 'Enter', Escape: 'Esc' };
+function accelText(acc, platform = process.platform) {
+  if (!acc || typeof acc !== 'string') return '';
+  const parts = acc.split(/[+-](?=.)/).filter(Boolean);
+  const key = parts.pop();
+  const k = ACCEL_KEYS[key] || (key.length === 1 ? key.toUpperCase() : key);
+  if (platform === 'darwin') {
+    const order = ['⌃', '⌥', '⇧', '⌘'];
+    const mods = parts.map((m) => ACCEL_MAC[m] || m).sort((a, b) => order.indexOf(a) - order.indexOf(b));
+    return mods.join('') + k;
+  }
+  const names = parts.map((m) => (/^(CmdOrCtrl|CommandOrControl|Ctrl|Control)$/.test(m) ? 'Ctrl' : /^(Cmd|Command|Super|Meta)$/.test(m) ? 'Win' : m === 'Option' ? 'Alt' : m));
+  return [...names.sort((a, b) => ['Ctrl', 'Win', 'Alt', 'Shift'].indexOf(a) - ['Ctrl', 'Win', 'Alt', 'Shift'].indexOf(b)), k].join('+');
+}
+function paletteItems(menu = Menu.getApplicationMenu(), platform = process.platform) {
+  const out = [];
+  const clean = (label) => String(label || '').replace(/&&/g, '&').trim();
+  const walk = (items, path, key) => {
+    items.forEach((it, i) => {
+      if (it.type === 'separator' || it.visible === false) return;
+      const [name, shown] = clean(it.label).split('\t');
+      if (it.submenu) {
+        if (it.enabled === false) return; // its commands can't be reached either
+        walk(it.submenu.items, name ? [...path, name] : path, [...key, i]);
+        return;
+      }
+      if (!name || it.id === 'palette' || String(it.id || '').startsWith('info-')) return;
+      const acc = it.accelerator || (typeof it.getDefaultRoleAccelerator === 'function' ? it.getDefaultRoleAccelerator() : '');
+      out.push({
+        key: [...key, i].join('.'), label: name, path, shortcut: (shown || accelText(acc, platform) || '').trim(),
+        enabled: it.enabled !== false, checked: (it.type === 'checkbox' || it.type === 'radio') ? !!it.checked : null
+      });
+    });
+  };
+  if (menu) walk(menu.items, [], []);
+  return out;
+}
+// One command chosen: the item found where it was (and still named the
+// same: the menu may have been rebuilt since), clicked as the menu would.
+// The window has closed the palette and given the page its caret back, so
+// Copy, Paste and Undo act on the page.
+function paletteRun(win, key, label) {
+  const menu = Menu.getApplicationMenu();
+  if (!menu || typeof key !== 'string') return false;
+  const find = (items, path, idx) => {
+    const it = items[idx[0]];
+    if (!it) return null;
+    if (idx.length === 1) return it;
+    return it.submenu ? find(it.submenu.items, path, idx.slice(1)) : null;
+  };
+  let item = /^\d+(\.\d+)*$/.test(key) ? find(menu.items, [], key.split('.').map(Number)) : null;
+  if (!item || String(item.label || '').replace(/&&/g, '&').split('\t')[0].trim() !== label) {
+    const hit = paletteItems(menu).find((x) => x.label === label);
+    item = hit ? find(menu.items, [], hit.key.split('.').map(Number)) : null;
+  }
+  if (!item || item.enabled === false || item.visible === false || item.submenu) return false;
+  try { item.click(undefined, win, win && win.webContents); } catch (err) { logError('palette', err); return false; }
+  return true;
+}
+ipcMain.handle('palette:items', () => paletteItems());
+ipcMain.handle('palette:run', (e, key, label) => paletteRun(BrowserWindow.fromWebContents(e.sender), key, String(label || '')));
+
 function buildMenu() {
   const isMac = process.platform === 'darwin';
   const isWin = process.platform === 'win32';
@@ -2922,7 +2993,7 @@ function buildMenu() {
               enabled: !!slogMenu.bookId,
               click: () => sendToWindow({ type: 'scribesLog', bookId: slogMenu.bookId, on: !slogMenu.on })
             },
-            ...(slogStampLabel() ? [{ label: slogStampLabel(), enabled: false }] : []),
+            ...(slogStampLabel() ? [{ id: 'info-slog-stamp', label: slogStampLabel(), enabled: false }] : []),
             { type: 'separator' },
             { label: t('Verification Report…'), enabled: !!slogMenu.bookId, click: () => sendToWindow({ type: 'slogReport', bookId: slogMenu.bookId }) },
             { label: t('Export for Verification…'), enabled: !!slogMenu.bookId, click: () => sendToWindow({ type: 'slogExport', bookId: slogMenu.bookId }) },
@@ -3106,6 +3177,26 @@ function buildMenu() {
           accelerator: 'CmdOrCtrl+/',
           registerAccelerator: false, // the window answers / and ? itself (isHelpShortcut)
           click: () => sendToWindow({ type: 'help' })
+        },
+        // every menu command by name (phase 4): the window's palette, from
+        // the menu as it stands (paletteItems)
+        { id: 'palette', label: t('Command Palette…'), accelerator: 'CmdOrCtrl+K', click: () => sendToWindow({ type: 'palette' }) },
+        { type: 'separator' },
+        // the tabs and chapters, which the window's own keys move between
+        // (shown here, not registered, so the palette has them too)
+        {
+          label: t('Go To'),
+          enabled: !!slogMenu.bookId,
+          submenu: [
+            ...[['manuscript', t('Manuscript')], ['notes', t('Notes')], ['outline', t('Outline')], ['darlings', t('Darlings')]]
+              .map(([value, label]) => ({ label, click: () => sendToWindow({ type: 'tab', value }) })),
+            { type: 'separator' },
+            { label: t('Next Tab'), accelerator: 'CmdOrCtrl+Alt+Right', registerAccelerator: false, click: () => sendToWindow({ type: 'tabStep', value: 1 }) },
+            { label: t('Previous Tab'), accelerator: 'CmdOrCtrl+Alt+Left', registerAccelerator: false, click: () => sendToWindow({ type: 'tabStep', value: -1 }) },
+            { type: 'separator' },
+            { label: t('Next Chapter'), accelerator: 'CmdOrCtrl+Alt+Down', registerAccelerator: false, click: () => sendToWindow({ type: 'chapterStep', value: 1 }) },
+            { label: t('Previous Chapter'), accelerator: 'CmdOrCtrl+Alt+Up', registerAccelerator: false, click: () => sendToWindow({ type: 'chapterStep', value: -1 }) }
+          ]
         },
         { type: 'separator' },
         // the open book's chapters as they were (slog-history.js)
