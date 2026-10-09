@@ -40,7 +40,7 @@ The writer sends the book to an editor as a Word file (**File → Export → Wor
 Reply with the number and letter to change one ("2b, 7b"), or "defaults fine".
 
 1. **The Review view:** **Ryan chose (a), Oct 9:** a tab beside Manuscript, Notes and the rest, shown only while there's something to review.
-2. **Reviewer names in the Scribe's Log:** **Ryan unsure (Oct 9, 8:16 AM); build this recommended default until he says otherwise:** accepted editor text is *always* logged as `src: 'editor'` (that part isn't optional: logging it as typed would make the record say the writer typed words they didn't, and would let any text arrive through a made-up "editor's" file unseen). But the log carries **no names**: `by` is "Reviewer 1", "Reviewer 2" (numbered per book in order of first import; the number-to-name map lives only in `review.json`, which no export or report reads by default). The report and verifier say "From an editor (Reviewer 1)". The Verification Report dialog gets one more choice, **Name the editors** (off by default), which puts the names from `review.json` into that report only, never into the log or an export.
+2. **Reviewer names in the Scribe's Log:** **Ryan accepted this for now (Oct 9, 8:19 AM); he'll ask beta testers how they'd want it handled, so keep it easy to change (the name handling in one place):** accepted editor text is *always* logged as `src: 'editor'` (that part isn't optional: logging it as typed would make the record say the writer typed words they didn't, and would let any text arrive through a made-up "editor's" file unseen). But the log carries **no names**: `by` is "Reviewer 1", "Reviewer 2" (numbered per book in order of first import; the number-to-name map lives only in `review.json`, which no export or report reads by default). The report and verifier say "From an editor (Reviewer 1)". The Verification Report dialog gets one more choice, **Name the editors** (off by default), which puts the names from `review.json` into that report only, never into the log or an export.
 3. **Formatting-only changes:** **Ryan chose (b), Oct 9:** shown as suggestions like text changes (`kind: 'format'`, as M3 already keeps them), accepted or rejected one by one or in bulk; nothing applied at import, so no version at import.
 4. **What goes to the editor:** **Ryan chose (b), Oct 9: NEO's regular Word layout** (the existing Word export, `buildDocxEntries` in app.js), not manuscript format.
 5. **A copy of each reviewed .docx in the book folder** (`reviews/`): (a) yes, so a file can be read again later *(default)*; (b) no.
@@ -96,6 +96,8 @@ Running the Electron tests in the cloud: `timeout 600 xvfb-run -a -s "-screen 0 
 - (M1, small, default taken) Footnotes and text boxes in an editor's file aren't read as text; the import will count them and say so ("2 footnotes weren't read"). NEO has no footnotes, so this seems right; say if editors you work with put notes in footnotes rather than comments.
 
 ## Progress log
+
+- Oct 9, 8:19 AM PT: Ryan accepted decision 2's default for now; beta testers will weigh in later (on the Roadmap).
 
 - Oct 9, 8:16 AM PT: Ryan chose 1a and 3b. Decision 2 open (he's unsure authors want editors named); building the recommended default written under decision 2 (editor text always marked as an editor's, no names in the log, an opt-in "Name the editors" in the report).
 
