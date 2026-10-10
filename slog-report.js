@@ -73,12 +73,12 @@
   }
 
   // A detailed origin's category, a paste split by whether it was revised.
-  // Without the words (`words` false), text a relink placed can't be checked
-  // against what it claims to match, so it counts as matched, not as the
+  // Text a relink placed whose match couldn't be checked word for word (the
+  // words of either side weren't there) counts as matched, not as the
   // origin claimed.
-  function catOf(o, revised, words = true) {
+  function catOf(o, revised) {
     const p = V.parseOrigin(o);
-    if (!words && p.relinked) return 'matched';
+    if (p.relinked && !p.verified) return 'matched';
     if (p.cat === 'paste' && p.paste && revised.has(p.paste)) return 'paste revised';
     return CATS.includes(p.cat) || V.editorOf(p.cat) !== null ? p.cat : 'unlogged';
   }
@@ -138,7 +138,7 @@
       for (const doc of docs) {
         const d = tracer.docs[doc];
         if (!d) continue;
-        for (const [o, n] of count(d)) add(groups, groupOf(catOf(o, tracer.revised, !!res.words)), n);
+        for (const [o, n] of count(d)) add(groups, groupOf(catOf(o, tracer.revised)), n);
       }
       samples.push({ ts, dev, groups, total: Object.values(groups).reduce((a, n) => a + n, 0) });
     };
@@ -183,7 +183,7 @@
       let relinked = 0;
       let gap = 0;
       for (const [o, n] of count(final[c.doc])) {
-        add(counts, catOf(o, revised, !!res.words), n);
+        add(counts, catOf(o, revised), n);
         const p = V.parseOrigin(o);
         if (p.hour !== null) add(byHour, p.hour, n);
         if (p.moved) moved += n;

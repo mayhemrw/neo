@@ -528,6 +528,9 @@
             });
           }
         } else if (e.x) problems.push({ ...where, problem: 'malformed words' });
+        // (a log with its key is a log with its words: every entry that put
+        // words in still has them, or one was taken out)
+        else if (key && typeof e.c === 'string') problems.push({ ...where, problem: 'words missing from an entry' });
       });
       const last = c.entries[c.entries.length - 1];
       if (!last || last.kind !== 'close') notes.push({ chunk: c.name, note: 'session ended without closing' });
@@ -718,34 +721,36 @@
   // 1970) the unit was first written in, a paste's own id ("dev8:n:op"),
   // and flags: "m" moved within the book, "r" matched to earlier writing by
   // a `relink`, "g" (with "r") text that reappeared while the log was off or
-  // without a label, "t" markup (inside a tag, as the op's markup list says,
-  // so it's known without the words). "t" is always last.
-  const detailOrigin = (cat, hour, paste, moved, tag, relinked = false, gap = false) =>
+  // without a label, "v" (with "r") a match checked word for word (both
+  // sides' words were there), "t" markup (inside a tag, as the op's markup
+  // list says, so it's known without the words). "t" is always last.
+  const detailOrigin = (cat, hour, paste, moved, tag, relinked = false, gap = false, verified = false) =>
     cat + '|' + (hour == null ? '' : hour) + '|' + (paste == null ? '' : paste) + '|' +
-    (moved ? 'm' : '') + (relinked ? 'r' : '') + (gap ? 'g' : '') + (tag ? 't' : '');
+    (moved ? 'm' : '') + (relinked ? 'r' : '') + (gap ? 'g' : '') + (verified ? 'v' : '') + (tag ? 't' : '');
   function parseOrigin(o) {
     const [cat, hour, paste, flags = ''] = String(o).split('|');
     return {
       cat, hour: hour === undefined || hour === '' ? null : +hour, paste: paste || null,
-      moved: flags.includes('m'), relinked: flags.includes('r'), gap: flags.includes('g'), tag: flags.includes('t')
+      moved: flags.includes('m'), relinked: flags.includes('r'), gap: flags.includes('g'), verified: flags.includes('v'), tag: flags.includes('t')
     };
   }
   const originCat = (o) => { const i = o.indexOf('|'); return i < 0 ? o : o.slice(0, i); };
   // the same runs as another category (another book's text), or moved
   function recat(runs, cat, detail) {
     if (!detail) return runs.length ? [[runs.reduce((a, r) => a + r[0], 0), cat]] : [];
-    return runsTidy(runs.map(([len, o]) => { const p = parseOrigin(o); return [len, detailOrigin(cat, p.hour, p.paste, p.moved, p.tag, p.relinked, p.gap)]; }));
+    return runsTidy(runs.map(([len, o]) => { const p = parseOrigin(o); return [len, detailOrigin(cat, p.hour, p.paste, p.moved, p.tag, p.relinked, p.gap, p.verified)]; }));
   }
   function asMoved(runs) {
-    return runs.map(([len, o]) => { const p = parseOrigin(o); return p.hour === null && !o.includes('|') ? [len, o] : [len, detailOrigin(p.cat, p.hour, p.paste, true, p.tag, p.relinked, p.gap)]; });
+    return runs.map(([len, o]) => { const p = parseOrigin(o); return p.hour === null && !o.includes('|') ? [len, o] : [len, detailOrigin(p.cat, p.hour, p.paste, true, p.tag, p.relinked, p.gap, p.verified)]; });
   }
   // …or placed by a relink: `take` (the source's origins) laid over `own`
   // (the target's own units, the same length): each unit takes the source's
-  // origin, flagged as matched (and as come back in a gap, `gap`), but
+  // origin, flagged as matched (as come back in a gap, `gap`, and as
+  // checked word for word, `verified`, when both sides' words were there), but
   // keeps the target's own markup flag; a unit of text whose source unit is
   // markup takes nothing (its own origin stays), so markup can never lend
   // text an origin, nor hide text from the counts
-  function relinkRuns(take, own, gap) {
+  function relinkRuns(take, own, gap, verified) {
     const out = [];
     let i = 0;
     let j = 0;
@@ -757,9 +762,11 @@
         const t = parseOrigin(take[i][1]);
         const o = parseOrigin(own[j][1]);
         let origin;
-        if (o.tag) origin = detailOrigin(t.cat, t.hour, t.paste, t.moved, true, true, gap || t.gap);
+        // (a unit matched before, then matched again: checked only if both were)
+        const v = verified && (!t.relinked || t.verified);
+        if (o.tag) origin = detailOrigin(t.cat, t.hour, t.paste, t.moved, true, true, gap || t.gap, v);
         else if (t.tag) origin = own[j][1];
-        else origin = detailOrigin(t.cat, t.hour, t.paste, t.moved, false, true, gap || t.gap);
+        else origin = detailOrigin(t.cat, t.hour, t.paste, t.moved, false, true, gap || t.gap, v);
         out.push([n, origin]);
       }
       ri -= n;
@@ -1108,7 +1115,8 @@
                   if (this.full) {
                     // the target's own markup stays markup, and text never
                     // takes an origin from a source's markup
-                    take = relinkRuns(take, runsSlice(add, pa, pl), own === 'while off' || own === 'unlogged');
+                    const checked = typeof put === 'string' && src.text != null;
+                    take = relinkRuns(take, runsSlice(add, pa, pl), own === 'while off' || own === 'unlogged', checked);
                     // (words brought back from a deletion are taken off what
                     // was deleted, as a move's are; a copy of text still
                     // there deleted nothing)

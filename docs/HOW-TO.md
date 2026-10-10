@@ -31,7 +31,7 @@ Want them to be able to check it for themselves? Send them an export too. That's
    - **With the text**: every word of the book as you wrote it, including every passage you cut. Send this only to someone you'd trust with your messiest drafts.
 4. Save the .zip and send it, along with the manuscript (.txt or .docx) if they don't already have it.
 
-Before it writes the .zip, NEO matches any words whose origin wasn't recorded to your earlier writing, the same as for a report, and puts those matches in the log, so whoever checks it sees them. An export without the text can't show the words behind a match, so its report lists matched text on its own line rather than as typed. With the Slog off, it asks first, as the report does.
+Before it writes the .zip, NEO matches any words whose origin wasn't recorded to your earlier writing, the same as for a report, and puts those matches in the log, so whoever checks it sees them. An export without the text can't show the words behind a match, so its report lists matched text on its own line ("Matched to earlier writing (not checkable without the text)") rather than as typed. With the Slog off, it asks first, as the report does.
 
 The .zip carries its own copy of the verifier, so nobody needs NEO to check it. An export always carries exact times, whatever you picked for a report: it's the record itself, warts and all.
 

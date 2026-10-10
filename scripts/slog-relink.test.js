@@ -417,6 +417,38 @@ describe('relink entries, checked', () => {
     assert.equal(after.counts.paste, before.counts.paste);
   });
 
+  test('a match counts as its claimed origin only when it was checked word for word', async () => {
+    const AI = 'This paragraph was produced by a language model and pasted in; it is quite long.';
+    const a = chainOf(DEV_A);
+    a.open();
+    a.doc('ch-1');
+    a.set('ch-1', P('Hello world, typed by hand.'));
+    const big = AI.repeat(4);
+    const e = a.set('ch-1', P('Hello world, typed by hand.') + P(big), 'paste');
+    // equal-length pieces, each on the same typed character: right by
+    // length, wrong by the words
+    const from = [];
+    for (let k = 0; k < big.length; k++) from.push([0, 3 + k, 1, { doc: 'ch-1', at: 3 }]);
+    a.add('relink', { of: e.n, from });
+    a.close();
+    // the words of the paste taken out of a log that keeps its key
+    const files = filesOf([a]);
+    for (const name of Object.keys(files)) {
+      if (!name.endsWith('.slog')) continue;
+      files[name] = files[name].split('\n').map((l) => {
+        if (!l) return l;
+        const x = JSON.parse(l);
+        if (x.n === e.n) delete x.x;
+        return JSON.stringify(x);
+      }).join('\n');
+    }
+    const res = await V.checkLog(files);
+    assert.ok(res.devices[0].problems.some((p) => p.problem === 'words missing from an entry'));
+    const stats = R.reportStats(res);
+    assert.equal(stats.counts.typed || 0, 'Hello world, typed by hand.'.length);
+    assert.ok(stats.counts.matched > 0);
+  });
+
   test('a relink doesn\'t hide damage in its edit\'s own pieces', async () => {
     const { a, paste, cut, len } = roundTrip();
     // (the paste carries pieces out of order: damage)
