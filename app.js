@@ -11381,7 +11381,7 @@ async function slogExport(msg) {
   let res;
   try { res = await b.exportLog(book.id, { kind, added }); } catch (err) { res = { error: (err && err.message) || String(err) }; }
   if (!res) { if (switched) slogOffAgain(t('Nothing was exported.')); else $('#hint').hidden = true; return; }
-  if (res.error) { toast(res.error, 8000); return; }
+  if (res.error) { if (switched) slogOffAgain(res.error); else toast(res.error, 8000); return; }
   const said = res.stamped
     ? t('Log exported. It ends on an outside timestamp.')
     : t('Log exported. The last stretch of writing isn\'t timestamped yet (no network?): its times are as this computer reported them.');
@@ -11399,15 +11399,17 @@ async function slogOffFirst(what) {
   if (!book || book.scribesLog !== false) return false;
   const report = what === 'report';
   const pick = await optionModal(escHtml(t('Your Slog is off')),
-    escHtml(t('The Scribe\'s Log (Slog) is switched off for this book. To trace what changed while it was off, it needs to switch on.')), [
+    escHtml(t('The Scribe\'s Log (Slog) is switched off for this book. To trace what changed while it was off, the Slog needs to be on.')), [
       {
         label: escHtml(report ? t('Switch On and Make the Report') : t('Switch On and Export')),
-        desc: escHtml(t('Records what changed while it was off, matches those words to your earlier writing where it can, then carries on. You can switch it off again right after.')),
+        desc: escHtml(report
+          ? t('Records what changed while the Slog was off, matches those words to your earlier writing where it can, then makes the report. You can switch it off again right after.')
+          : t('Records what changed while the Slog was off, matches those words to your earlier writing where it can, then exports. You can switch it off again right after.')),
         value: 'on'
       },
       {
         label: escHtml(report ? t('Make the Report As Is') : t('Export As Is')),
-        desc: escHtml(t('Leaves the Slog off. Everything since it went off counts as changed while the log was off.')),
+        desc: escHtml(t('Leaves the Slog off. Everything since it went off counts as changed while the Slog was off.')),
         value: 'as'
       }
     ]);
@@ -11477,7 +11479,7 @@ async function slogReport(msg) {
   let res;
   try { res = await b.report(book.id, picked); } catch (err) { res = { error: (err && err.message) || String(err) }; }
   if (!res) { if (switched) slogOffAgain(t('No report was made.')); else $('#hint').hidden = true; return; }
-  if (res.error) { toast(res.error, 8000); return; }
+  if (res.error) { if (switched) slogOffAgain(res.error); else toast(res.error, 8000); return; }
   const said = res.pdf ? t('Report saved, with a PDF beside it.') : t('Report saved.');
   if (switched) slogOffAgain(said);
   else toast(said, 6000);

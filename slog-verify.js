@@ -210,6 +210,9 @@
   // straight ones, a run of hyphens or dashes as one hyphen, and three or
   // more full stops as an ellipsis. Like viewOf, with where each character
   // starts in the raw string (`at`, always given).
+  // the longest a character written two ways can be, in units (a run of
+  // spaces or dashes, an ellipsis), for a relink checked without its words
+  const LOOSE_ONE = 16;
   // (by character code, for speed: the scan reads whole books this way)
   const looseSpace = (c) => c === 32 || c === 9 || c === 10 || c === 13 || c === 0xa0 || (c >= 0x2000 && c <= 0x200a) || c === 0x202f || c === 0x205f || c === 0x3000;
   const looseDash = (c) => c === 45 || (c >= 0x2010 && c <= 0x2015) || c === 0x2212;
@@ -507,6 +510,7 @@
       c.entries.forEach((e, i) => {
         const where = { chunk: c.name, n: e.n };
         if (!KINDS.has(e.kind)) problems.push({ ...where, problem: 'unknown entry kind ' + e.kind });
+        if (e.kind === 'relink' && !(open.v >= 3)) problems.push({ ...where, problem: 'relink entry in a chunk older than format 3' });
         if (i > 0 && e.kind === 'open') problems.push({ ...where, problem: 'open entry in mid-chunk' });
         if (e.n !== n + 1) problems.push({ ...where, problem: `numbering jumps from ${n} to ${e.n}` });
         if (e.prev !== head) problems.push({ ...where, problem: 'link to the entry before is broken' });
@@ -735,9 +739,35 @@
   function asMoved(runs) {
     return runs.map(([len, o]) => { const p = parseOrigin(o); return p.hour === null && !o.includes('|') ? [len, o] : [len, detailOrigin(p.cat, p.hour, p.paste, true, p.tag, p.relinked, p.gap)]; });
   }
-  // …or matched to earlier writing by a relink (and whether it came back in a gap)
-  function asRelinked(runs, gap) {
-    return runs.map(([len, o]) => { const p = parseOrigin(o); return p.hour === null && !o.includes('|') ? [len, o] : [len, detailOrigin(p.cat, p.hour, p.paste, p.moved, p.tag, true, gap || p.gap)]; });
+  // …or placed by a relink: `take` (the source's origins) laid over `own`
+  // (the target's own units, the same length): each unit takes the source's
+  // origin, flagged as matched (and as come back in a gap, `gap`), but
+  // keeps the target's own markup flag; a unit of text whose source unit is
+  // markup takes nothing (its own origin stays), so markup can never lend
+  // text an origin, nor hide text from the counts
+  function relinkRuns(take, own, gap) {
+    const out = [];
+    let i = 0;
+    let j = 0;
+    let ri = take.length ? take[0][0] : 0;
+    let rj = own.length ? own[0][0] : 0;
+    while (i < take.length && j < own.length) {
+      const n = Math.min(ri, rj);
+      if (n > 0) {
+        const t = parseOrigin(take[i][1]);
+        const o = parseOrigin(own[j][1]);
+        let origin;
+        if (o.tag) origin = detailOrigin(t.cat, t.hour, t.paste, t.moved, true, true, gap || t.gap);
+        else if (t.tag) origin = own[j][1];
+        else origin = detailOrigin(t.cat, t.hour, t.paste, t.moved, false, true, gap || t.gap);
+        out.push([n, origin]);
+      }
+      ri -= n;
+      rj -= n;
+      if (ri <= 0) { i++; ri = i < take.length ? take[i][0] : 0; }
+      if (rj <= 0) { j++; rj = j < own.length ? own[j][0] : 0; }
+    }
+    return runsTidy(out);
   }
   // the origin of the nearest unit of prose (not markup) before pos (dir
   // -1) or at or after it (dir 1), or null. Searched from the run around
@@ -839,6 +869,16 @@
         return { pieces, quiet, relinked: null, bad };
       }
       if (!Array.isArray(pieces)) return { pieces, quiet, relinked: null, bad };
+      // an edit whose own pieces are out of order or overlap takes no
+      // relinks: its own damage is reported as it is, never sorted away
+      for (let k = 1; k < pieces.length; k++) {
+        const a = pieces[k - 1];
+        const b = pieces[k];
+        if (!Array.isArray(a) || !Array.isArray(b) || b[0] < a[0] || (b[0] === a[0] && b[1] < a[1] + a[2])) {
+          for (const r of rel) bad.push({ by: r.by, problem: 'relink on an edit whose own pieces are damaged' });
+          return { pieces, quiet, relinked: null, bad };
+        }
+      }
       // what's covered already, per op: [[at, end], …]
       const taken = new Map();
       const cover = (op, a, b) => { if (!taken.has(op)) taken.set(op, []); taken.get(op).push([a, b]); };
@@ -1065,8 +1105,13 @@
                 if (!take) continue;
                 if (isRelink) {
                   if (this.full) {
-                    take = asRelinked(take, own === 'while off' || own === 'unlogged');
-                    if (this.hooks && this.hooks.back) this.hooks.back(e, take, source, src);
+                    // the target's own markup stays markup, and text never
+                    // takes an origin from a source's markup
+                    take = relinkRuns(take, runsSlice(add, pa, pl), own === 'while off' || own === 'unlogged');
+                    // (words brought back from a deletion are taken off what
+                    // was deleted, as a move's are; a copy of text still
+                    // there deleted nothing)
+                    if (this.hooks && this.hooks.back && isGraveSource(source)) this.hooks.back(e, take, source, src);
                   } else if (this.movedOnly) take = take.map(([l, o]) => [l, detailOrigin(originCat(o), '', '', true, false)]);
                 } else if (this.full && !isDevSource(source)) {
                   take = asMoved(take);
@@ -1127,9 +1172,25 @@
       const mineAll = baseText != null ? baseText : put;
       const mine = mineAll != null && typeof mineAll === 'string' ? mineAll.slice(pa, pa + pl) : null;
       const theirs = src.text != null ? src.text.slice(sa, sa + sl) : null;
-      const same = mine === null || theirs === null || mine === theirs ||
-        (loose ? looseOf(mine, loose.json).text === looseOf(theirs, loose.srcJson).text : sameChar(mine, theirs));
-      if (!same) { bad('moved text doesn\'t match where it came from'); return null; }
+      if (loose) {
+        // A relink's piece maps unit for unit, or is one character written
+        // two ways (a curly quote and a straight one, two spaces and one),
+        // as NEO's scan writes them: never a longer stretch that takes the
+        // origin of its source's first unit
+        if (mine === null || theirs === null) {
+          if (sl !== pl && (pl > LOOSE_ONE || sl > LOOSE_ONE)) { bad('a piece longer than one character written two ways'); return null; }
+        } else if (mine !== theirs || sl !== pl) {
+          const a = looseOf(mine, loose.json).text;
+          if (a !== looseOf(theirs, loose.srcJson).text) { bad('moved text doesn\'t match where it came from'); return null; }
+          if (a.length !== 1) { bad('a piece longer than one character written two ways'); return null; }
+        }
+      } else if (mine === null || theirs === null) {
+        // (a source's own length only for one character written two ways)
+        if (sl !== pl && (pl > LOOSE_ONE || sl > LOOSE_ONE)) { bad('a piece longer than one character written two ways'); return null; }
+      } else if (mine !== theirs) {
+        if (!sameChar(mine, theirs)) { bad('moved text doesn\'t match where it came from'); return null; }
+        if (viewOf(mine, true).text.length !== 1) { bad('a piece longer than one character written two ways'); return null; }
+      }
       const runs = runsSlice(src.runs, sa, sl);
       return sl === pl && (mine === null || theirs === null || mine === theirs)
         ? runs
@@ -1147,13 +1208,15 @@
   // { byDev: Map dev → Map n → [{ pieces, by: { dev, n } }], problems:
   // Map dev → [problem] } (problems on the chain the relink is written in).
   // A relink names its edit by `of`, on its own chain, or on the chain of
-  // `dev` when it has one. Several relinks for one edit apply in the order
-  // their chains are given, then in chain order.
+  // `dev` when it has one. Several relinks for one edit apply by device id
+  // (lowest first), then in chain order.
   function collectRelinks(chains) {
     const byDev = new Map();
     const problems = new Map();
     const devs = new Set(chains.map((c) => c.dev));
-    for (const c of chains) {
+    // (chains by device id, so every checker applies them in one order)
+    const ordered = chains.slice().sort((a, b) => (String(a.dev) < String(b.dev) ? -1 : String(a.dev) > String(b.dev) ? 1 : 0));
+    for (const c of ordered) {
       for (const e of c.entries) {
         if (e.kind !== 'relink') continue;
         const bad = (problem) => {

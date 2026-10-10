@@ -828,7 +828,7 @@ ${timeline()}
 <h2>${esc(t('Where the text came from'))}</h2>
 ${originTable()}
 ${s.moved ? `<p>${esc(t('{n} characters were moved within the book at some point; they\'re counted above under where they were first written.', { n: n(s.moved) }))}</p>` : ''}
-${s.relinked ? `<p>${esc(t('{n} characters came in without a recorded origin, or were pasted in, and match earlier writing in the book exactly, typography aside; they\'re counted above under where they were first written.', { n: n(s.relinked) }))}</p>` : ''}
+${s.relinked ? `<p>${esc(t('{n} characters came in without a recorded origin, or were pasted in, and match earlier writing in the book exactly, typography aside; they\'re counted above under where they were first written.', { n: n(s.relinked) }))}${s.words ? '' : ' ' + esc(t('Without the text, those matches can only be checked by their lengths; an export with the text lets anyone check them word for word.'))}</p>` : ''}
 ${s.gap ? `<p>${esc(t('Of those, {n} characters reappeared while the log was off or wasn\'t labeling changes. Their words trace to earlier writing; how they came back isn\'t recorded.', { n: n(s.gap) }))}</p>` : ''}
 ${s.counts['paste revised'] ? `<p class="muted">${esc(t('“Then revised” is pasted text that later had words put in or taken out inside it. Its characters still count as pasted; what was typed into it counts as typed.'))}</p>` : ''}
 <p class="muted">${esc(counted)}</p>

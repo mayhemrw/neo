@@ -33,6 +33,7 @@
   const GRAM = 12;   // index keys this long…
   const STEP = 8;    // …taken every STEP units of a source, so any match of GRAM + STEP - 1 or more is found
   const HITS = 64;   // places looked at per key, newest first
+  const WORDY = /[\p{L}\p{N}]/u;
   const OP_MAX = 200000; // units of one inserted string looked at, at most
   const whole = (v) => Number.isSafeInteger(v) && v >= 0;
 
@@ -81,18 +82,40 @@
     }
   }
 
-  // The earliest hour among the units from a to b of `runs` that aren't
-  // markup, and whether any of them is writing the target's label gains by
-  function judge(runs, a, b, target) {
-    let hour = Infinity;
-    let good = false;
-    for (const [, o] of V.runsSlice(runs, a, b - a)) {
-      const p = V.parseOrigin(o);
-      if (p.tag) continue;
-      if (p.hour !== null && p.hour < hour) hour = p.hour;
-      if (!good && improves(target, p.cat)) good = true;
+  // A match on a source cut where the source's writing changes age or
+  // kind: [{ k, len, hour, good }] in view characters from the match's
+  // start, each with the hour its text was first written (UTC hours since
+  // 1970; Infinity when it isn't known) and whether that writing gains the
+  // target's label anything. Markup goes with the text before it (or, at
+  // the start, the text after it). A character is judged by its first unit.
+  function segments(rec, w, src, len, target) {
+    const a = w.off + rec.at[src];
+    const runs = V.runsSlice(w.runs, a, w.off + rec.at[src + len] - a);
+    const out = [];
+    let ri = 0;
+    let left = runs.length ? runs[0][0] : 0;
+    let raw = a;
+    let cur = null;
+    for (let k = 0; k < len; k++) {
+      const r0 = w.off + rec.at[src + k];
+      while (raw < r0 && ri < runs.length) {
+        const step = Math.min(left, r0 - raw);
+        raw += step;
+        left -= step;
+        if (left <= 0) { ri++; left = ri < runs.length ? runs[ri][0] : 0; }
+      }
+      const o = ri < runs.length ? V.parseOrigin(runs[ri][1]) : null;
+      const tag = !o || o.tag;
+      const hour = !o || o.hour === null ? Infinity : o.hour;
+      const good = !!o && improves(target, o.cat);
+      if (!cur) { cur = { k, len: 0, hour, good, open: tag }; out.push(cur); }
+      else if (!tag) {
+        if (cur.open) { cur.hour = hour; cur.good = good; cur.open = false; }
+        else if (cur.hour !== hour || cur.good !== good) { cur = { k, len: 0, hour, good, open: false }; out.push(cur); }
+      }
+      cur.len = k + 1 - cur.k;
     }
-    return { hour, good };
+    return out;
   }
 
   // One op's inserted string (as its loose view `t`, with `vis`), matched in
@@ -104,9 +127,11 @@
   // short gap beside placed words is filled from the same match); the
   // earliest writing is taken first, then the longest; a match whose
   // writing gains nothing (a paste matched to an earlier paste) holds its
-  // place empty. Only places near the gaps are looked at. `where(rec)`
-  // gives a source's place and origins now: { off, runs }, or null.
-  function matchStretch(t, vis, indexes, target, covered, where) {
+  // place empty. Each part of a match is judged by its own writing
+  // (segments). Only places near the gaps are looked at. `where(rec)` gives
+  // a source's place and origins now: { off, runs }, or null. Returns null
+  // once `deadline` (a Date.now() time) has passed.
+  function matchStretch(t, vis, indexes, target, covered, where, deadline = Infinity) {
     const n = t.text.length;
     const look = new Uint8Array(n);
     for (let k = 0; k < n;) {
@@ -122,6 +147,7 @@
     const idOf = (rec) => { let v = ids.get(rec); if (v === undefined) ids.set(rec, (v = ++id)); return v; };
     for (let p = 0; p + GRAM <= n; p++) {
       if (!look[p]) continue;
+      if ((p & 255) === 0 && Date.now() > deadline) return null;
       const g = t.text.slice(p, p + GRAM);
       for (const index of indexes) {
         const list = index.get(g);
@@ -150,8 +176,9 @@
           const w = where(rec);
           if (!w) continue;
           const src = sp - b;
-          const j = judge(w.runs, w.off + rec.at[src], w.off + rec.at[src + len], target);
-          cands.push({ at, len, rec, src, off: w.off, hour: j.hour, good: j.good });
+          for (const g2 of segments(rec, w, src, len, target)) {
+            cands.push({ at: at + g2.k, len: g2.len, rec, src: src + g2.k, off: w.off, hour: g2.hour, good: g2.good });
+          }
         }
       }
     }
@@ -206,8 +233,9 @@
 
   // A document's text as the records the scan indexes: a chapter's (or the
   // notes', the outline's) paragraphs, each with its closing tag; a JSON
-  // document whole
-  const parasOf = (text, json) => (json ? [text] : text.split(/(?<=<\/p>)/));
+  // document's lines (Darlings and the rest are written two-space indented,
+  // one passage to a line)
+  const parasOf = (text, json) => text.split(json ? /(?<=\n)/ : /(?<=<\/p>)/);
 
   // Every chain's edits looked at again: { relinks: [{ dev, of, from }], one
   // per edit that gains pieces (dev: the chain the edit is on), cut }.
@@ -220,22 +248,25 @@
     let cut = false;
     const hooks = (dev) => {
       const graves = new Map(); // key → [rec, pos, …]: this chain's deletions so far
-      // the documents as their paragraphs, kept up to date as they change
-      // (only paragraphs that changed are indexed again): doc → { v, len,
-      // paras: Map text → rec }
+      // the documents as their paragraphs (or lines), kept up to date as
+      // they change: only paragraphs that changed are indexed again. A
+      // paragraph found twice in a document is two records, the second
+      // finding its place as the second occurrence (rec.k). doc → { d, v,
+      // len, paras: Map text → [rec, …] }
       const paras = new Map();
       let live = 0;
       let dead = 0;
       let index = new Map();
+      const kill = (rec) => { if (!rec.dead) { rec.dead = true; dead += rec.text.length; live -= rec.text.length; } };
       const reindex = () => {
         index = new Map();
-        for (const st of paras.values()) for (const rec of st.paras.values()) indexInto(index, rec);
+        for (const st of paras.values()) for (const list of st.paras.values()) for (const rec of list) if (!rec.dead) indexInto(index, rec);
         dead = 0;
       };
       const refresh = (docs) => {
         for (const [doc, st] of paras) {
           if (docs[doc] && typeof docs[doc].text === 'string') continue;
-          for (const rec of st.paras.values()) { rec.dead = true; dead++; live--; }
+          for (const list of st.paras.values()) for (const rec of list) kill(rec);
           paras.delete(doc);
         }
         for (const [doc, d] of Object.entries(docs)) {
@@ -243,25 +274,30 @@
           let st = paras.get(doc);
           if (st && st.d === d && st.v === (d.v || 0) && st.len === d.len) continue;
           const json = V.isJsonDocName(doc);
-          const now = new Map();
-          for (const t of parasOf(d.text, json)) if (t.length >= MIN && !now.has(t)) now.set(t, null);
+          const counts = new Map();
+          for (const t of parasOf(d.text, json)) if (t.length >= MIN) counts.set(t, (counts.get(t) || 0) + 1);
           const had = st ? st.paras : new Map();
-          for (const [t, rec] of had) {
-            if (now.has(t)) now.set(t, rec);
-            else { rec.dead = true; dead++; live--; }
+          const now = new Map();
+          for (const [t, list] of had) {
+            const want = counts.get(t) || 0;
+            for (let k = want; k < list.length; k++) kill(list[k]);
+            if (want) now.set(t, list.slice(0, want));
           }
-          for (const [t, rec] of now) {
-            if (rec) continue;
-            const r = sourceOf(t, json, { doc });
-            if (textBefore(r.text, !json)[r.text.length] < MIN) { r.dead = true; now.set(t, r); continue; }
-            indexInto(index, r);
-            now.set(t, r);
-            live++;
+          for (const [t, c] of counts) {
+            const list = now.get(t) || [];
+            for (let k = list.length; k < c; k++) {
+              const r = sourceOf(t, json, { doc });
+              r.k = k;
+              if (textBefore(r.text, !json)[r.text.length] < MIN) r.dead = true;
+              else { indexInto(index, r); live += r.text.length; }
+              list.push(r);
+            }
+            now.set(t, list);
           }
           st = { d, v: d.v || 0, len: d.len, paras: now };
           paras.set(doc, st);
         }
-        if (dead > Math.max(live, 2000)) reindex();
+        if (dead > Math.max(live, 1 << 20)) reindex();
       };
       return {
         buried(key, g) {
@@ -287,7 +323,13 @@
             if (rec.runs) return { off: 0, runs: rec.runs };
             if (places.has(rec)) return places.get(rec);
             const d = tracer.docs[rec.ref.doc];
-            const off = d && typeof d.text === 'string' ? d.text.indexOf(rec.raw) : -1;
+            let off = -1;
+            if (d && typeof d.text === 'string') {
+              for (let k = 0; k <= (rec.k || 0); k++) {
+                off = d.text.indexOf(rec.raw, off + 1);
+                if (off < 0) break;
+              }
+            }
             const w = off >= 0 ? { off, runs: d.runs } : null;
             places.set(rec, w);
             return w;
@@ -312,13 +354,20 @@
               }
             }
             const vis = textBefore(tv.text, !json);
-            // something left to place, with text in it
+            // something left to place, with text in it (in a JSON document,
+            // with a letter or digit in it: what's left of a passage sent to
+            // Darlings is often only the list's own commas and quotes)
             let open = 0;
-            for (let k = 0; k < vn; k++) if (!covered[k]) open += vis[k + 1] - vis[k];
+            for (let k = 0; k < vn; k++) {
+              if (covered[k] || vis[k + 1] === vis[k]) continue;
+              if (!json || WORDY.test(tv.text[k])) open++;
+            }
             if (!open) return;
-            for (const m of matchStretch(tv, vis, [graves, index], target, covered, where)) add.push(...rawPieces(i, tv, m));
+            const got = matchStretch(tv, vis, [graves, index], target, covered, where, deadline);
+            if (!got) { cut = true; return; }
+            for (const m of got) add.push(...rawPieces(i, tv, m));
           });
-          if (add.length) found.push({ dev, of: e.n, from: add.sort((x, y) => (x[0] - y[0]) || (x[1] - y[1])) });
+          if (add.length && !cut) found.push({ dev, of: e.n, from: add.sort((x, y) => (x[0] - y[0]) || (x[1] - y[1])) });
         }
       };
     };

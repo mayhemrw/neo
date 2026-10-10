@@ -250,6 +250,36 @@ describe('the scan: words placed by earlier writing', () => {
     assert.deepEqual(await originsOf([a], DEV_A, 'ch-1', TYPED), ['paste']);
   });
 
+  test('earliest wins unit by unit: one match can\'t lend later writing\'s age to earlier words', async () => {
+    const a = chainOf(DEV_A);
+    a.open();
+    for (const d of ['ch-1', 'notes', 'ch-3']) a.doc(d);
+    const PRE = 'An old opening sentence the writer typed long ago, by hand.';
+    const W = 'Borrowed words that first came in from outside the book entirely, pasted.';
+    a.set('ch-3', P(PRE + ' '));
+    a.set('notes', P(W), 'paste');
+    a.set('ch-3', P(PRE + ' ' + W));
+    a.set('ch-1', P(PRE + ' ' + W), 'unlogged');
+    a.close();
+    scanInto(a, [a]);
+    assert.deepEqual(await originsOf([a], DEV_A, 'ch-1', PRE), ['typed']);
+    assert.deepEqual(await originsOf([a], DEV_A, 'ch-1', W), ['paste']);
+  });
+
+  test('earliest wins over a paragraph found twice in one document', async () => {
+    const a = chainOf(DEV_A);
+    a.open();
+    a.doc('notes');
+    a.doc('ch-1');
+    const W = 'Borrowed words that first came in from outside the book entirely, pasted.';
+    a.set('notes', P('My notes.') + P(W), 'paste');
+    a.set('notes', P(W) + P('My notes.') + P(W));
+    a.set('ch-1', P(W), 'unlogged');
+    a.close();
+    scanInto(a, [a]);
+    assert.deepEqual(await originsOf([a], DEV_A, 'ch-1', W), ['paste']);
+  });
+
   test('a second scan finds nothing new', () => {
     const a = chainOf(DEV_A);
     a.open();
@@ -330,6 +360,71 @@ describe('relink entries, checked', () => {
     assert.deepEqual(await originsOf([a], DEV_A, 'ch-1', TYPED), ['typed']);
   });
 
+  test('a hand-made relink can\'t stretch one character written two ways over a whole passage', async () => {
+    const AI = ' was produced by a language model and pasted in; it is long so that it counts for a lot.';
+    const a = chainOf(DEV_A);
+    a.open();
+    a.doc('ch-1');
+    a.set('ch-1', P("'X'"));
+    a.set('ch-1', P("'X'" + AI), 'paste');
+    const cut = a.set('ch-1', '');
+    const back = '\u2018X\u2019' + AI;
+    const e = a.set('ch-1', P(back), 'paste');
+    a.add('relink', { of: e.n, from: [[0, 3, back.length, { n: cut.n, op: 0, at: 3 }]] });
+    a.close();
+    assert.ok((await problemsOf([a])).includes('relink: a piece longer than one character written two ways'));
+  });
+
+  test('…nor a source whose length differs, with or without the words', async () => {
+    const AI = 'This paragraph was produced by a language model and pasted in, and it is quite long.';
+    const a = chainOf(DEV_A);
+    a.open();
+    a.doc('ch-1');
+    a.set('ch-1', P('Hello world, typed by hand.'));
+    const big = AI.repeat(10);
+    const e = a.set('ch-1', P('Hello world, typed by hand.') + P(big), 'paste');
+    a.add('relink', { of: e.n, from: [[0, 3, big.length, { doc: 'ch-1', at: 3, len: 1 }]] });
+    a.close();
+    for (const words of [true, false]) {
+      const res = await V.checkLog(filesOf([a], { words }));
+      assert.equal(res.ok, false, 'words ' + words);
+      assert.ok(res.devices[0].problems.some((p) => /^relink: /.test(p.problem)), 'words ' + words);
+    }
+  });
+
+  test('markup never lends text an origin, nor hides it from the counts (without the words too)', async () => {
+    const AI = 'This paragraph was produced by a language model and pasted in; it is long so that it counts.';
+    const a = chainOf(DEV_A);
+    a.open();
+    a.doc('ch-1');
+    const typed = P('Typed by the writer, honestly, at the keyboard.');
+    a.set('ch-1', typed);
+    const e = a.set('ch-1', typed + P(AI), 'paste');
+    a.close();
+    const before = R.reportStats(await V.checkLog(filesOf([a], { words: false })));
+    a.open();
+    // the source: a run of markup the same length as the paste
+    a.doc('notes');
+    a.set('notes', '<b></b>'.repeat(Math.ceil(AI.length / 7)).slice(0, AI.length));
+    a.add('relink', { of: e.n, from: [[1, 3, AI.length, { doc: 'notes', at: 0 }]] });
+    a.close();
+    const after = R.reportStats(await V.checkLog(filesOf([a], { words: false })));
+    assert.equal(after.total, before.total);
+    assert.equal(after.counts.paste, before.counts.paste);
+  });
+
+  test('a relink doesn\'t hide damage in its edit\'s own pieces', async () => {
+    const { a, paste, cut, len } = roundTrip();
+    // (the paste carries pieces out of order: damage)
+    const bad = a.set('ch-1', P(TYPED) + P(TYPED), 'move', { from: [[0, 10, 30, { n: cut.n, op: 0, at: 10 }], [0, 0, 20, { n: cut.n, op: 0, at: 0 }]] });
+    a.add('relink', { of: bad.n, from: [[0, 40, 20, { n: cut.n, op: 0, at: 40 }]] });
+    a.close();
+    const problems = await problemsOf([a]);
+    assert.ok(problems.includes('from pieces overlap or are out of order'), problems.join('; '));
+    assert.ok(problems.includes('relink on an edit whose own pieces are damaged'), problems.join('; '));
+    assert.ok(paste && len);
+  });
+
   test('a relink naming an entry the chain doesn\'t have is a problem', async () => {
     const a = chainOf(DEV_A);
     a.open();
@@ -340,12 +435,70 @@ describe('relink entries, checked', () => {
     assert.ok((await problemsOf([a])).includes('relink names a device whose log isn\'t here'));
   });
 
+  test('a relink in a chunk older than format 3 is a problem', async () => {
+    const a = chainOf(DEV_A);
+    a.open();
+    a.doc('ch-1');
+    a.set('ch-1', P(TYPED));
+    const cut = a.set('ch-1', '');
+    const paste = a.set('ch-1', P(TYPED), 'paste');
+    a.close();
+    // a chunk written as format 2, with a relink in it
+    const c2 = chainOf(DEV_A);
+    c2.chain.n = a.chain.n;
+    c2.chain.head = a.chain.head;
+    const name = slog.chunkName(T0 + 99 * HOUR, DEV_A, 2);
+    c2.chunks.push({ name, lines: [] });
+    const cur = c2.chunks[0];
+    const add = (kind, fields) => cur.lines.push(c2.chain.entry(kind, fields).line);
+    add('open', { v: 2, log: 'feedfacefeedface', dev: DEV_A, prevChunk: a.chunks[0].name, app: 'test' });
+    add('relink', { of: paste.n, from: [[0, 0, P(TYPED).length, { n: cut.n, op: 0, at: 0 }]] });
+    add('close', { why: 'close', ms: '0'.repeat(64) });
+    const res = await V.checkLog(filesOf([a, { chunks: c2.chunks }]));
+    const problems = res.devices.find((d) => d.dev === DEV_A).problems.map((p) => p.problem);
+    assert.ok(problems.includes('relink entry in a chunk older than format 3'), problems.join('; '));
+  });
+
   test('older chunk formats still read, and v3 is accepted', async () => {
     const { a, paste, cut, len } = roundTrip();
     a.add('relink', { of: paste.n, from: [[0, 0, len, { n: cut.n, op: 0, at: 0 }]] });
     a.close();
     const res = await V.checkLog(filesOf([a]));
     assert.equal(res.ok, true);
+  });
+});
+
+describe('the report', () => {
+  test('words matched from text still in the book don\'t count against what was deleted', async () => {
+    const T = 'The lighthouse keeper counted the gulls each dawn, and wrote the number down.';
+    const D = 'A sentence the writer typed and then truly deleted for revision, gone for good.';
+    const a = chainOf(DEV_A);
+    a.open();
+    a.doc('ch-1');
+    a.doc('ch-2');
+    a.set('ch-1', P(T) + P(D));
+    a.set('ch-1', P(T));
+    a.set('ch-2', P(T), 'paste');
+    a.close();
+    const s0 = await statsOf([a]);
+    scanInto(a, [a]);
+    const s1 = await statsOf([a]);
+    assert.equal(s1.deleted, s0.deleted);
+    assert.ok(s1.relinked > 0);
+  });
+
+  test('without the words, it says matches were only checked by their lengths', async () => {
+    const a = chainOf(DEV_A);
+    a.open();
+    a.doc('ch-1');
+    a.set('ch-1', P(TYPED));
+    a.set('ch-1', '');
+    a.set('ch-1', P(TYPED), 'paste');
+    a.close();
+    scanInto(a, [a]);
+    const html = (words) => V.checkLog(filesOf([a], { words })).then((res) => R.renderReport(R.reportStats(res), { privacy: 'dates', tz: 'UTC', t: (x, v) => (v ? x.replace(/\{(\w+)\}/g, (m, k) => (k in v ? String(v[k]) : m)) : x) }));
+    assert.match(await html(false), /only be checked by their lengths/);
+    assert.doesNotMatch(await html(true), /only be checked by their lengths/);
   });
 });
 
@@ -383,10 +536,45 @@ describe('the Recorder writes relinks', () => {
       assert.equal(res.ok, true, JSON.stringify(res.devices.map((d) => d.problems)));
       const d = res.devices[0];
       assert.equal(d.kinds.relink, 1);
-      const open = d.entries.find((e) => e.kind === 'open');
-      assert.equal(open.v, 3);
+      // the session's own chunk stays format 2; the relink starts a format 3 one
+      const at = d.entries.findIndex((e) => e.kind === 'relink');
+      const opens = d.entries.slice(0, at).filter((e) => e.kind === 'open');
+      assert.equal(opens[0].v, 2);
+      assert.equal(opens[opens.length - 1].v, 3);
       const t = d.traced[slog.chapterDoc('c1')];
       assert.deepEqual([...new Set(V.originsAt(t, t.text.indexOf(TYPED), TYPED.length).map(([, o]) => o))], ['typed']);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(lib, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('NEO\'s clipboard across books', () => {
+  test('words copied in a book whose log isn\'t open this run are a paste, not a move', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'neo-relink-home-'));
+    const lib = fs.mkdtempSync(path.join(os.tmpdir(), 'neo-relink-lib-'));
+    const mk = (id) => {
+      const dir = path.join(lib, id);
+      fs.mkdirSync(path.join(dir, 'chapters'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'book.json'), JSON.stringify({ id, title: id, chapterOrder: ['c1'] }));
+      return dir;
+    };
+    try {
+      const A = mk('A');
+      const B = mk('B');
+      const OUT = 'A paragraph that came from somewhere outside NEO, pasted into the first book.';
+      let rec = new slog.Recorder({ home, app: 'test' });
+      rec.open(A, 'A');
+      rec.observe(A, 'A', 'c1', P(OUT), { src: 'paste' });
+      await rec.closeAll('quit');
+      // NEO starts again; the remembered copy is pasted into another book
+      rec = new slog.Recorder({ home, app: 'test' });
+      rec.open(B, 'B');
+      rec.observe(B, 'B', 'c1', P(OUT), { src: 'move', book: 'A', copy: true });
+      await rec.closeAll('quit');
+      const res = await V.checkLog(require('../slog-files.js').loadLog(B));
+      assert.equal(res.devices[0].entries.find((e) => e.kind === 'edit').src, 'paste');
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
       fs.rmSync(lib, { recursive: true, force: true });
