@@ -108,6 +108,10 @@ describe('the scan: words placed by earlier writing', () => {
     assert.deepEqual(await originsOf([a], DEV_A, 'ch-1', back), ['typed']);
     // a log without its words checks the same pieces by their lengths
     assert.deepEqual(await originsOf([a], DEV_A, 'ch-1', back.slice(0, 20), { words: false }), ['typed']);
+    // (and its report counts them as matched, not checkable without the text)
+    const bare = R.reportStats(await V.checkLog(filesOf([a], { words: false })));
+    assert.equal(bare.counts.paste || 0, 0);
+    assert.ok(bare.counts.matched >= back.length - 2);
     // and the report counts them as typed, and as matched
     const s = await statsOf([a]);
     assert.equal(s.counts.paste || 0, 0);
@@ -497,8 +501,13 @@ describe('the report', () => {
     a.close();
     scanInto(a, [a]);
     const html = (words) => V.checkLog(filesOf([a], { words })).then((res) => R.renderReport(R.reportStats(res), { privacy: 'dates', tz: 'UTC', t: (x, v) => (v ? x.replace(/\{(\w+)\}/g, (m, k) => (k in v ? String(v[k]) : m)) : x) }));
-    assert.match(await html(false), /only be checked by their lengths/);
-    assert.doesNotMatch(await html(true), /only be checked by their lengths/);
+    assert.match(await html(false), /can&#39;t be checked word for word/);
+    assert.doesNotMatch(await html(true), /can&#39;t be checked word for word/);
+    // …and counts them on their own line, not as the origin they claim
+    const bare = R.reportStats(await V.checkLog(filesOf([a], { words: false })));
+    assert.equal(bare.counts.typed || 0, 0);
+    assert.ok(bare.counts.matched > 0);
+    assert.equal((await statsOf([a])).counts.matched || 0, 0);
   });
 });
 

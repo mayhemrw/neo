@@ -82,6 +82,17 @@
     }
   }
 
+  // parseOrigin, remembered (a book has only so many distinct origins)
+  const parsed = new Map();
+  function parseCached(o) {
+    let p = parsed.get(o);
+    if (!p) {
+      if (parsed.size > 100000) parsed.clear();
+      parsed.set(o, (p = V.parseOrigin(o)));
+    }
+    return p;
+  }
+
   // A match on a source cut where the source's writing changes age or
   // kind: [{ k, len, hour, good }] in view characters from the match's
   // start, each with the hour its text was first written (UTC hours since
@@ -96,6 +107,8 @@
     let left = runs.length ? runs[0][0] : 0;
     let raw = a;
     let cur = null;
+    let parsedAt = -1;
+    let o = null;
     for (let k = 0; k < len; k++) {
       const r0 = w.off + rec.at[src + k];
       while (raw < r0 && ri < runs.length) {
@@ -104,14 +117,16 @@
         left -= step;
         if (left <= 0) { ri++; left = ri < runs.length ? runs[ri][0] : 0; }
       }
-      const o = ri < runs.length ? V.parseOrigin(runs[ri][1]) : null;
+      if (parsedAt !== ri) { parsedAt = ri; o = ri < runs.length ? parseCached(runs[ri][1]) : null; }
       const tag = !o || o.tag;
       const hour = !o || o.hour === null ? Infinity : o.hour;
       const good = !!o && improves(target, o.cat);
-      if (!cur) { cur = { k, len: 0, hour, good, open: tag }; out.push(cur); }
+      // (how much it gains: nothing, a paste, the writer's own)
+      const rank = !good ? 0 : o.cat === 'paste' || o.cat === 'drop' ? 1 : 2;
+      if (!cur) { cur = { k, len: 0, hour, good, rank, open: tag }; out.push(cur); }
       else if (!tag) {
-        if (cur.open) { cur.hour = hour; cur.good = good; cur.open = false; }
-        else if (cur.hour !== hour || cur.good !== good) { cur = { k, len: 0, hour, good, open: false }; out.push(cur); }
+        if (cur.open) { cur.hour = hour; cur.good = good; cur.rank = rank; cur.open = false; }
+        else if (cur.hour !== hour || cur.rank !== rank) { cur = { k, len: 0, hour, good, rank, open: false }; out.push(cur); }
       }
       cur.len = k + 1 - cur.k;
     }
@@ -177,12 +192,14 @@
           if (!w) continue;
           const src = sp - b;
           for (const g2 of segments(rec, w, src, len, target)) {
-            cands.push({ at: at + g2.k, len: g2.len, rec, src: src + g2.k, off: w.off, hour: g2.hour, good: g2.good });
+            cands.push({ at: at + g2.k, len: g2.len, rec, src: src + g2.k, off: w.off, hour: g2.hour, good: g2.good, rank: g2.rank });
           }
         }
       }
     }
-    cands.sort((x, y) => (x.hour === y.hour ? 0 : x.hour < y.hour ? -1 : 1) || (y.len - x.len) || (x.at - y.at));
+    // (within one hour, which came first isn't known: the writing that
+    // gains the target least goes first, so a doubt never improves an origin)
+    cands.sort((x, y) => (x.hour === y.hour ? 0 : x.hour < y.hour ? -1 : 1) || (x.rank - y.rank) || (y.len - x.len) || (x.at - y.at));
     const taken = covered.slice();
     const out = [];
     for (const c of cands) {
@@ -224,7 +241,9 @@
       run = { same, t: t0, l: t1 - t0, s: s0, sl: s1 - s0 };
       out.push(run);
     }
-    return out.map((r) => {
+    // (a character written two ways longer than a checker takes, a run of
+    // seventeen spaces, is left unplaced)
+    return out.filter((r) => r.same || (r.l <= V.LOOSE_ONE && r.sl <= V.LOOSE_ONE)).map((r) => {
       const source = { ...m.rec.ref, at: m.off + r.s };
       if (r.sl !== r.l) source.len = r.sl;
       return [op, r.t, r.l, source];
@@ -367,7 +386,16 @@
             if (!got) { cut = true; return; }
             for (const m of got) add.push(...rawPieces(i, tv, m));
           });
-          if (add.length && !cut) found.push({ dev, of: e.n, from: add.sort((x, y) => (x[0] - y[0]) || (x[1] - y[1])) });
+          if (add.length && !cut) {
+            const from = add.sort((x, y) => (x[0] - y[0]) || (x[1] - y[1]));
+            found.push({ dev, of: e.n, from });
+            // traced as if written already, so a copy of these words later
+            // in the log takes the origin found here (and a second scan
+            // finds nothing new)
+            if (!tracer.relinks) tracer.relinks = new Map();
+            if (!tracer.relinks.has(e.n)) tracer.relinks.set(e.n, []);
+            tracer.relinks.get(e.n).push({ pieces: from, by: { dev: '(scan)', n: Infinity } });
+          }
         }
       };
     };

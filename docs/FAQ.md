@@ -79,7 +79,7 @@ The better route is **File → Export → Word for an Editor…** and **File →
 
 Not NEO's matching. It only ever matches against writing that was already in this book's log before the paste, and the words take the origin of that writing, whatever it was. Text pasted from ChatGPT matches nothing you typed, so it stays pasted. Words that match an earlier paste stay pasted. And when the same words were written more than once, the earliest wins. Anything already recorded as typed, imported, or an editor's is never changed.
 
-The matches go into the log itself. In an export with the text, the verifier checks every one word for word, and a match that doesn't hold is flagged as damage. Without the text it can only check their lengths, and the report says so.
+The matches go into the log itself. In an export with the text, the verifier checks every one word for word, and a match that doesn't hold is flagged as damage. An export without the text can't show the words to check, so its report counts matched text on a line of its own ("Matched to earlier writing"), not as typed. If those characters matter to you, send the export with the text.
 
 ### I pasted from my old draft. Will that look bad?
 

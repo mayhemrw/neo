@@ -1076,8 +1076,9 @@
             }
             const gone = runsCut(d.runs, at, del);
             const key = e.n + ':' + i;
-            const keep = this.wanted.has(key);
             const tell = del && this.hooks && this.hooks.buried;
+            // (a scan keeps every deletion: what it finds is traced as it goes)
+            const keep = this.wanted.has(key) || !!tell;
             if (keep || tell) {
               const g = { text: d.text === null ? null : d.text.slice(at, at + del), len: del, runs: gone, doc: e.doc, ts: e.ts };
               if (keep) graves.set(key, g);
@@ -1172,24 +1173,21 @@
       const mineAll = baseText != null ? baseText : put;
       const mine = mineAll != null && typeof mineAll === 'string' ? mineAll.slice(pa, pa + pl) : null;
       const theirs = src.text != null ? src.text.slice(sa, sa + sl) : null;
+      // a source's own length only ever for one character written two ways
+      if (sl !== pl && (pl > LOOSE_ONE || sl > LOOSE_ONE)) { bad('a piece longer than one character written two ways'); return null; }
       if (loose) {
         // A relink's piece maps unit for unit, or is one character written
         // two ways (a curly quote and a straight one, two spaces and one),
         // as NEO's scan writes them: never a longer stretch that takes the
         // origin of its source's first unit
-        if (mine === null || theirs === null) {
-          if (sl !== pl && (pl > LOOSE_ONE || sl > LOOSE_ONE)) { bad('a piece longer than one character written two ways'); return null; }
-        } else if (mine !== theirs || sl !== pl) {
+        if (mine !== null && theirs !== null && (mine !== theirs || sl !== pl)) {
           const a = looseOf(mine, loose.json).text;
           if (a !== looseOf(theirs, loose.srcJson).text) { bad('moved text doesn\'t match where it came from'); return null; }
-          if (a.length !== 1) { bad('a piece longer than one character written two ways'); return null; }
+          if (a.length !== 1 || pl > LOOSE_ONE || sl > LOOSE_ONE) { bad('a piece longer than one character written two ways'); return null; }
         }
-      } else if (mine === null || theirs === null) {
-        // (a source's own length only for one character written two ways)
-        if (sl !== pl && (pl > LOOSE_ONE || sl > LOOSE_ONE)) { bad('a piece longer than one character written two ways'); return null; }
-      } else if (mine !== theirs) {
+      } else if (mine !== null && theirs !== null && mine !== theirs) {
         if (!sameChar(mine, theirs)) { bad('moved text doesn\'t match where it came from'); return null; }
-        if (viewOf(mine, true).text.length !== 1) { bad('a piece longer than one character written two ways'); return null; }
+        if (viewOf(mine, true).text.length !== 1 || pl > LOOSE_ONE || sl > LOOSE_ONE) { bad('a piece longer than one character written two ways'); return null; }
       }
       const runs = runsSlice(src.runs, sa, sl);
       return sl === pl && (mine === null || theirs === null || mine === theirs)
@@ -1860,7 +1858,7 @@
     markupRanges, applyOps, applyLengths, insertOffsets, viewOf, sameChar,
     parseLines, parseChunk, readLog, logPaths, readExportFiles, EXPORT_EXTRAS, mergeArchives, expandArchivesSync, expandArchives, orderChunks, verifyChain, Replayer, replay,
     runsTidy, runsSlice, runsCut, runsInsert, originOf, Tracer, trace, traceAll, matchArrivals, collectRelinks,
-    detailOrigin, parseOrigin, originCat, looseOf, sameLoose, RELINKABLE, isJsonDocName,
+    detailOrigin, parseOrigin, originCat, looseOf, sameLoose, RELINKABLE, isJsonDocName, LOOSE_ONE,
     AUX_DOCS, JSON_DOCS, chapterDoc, docChapter, decodeEntities, chapterLines, manuscriptText, proseMask, composition, originsAt, editorOf,
     checkReceipts, matchStampEntries, coverage, clockCheck, deviceNames, checkChains, checkLog,
     SKEW, AHEAD, JUMP

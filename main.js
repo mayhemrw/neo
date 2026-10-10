@@ -1236,8 +1236,9 @@ async function slogScan(dir, bookId) {
     const st = rec.status(dir, bookId);
     if (!st || !st.on || !st.logging) return 0;
     await rec.head(dir, bookId);
-    const { relinks, cut } = await historyAsk({ type: 'scan', dir, budget: SLOG_SCAN_BUDGET });
+    const { relinks, cut, skipped } = await historyAsk({ type: 'scan', dir, budget: SLOG_SCAN_BUDGET });
     if (cut) logError('scribe\'s log scan', new Error('stopped after ' + SLOG_SCAN_BUDGET / 1000 + ' s; later edits left as they were'));
+    if (skipped === 'damaged') logError('scribe\'s log scan', new Error('the log doesn\'t check, so nothing was matched'));
     return relinks && relinks.length ? rec.relink(dir, bookId, relinks) : 0;
   } catch (err) {
     logError('scribe\'s log scan', err);

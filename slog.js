@@ -1119,10 +1119,14 @@ class Recorder {
     const n = s.chain.n;
     const h = s.chain.head;
     const chunk = s.chunk;
+    // (a chunk still closing, switching the log off and on just now, has
+    // lines on their way too: both are waited for)
+    const closing = s.closing;
     if (chunk) {
       await chunk.writer.flush();
       if (chunk.writer.broken || chunk.failed) return null;
-    } else if (s.closing) await Promise.resolve(s.closing).catch(() => {});
+    }
+    if (closing) await Promise.resolve(closing).catch(() => {});
     return { dev: this.device(), n, h };
   }
   // The chunk this device is writing for a book, if one's open
