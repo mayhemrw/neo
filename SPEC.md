@@ -41,7 +41,7 @@ The Scribe's Log comes first because snapshots and multi-editor tracking both de
 
 Keep `main` clean so Hugh's updates merge in without colliding with half-built features.
 
-- **Remotes:** `origin` is this fork (`mayhemrw/neo`); `upstream` is Hugh's repo (`hughhowey/neo`).
+- **Remotes:** `origin` is this fork (`mayhemrw/neo-scribe`); `upstream` is Hugh's repo (`hughhowey/neo`).
 - **Never build on `main`.** It holds only Hugh's code plus finished, tested phases. Pull Hugh's changes there with `git fetch upstream` then `git merge upstream/main`.
 - **One branch per feature,** cut from `main` and named for its build-order phase (e.g. `scribes-log`, `snapshots`). Merge into `main` only when the phase is working and tested.
 - **Staying current:** after updating `main` from upstream, merge `main` into any active feature branch.

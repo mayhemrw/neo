@@ -21,7 +21,7 @@ Robots build it. Every push to `main` that touches `pocket/`, `app.js`, or
 `styles.css` produces a fresh, signed APK and drops it on the rolling
 **pocket-latest** pre-release:
 
-    https://github.com/hughhowey/neo/releases/download/pocket-latest/neo-pocket.apk
+    https://github.com/mayhemrw/neo-scribe/releases/download/pocket-latest/neo-pocket.apk
 
 Bookmark that on the phone. Tap it, open the download, and it installs over
 the previous build — same signing key every time, so no uninstalling and no

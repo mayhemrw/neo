@@ -11,6 +11,6 @@ leave your device and has no server of its own.
 The app contains no analytics, no advertising, no accounts, and no
 third-party services. It makes no network requests.
 
-Questions: open an issue at https://github.com/hughhowey/neo/issues.
+Questions: open an issue at https://github.com/mayhemrw/neo-scribe/issues.
 
 *Last updated September 2026.*

@@ -105,8 +105,8 @@ NEO speaks English, French, Spanish, Portuguese, German, Italian, Dutch, Polish,
 Requires [Node.js](https://nodejs.org).
 
 ```
-git clone https://github.com/hughhowey/neo.git
-cd neo
+git clone https://github.com/mayhemrw/neo-scribe.git
+cd neo-scribe
 npm install
 npm start
 ```

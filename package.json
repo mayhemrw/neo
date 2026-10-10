@@ -3,7 +3,7 @@
   "productName": "NEO",
   "version": "1.4.7",
   "description": "A word processor for authors. Distraction-free by default.",
-  "homepage": "https://github.com/hughhowey/neo",
+  "homepage": "https://github.com/mayhemrw/neo-scribe",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -38,8 +38,8 @@
     "productName": "NEO",
     "publish": {
       "provider": "github",
-      "owner": "hughhowey",
-      "repo": "neo"
+      "owner": "mayhemrw",
+      "repo": "neo-scribe"
     },
     "mac": {
       "category": "public.app-category.productivity",
