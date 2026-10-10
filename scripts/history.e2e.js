@@ -439,7 +439,7 @@ test('a passage copied out of a version and pasted into the book: a restore', as
   })()`);
   await js(`${hv('.hv-copy')}.click()`);
   await tick(200);
-  assert.equal(await js(`!!(slogState.clip && slogState.clip.history)`), true);
+  assert.equal(await js(`!!(slogClips()[0] && slogClips()[0].history)`), true);
   assert.match(await js(`document.querySelector('#hint').textContent`), /Copied/);
   await key('Escape');
   await caretEnd(1, 0);

@@ -27,7 +27,7 @@ const V = require('./slog-verify.js');
 const F = require('./slog-files.js');
 
 const FORMAT = 1;          // log.json's version
-const CHUNK_FORMAT = 2;    // a chunk's (its open line's v); 2 adds stamp entries, and 1 still reads
+const CHUNK_FORMAT = 3;    // a chunk's (its open line's v); 2 added stamp entries, 3 relink entries; 1 and 2 still read
 const LOG_DIR = 'scribes-log';
 const LOG_INFO = 'log.json';
 // what Windows says while something else has a file open for a moment
@@ -970,6 +970,26 @@ class Recorder {
       added++;
     }
     return added;
+  }
+
+  // What slog-relink.js found before an export or a report: words whose
+  // origin wasn't recorded as they were written, matched to earlier writing.
+  // [{ dev, of, from }], each a relink entry in the chunk being written (one
+  // is started if none is open): `of` the edit, on `dev`'s chain (named only
+  // when it isn't this device's). Returns how many were written.
+  relink(dir, bookId, found) {
+    const s = this.session(dir, bookId, { start: true });
+    if (!s.on || !s.info || !s.chain || !Array.isArray(found)) return 0;
+    const me = this.device();
+    let n = 0;
+    for (const r of found) {
+      if (!r || !wholeAtLeast(r.of, 1) || !Array.isArray(r.from) || !r.from.length) continue;
+      if (typeof r.dev === 'string' && !/^[0-9a-f]{32}$/.test(r.dev)) continue;
+      if ((!r.dev || r.dev === me) && !(r.of <= s.chain.n)) continue;
+      const fields = r.dev && r.dev !== me ? { of: r.of, dev: r.dev, from: r.from } : { of: r.of, from: r.from };
+      if (this._append(s, 'relink', fields)) n++;
+    }
+    return n;
   }
 
   // The window says how a book.json it's about to save got that way. Like

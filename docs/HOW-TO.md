@@ -14,7 +14,9 @@ When someone asks how the book was written:
 2. Choose **File → Scribe's Log → Verification Report…**
 3. Pick how exactly to show the times: **Exact times**, **Dates only**, or **Weeks only**. Dates only is the usual pick: it shows which days you wrote, not that you were up at 3 AM.
 4. Tick **Also save it as a PDF** if the person would rather have a PDF. If an editor's changes are in the book, **Name the editors** puts their names in this one report (the log itself only ever says Reviewer 1, Reviewer 2).
-5. Click **Save Report…** and pick a place. NEO closes the writing session, timestamps its end, and saves the report.
+5. Click **Save Report…** and pick a place. NEO closes the writing session, matches any words whose origin wasn't recorded (your own words pasted back from Word, say) to your earlier writing, timestamps the end, and saves the report.
+
+If the Slog is off for the book, NEO asks first: **Switch On and Make the Report** turns it back on so it can trace what changed meanwhile (you can switch it off again right after), or **Make the Report As Is**.
 
 The report is a summary anyone can read: where the words came from (typed in NEO, pasted, imported, or from an editor), how much you revised, when you wrote, and the outside timestamps. It shows the title, your author name, and the chapter titles. None of the writing itself.
 
@@ -28,6 +30,8 @@ Want them to be able to check it for themselves? Send them an export too. That's
    - **Without the text**: how the book was written, but none of its words. Every check still works except a word-for-word comparison, and a manuscript can still be matched against the log's fingerprint. This is the one to send almost every time.
    - **With the text**: every word of the book as you wrote it, including every passage you cut. Send this only to someone you'd trust with your messiest drafts.
 4. Save the .zip and send it, along with the manuscript (.txt or .docx) if they don't already have it.
+
+Before it writes the .zip, NEO matches any words whose origin wasn't recorded to your earlier writing, the same as for a report, and puts those matches in the log, so whoever checks it sees them. With the Slog off, it asks first, as the report does.
 
 The .zip carries its own copy of the verifier, so nobody needs NEO to check it. An export always carries exact times, whatever you picked for a report: it's the record itself, warts and all.
 
@@ -159,7 +163,7 @@ If both computers changed the same chapter before syncing, NEO keeps your words 
 1. Open the book.
 2. Choose **File → Scribe's Log → Log This Book** to untick it.
 
-What the log already recorded stays in the book's folder. Tick it again to start logging where you left off; the report counts whatever changed in between under "Changed while the log was off". With the log off, NEO still keeps a copy of each chapter you changed at the end of every session, so Chapter History keeps working.
+What the log already recorded stays in the book's folder. Tick it again to start logging where you left off; the report counts whatever changed in between under "Changed while the log was off", except words NEO can match to your earlier writing (the report says how many of those there were). Making a report or an export with the log off asks whether to switch it on first. With the log off, NEO still keeps a copy of each chapter you changed at the end of every session, so Chapter History keeps working.
 
 ## Tidy up the log's files
 

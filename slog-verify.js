@@ -27,8 +27,8 @@
   const OTS = hasRequire ? require('./stamp-ots.js') : globalThis.StampOts;
   const Z = hasRequire ? require('./slog-zip.js') : globalThis.SlogZip;
 
-  const CHUNK_FORMATS = new Set([1, 2]);
-  const KINDS = new Set(['open', 'edit', 'base', 'doc', 'on', 'off', 'sleep', 'wake', 'clock', 'close', 'stamp']);
+  const CHUNK_FORMATS = new Set([1, 2, 3]);
+  const KINDS = new Set(['open', 'edit', 'base', 'doc', 'on', 'off', 'sleep', 'wake', 'clock', 'close', 'stamp', 'relink']);
   // 20261007T160512Z-7f3a9c2e.slog, with -2, -3… if a name is ever taken
   const CHUNK_RE = /^(\d{8}T\d{6}Z)-([0-9a-f]{8})(?:-([1-9]\d{0,3}))?\.slog$/;
   const RECEIPT_RE = /^(\d{8}T\d{6}Z)-([0-9a-f]{8})(?:-([1-9]\d{0,3}))?\.stamps$/;
@@ -203,6 +203,51 @@
   }
   // one character, however it's written (a no-break space as a space)
   const sameChar = (a, b) => a === b || viewOf(a, true).text === viewOf(b, true).text;
+
+  // A string as its words read, typography aside (a `relink`'s pieces are
+  // matched and checked this way): a run of spaces (no-break, tabs and line
+  // breaks too) as one space, curly and straight quotes and apostrophes as
+  // straight ones, a run of hyphens or dashes as one hyphen, and three or
+  // more full stops as an ellipsis. Like viewOf, with where each character
+  // starts in the raw string (`at`, always given).
+  // (by character code, for speed: the scan reads whole books this way)
+  const looseSpace = (c) => c === 32 || c === 9 || c === 10 || c === 13 || c === 0xa0 || (c >= 0x2000 && c <= 0x200a) || c === 0x202f || c === 0x205f || c === 0x3000;
+  const looseDash = (c) => c === 45 || (c >= 0x2010 && c <= 0x2015) || c === 0x2212;
+  const looseSq = (c) => c === 39 || c === 0x2018 || c === 0x2019 || c === 0x201a || c === 0x201b || c === 0x2032;
+  const looseDq = (c) => c === 34 || c === 0x201c || c === 0x201d || c === 0x201e || c === 0x201f || c === 0x2033;
+  function looseOf(raw, json) {
+    const v = viewOf(String(raw), json);
+    const src = v.text;
+    const base = v.at || null;
+    const out = [];
+    const at = [];
+    let i = 0;
+    while (i < src.length) {
+      const c = src.charCodeAt(i);
+      at.push(base ? base[i] : i);
+      let j = i + 1;
+      let o = c;
+      if (looseSpace(c)) {
+        while (j < src.length && looseSpace(src.charCodeAt(j))) j++;
+        o = 32;
+      } else if (looseDash(c)) {
+        while (j < src.length && looseDash(src.charCodeAt(j))) j++;
+        o = 45;
+      } else if (c === 46 && src.charCodeAt(i + 1) === 46 && src.charCodeAt(i + 2) === 46) {
+        while (j < src.length && src.charCodeAt(j) === 46) j++;
+        o = 0x2026;
+      } else if (looseSq(c)) o = 39;
+      else if (looseDq(c)) o = 34;
+      out.push(o);
+      i = j;
+    }
+    at.push(base ? base[src.length] : src.length);
+    let text = '';
+    for (let k = 0; k < out.length; k += 8192) text += String.fromCharCode.apply(null, out.slice(k, k + 8192));
+    return { raw: String(raw), text, at, json: !!json };
+  }
+  // two stretches the same, typography aside
+  const sameLoose = (a, b, json) => a === b || looseOf(a, json).text === looseOf(b, json).text;
 
   /* ------------------------------------------------------------------ */
   /*  Reading                                                            */
@@ -667,21 +712,32 @@
   // Detailed origins (a Tracer made with `detail`, for the report): each
   // unit's origin is "category|hour|paste|flags", the hour (UTC hours since
   // 1970) the unit was first written in, a paste's own id ("dev8:n:op"),
-  // and flags: "m" moved within the book, "t" markup (inside a tag, as the
-  // op's markup list says, so it's known without the words).
-  const detailOrigin = (cat, hour, paste, moved, tag) => cat + '|' + hour + '|' + paste + '|' + (moved ? 'm' : '') + (tag ? 't' : '');
+  // and flags: "m" moved within the book, "r" matched to earlier writing by
+  // a `relink`, "g" (with "r") text that reappeared while the log was off or
+  // without a label, "t" markup (inside a tag, as the op's markup list says,
+  // so it's known without the words). "t" is always last.
+  const detailOrigin = (cat, hour, paste, moved, tag, relinked = false, gap = false) =>
+    cat + '|' + (hour == null ? '' : hour) + '|' + (paste == null ? '' : paste) + '|' +
+    (moved ? 'm' : '') + (relinked ? 'r' : '') + (gap ? 'g' : '') + (tag ? 't' : '');
   function parseOrigin(o) {
     const [cat, hour, paste, flags = ''] = String(o).split('|');
-    return { cat, hour: hour === undefined || hour === '' ? null : +hour, paste: paste || null, moved: flags.includes('m'), tag: flags.includes('t') };
+    return {
+      cat, hour: hour === undefined || hour === '' ? null : +hour, paste: paste || null,
+      moved: flags.includes('m'), relinked: flags.includes('r'), gap: flags.includes('g'), tag: flags.includes('t')
+    };
   }
   const originCat = (o) => { const i = o.indexOf('|'); return i < 0 ? o : o.slice(0, i); };
   // the same runs as another category (another book's text), or moved
   function recat(runs, cat, detail) {
     if (!detail) return runs.length ? [[runs.reduce((a, r) => a + r[0], 0), cat]] : [];
-    return runsTidy(runs.map(([len, o]) => { const p = parseOrigin(o); return [len, detailOrigin(cat, p.hour, p.paste, p.moved, p.tag)]; }));
+    return runsTidy(runs.map(([len, o]) => { const p = parseOrigin(o); return [len, detailOrigin(cat, p.hour, p.paste, p.moved, p.tag, p.relinked, p.gap)]; }));
   }
   function asMoved(runs) {
-    return runs.map(([len, o]) => { const p = parseOrigin(o); return p.hour === null && !o.includes('|') ? [len, o] : [len, detailOrigin(p.cat, p.hour, p.paste, true, p.tag)]; });
+    return runs.map(([len, o]) => { const p = parseOrigin(o); return p.hour === null && !o.includes('|') ? [len, o] : [len, detailOrigin(p.cat, p.hour, p.paste, true, p.tag, p.relinked, p.gap)]; });
+  }
+  // …or matched to earlier writing by a relink (and whether it came back in a gap)
+  function asRelinked(runs, gap) {
+    return runs.map(([len, o]) => { const p = parseOrigin(o); return p.hour === null && !o.includes('|') ? [len, o] : [len, detailOrigin(p.cat, p.hour, p.paste, p.moved, p.tag, true, gap || p.gap)]; });
   }
   // the origin of the nearest unit of prose (not markup) before pos (dir
   // -1) or at or after it (dir 1), or null. Searched from the run around
@@ -713,6 +769,12 @@
   const whole = (v) => Number.isSafeInteger(v) && v >= 0;
   const isDevSource = (s) => !!s && typeof s === 'object' && typeof s.dev === 'string';
   const isGraveSource = (s) => !!s && typeof s === 'object' && !isDevSource(s) && typeof s.log !== 'string' && Number.isSafeInteger(s.n);
+  // The labels whose words a `relink` can place: a move whose place wasn't
+  // recorded, a paste or drop from outside NEO, and text that reached the
+  // disk without a label (changed while the log was off, or unlogged). Text
+  // the log saw written (typed, imported, an editor's) is never relinked.
+  const RELINKABLE = new Set(['move', 'paste', 'drop', 'unlogged']);
+  const isJsonDocName = (doc) => doc === 'book' || doc === 'darlings' || doc === 'stickies';
 
   // One device's chain replayed keeping, for every unit of every document,
   // where it first came from. Steps one entry at a time, so a chain whose
@@ -720,12 +782,18 @@
   // (traceAll). `resolve(dev, n, doc)` gives another device's document as
   // it stood after its entry n: { state } or { error }.
   class Tracer {
-    constructor(entries, { dev = null, resolve = null, links = null, detail = false, hooks = null } = {}) {
+    constructor(entries, { dev = null, resolve = null, links = null, detail = false, hooks = null, relinks = null } = {}) {
       this.dev = dev;
       this.detail = detail;         // origins with time, paste ids and markup (detailOrigin)…
       this.full = detail === true;  // …or, with 'moved', only whether text was moved within the book (playback)
       this.movedOnly = detail === 'moved';
-      this.hooks = hooks;           // detail only: { step(e, tracer), cut(e, gone), back(e, take, source, from) }
+      // { step(e, tracer), cut(e, gone), back(e, take, source, from) } (detail only),
+      // pre(e, tracer) just before an entry, buried(key, grave) each deletion
+      this.hooks = hooks;
+      // n → [{ pieces, by: { dev, n } }]: `relink` entries' pieces for this
+      // chain's edits, from any device's chain (collectRelinks)
+      this.relinks = relinks;
+      this.relinkUsed = new Set();
       this.revised = new Set();     // detail only: pastes with words put in or taken out inside them
       this.entries = entries;
       this.resolve = resolve;
@@ -743,6 +811,63 @@
         if (e.kind !== 'edit' || !Array.isArray(e.from)) continue;
         for (const p of e.from) if (Array.isArray(p) && isGraveSource(p[3])) this.wanted.add(p[3].n + ':' + p[3].op);
       }
+      if (relinks) {
+        for (const list of relinks.values()) {
+          for (const r of list) for (const p of r.pieces) if (Array.isArray(p) && isGraveSource(p[3])) this.wanted.add(p[3].n + ':' + p[3].op);
+        }
+      }
+    }
+
+    // The pieces an edit's inserted words take their origins from: its own
+    // `from` (or, for text that arrived, the other device's document it was
+    // matched to), then the pieces `relink` entries add for it, each only
+    // where it fills units nothing before it covers. { pieces, quiet,
+    // relinked (the Set of pieces that came from a relink, or null), bad
+    // ([{ by, problem }] for relinks that can't apply) }.
+    piecesOf(e) {
+      let pieces = e.from === undefined ? [] : e.from;
+      let quiet = false;
+      if (e.kind === 'edit' && e.from === undefined) {
+        const l = this._linked(e);
+        if (l) { pieces = l; quiet = true; }
+      }
+      const rel = this.relinks && Number.isSafeInteger(e.n) ? this.relinks.get(e.n) : null;
+      if (!rel || !rel.length) return { pieces, quiet, relinked: null, bad: [] };
+      const bad = [];
+      if (e.kind !== 'edit' || !RELINKABLE.has(e.src)) {
+        for (const r of rel) bad.push({ by: r.by, problem: 'relink on text whose origin was recorded' });
+        return { pieces, quiet, relinked: null, bad };
+      }
+      if (!Array.isArray(pieces)) return { pieces, quiet, relinked: null, bad };
+      // what's covered already, per op: [[at, end], …]
+      const taken = new Map();
+      const cover = (op, a, b) => { if (!taken.has(op)) taken.set(op, []); taken.get(op).push([a, b]); };
+      const free = (op, a, b) => (taken.get(op) || []).every(([x, y]) => b <= x || a >= y);
+      for (const p of pieces) if (Array.isArray(p) && whole(p[0]) && whole(p[1]) && Number.isSafeInteger(p[2])) cover(p[0], p[1], p[1] + p[2]);
+      const relinked = new Set();
+      const added = [];
+      for (const r of rel) {
+        if (r.by.dev === this.dev && !(r.by.n > e.n)) { bad.push({ by: r.by, problem: 'relink points ahead of itself' }); continue; }
+        for (const p of r.pieces) {
+          const ok = Array.isArray(p) && whole(p[0]) && p[0] < e.ops.length && whole(p[1]) && Number.isSafeInteger(p[2]) && p[2] > 0 &&
+            p[1] + p[2] <= e.ops[p[0]][2];
+          if (!ok) { bad.push({ by: r.by, problem: 'relink piece out of range' }); continue; }
+          const s = p[3];
+          if (!s || typeof s !== 'object' || isDevSource(s) || typeof s.log === 'string' || !(isGraveSource(s) || typeof s.doc === 'string')) {
+            bad.push({ by: r.by, problem: 'relink piece has no source it can use' });
+            continue;
+          }
+          // (a unit already placed keeps its place: never an error, two
+          // computers can match the same words)
+          if (!free(p[0], p[1], p[1] + p[2])) continue;
+          cover(p[0], p[1], p[1] + p[2]);
+          relinked.add(p);
+          added.push(p);
+        }
+      }
+      if (!added.length) return { pieces, quiet, relinked: null, bad };
+      const all = [...pieces, ...added].sort((a, b) => (Array.isArray(a) && Array.isArray(b) ? (a[0] - b[0]) || (a[1] - b[1]) : 0));
+      return { pieces: all, quiet, relinked, bad };
     }
 
     want(n, doc) {
@@ -761,6 +886,7 @@
           const e = this.entries[this.pos];
           if (Number.isSafeInteger(e.n) && e.n > toN) break;
           this.pos++;
+          if (this.hooks && this.hooks.pre) this.hooks.pre(e, this);
           this.step(e);
           if (Number.isSafeInteger(e.n)) this.lastN = e.n;
           if (this.hooks && this.hooks.step) this.hooks.step(e, this);
@@ -834,6 +960,10 @@
     step(e) {
       const where = { n: e.n, doc: e.doc };
       const { docs, graves, problems } = this;
+      if (e.kind !== 'edit' && this.relinks && this.relinks.has(e.n)) {
+        this.relinkUsed.add(e.n);
+        for (const r of this.relinks.get(e.n)) problems.push({ n: r.by.n, ...(r.by.dev !== this.dev ? { relinkDev: r.by.dev } : {}), of: e.n, problem: 'relink on text whose origin was recorded' });
+      }
       try {
         if (e.kind === 'base') {
           if (docs[e.doc] && docs[e.doc].len) throw new Error('base over a document that already has text');
@@ -879,12 +1009,12 @@
           const d = docs[e.doc];
           if (!d) throw new Error('edit to a document the log never saw');
           const words = e.x && Array.isArray(e.x.ins) ? e.x.ins : null;
-          let pieces = e.from === undefined ? [] : e.from;
-          let quiet = false;
-          if (e.from === undefined) {
-            const l = this._linked(e);
-            if (l) { pieces = l; quiet = true; }
-          }
+          const got = this.piecesOf(e);
+          if (got.bad.length || (this.relinks && this.relinks.has(e.n))) this.relinkUsed.add(e.n);
+          for (const b of got.bad) problems.push({ n: b.by.n, ...(b.by.dev !== this.dev ? { relinkDev: b.by.dev } : {}), of: e.n, problem: b.problem });
+          const pieces = got.pieces;
+          const relinked = got.relinked;
+          const quiet = got.quiet;
           if (!Array.isArray(pieces)) throw new Error('from isn\'t a list');
           const before = pieces.some((p) => p && p[3] && p[3].doc === e.doc && !isDevSource(p[3])) ? { text: d.text, len: d.len, runs: d.runs.slice() } : null;
           const own = originOf(e);
@@ -906,14 +1036,21 @@
             }
             const gone = runsCut(d.runs, at, del);
             const key = e.n + ':' + i;
-            if (this.wanted.has(key)) graves.set(key, { text: d.text === null ? null : d.text.slice(at, at + del), len: del, runs: gone, doc: e.doc, ts: e.ts });
+            const keep = this.wanted.has(key);
+            const tell = del && this.hooks && this.hooks.buried;
+            if (keep || tell) {
+              const g = { text: d.text === null ? null : d.text.slice(at, at + del), len: del, runs: gone, doc: e.doc, ts: e.ts };
+              if (keep) graves.set(key, g);
+              if (tell) this.hooks.buried(key, g, e, i);
+            }
             if (this.hooks && this.hooks.cut && gone.length) this.hooks.cut(e, gone);
             const put = words ? words[i] : null;
             const add = this._own(e, i, len, own);
             for (const p of pieces) {
               if (!Array.isArray(p) || p[0] !== i) continue;
               const [, pa, pl, source] = p;
-              const bad = (problem) => { if (!quiet) problems.push({ ...where, piece: p, problem }); };
+              const isRelink = !!(relinked && relinked.has(p));
+              const bad = (problem) => { if (!quiet || isRelink) problems.push({ ...where, piece: p, problem: isRelink ? 'relink: ' + problem : problem }); };
               if (!(whole(pa) && Number.isSafeInteger(pl) && pl > 0 && pa + pl <= len)) { bad('from piece out of range'); continue; }
               if (i < last[0] || (i === last[0] && pa < last[1])) { bad('from pieces overlap or are out of order'); continue; }
               last = [i, pa + pl];
@@ -923,9 +1060,15 @@
               else {
                 const src = this._source(e, source, i, before);
                 if (src.error) { bad(src.error); continue; }
-                take = this._take(p, put, source, src, null, own, bad);
+                const loose = isRelink ? { json: isJsonDocName(e.doc), srcJson: isJsonDocName(isGraveSource(source) ? src.doc : source.doc) } : null;
+                take = this._take(p, put, source, src, null, own, bad, loose);
                 if (!take) continue;
-                if (this.full && !isDevSource(source)) {
+                if (isRelink) {
+                  if (this.full) {
+                    take = asRelinked(take, own === 'while off' || own === 'unlogged');
+                    if (this.hooks && this.hooks.back) this.hooks.back(e, take, source, src);
+                  } else if (this.movedOnly) take = take.map(([l, o]) => [l, detailOrigin(originCat(o), '', '', true, false)]);
+                } else if (this.full && !isDevSource(source)) {
                   take = asMoved(take);
                   if (this.hooks && this.hooks.back) this.hooks.back(e, take, source, src);
                 } else if (this.movedOnly && !isDevSource(source)) take = take.map(([l, o]) => [l, detailOrigin(originCat(o), '', '', true, false)]);
@@ -974,7 +1117,9 @@
     // The origins a piece takes from its source, checked: it must fit
     // inside the text it names and, with the words, be that text. `put` is
     // the op's inserted string (an edit) or the base's whole text.
-    _take(p, put, source, src, baseText, own, bad) {
+    // `loose` ({ json, srcJson }, a relink's piece): the two stretches only
+    // have to be the same typography aside (looseOf).
+    _take(p, put, source, src, baseText, own, bad, loose = null) {
       const [, pa, pl] = p;
       const sl = source.len === undefined ? pl : source.len;
       const sa = source.at;
@@ -982,7 +1127,9 @@
       const mineAll = baseText != null ? baseText : put;
       const mine = mineAll != null && typeof mineAll === 'string' ? mineAll.slice(pa, pa + pl) : null;
       const theirs = src.text != null ? src.text.slice(sa, sa + sl) : null;
-      if (mine !== null && theirs !== null && mine !== theirs && !sameChar(mine, theirs)) { bad('moved text doesn\'t match where it came from'); return null; }
+      const same = mine === null || theirs === null || mine === theirs ||
+        (loose ? looseOf(mine, loose.json).text === looseOf(theirs, loose.srcJson).text : sameChar(mine, theirs));
+      if (!same) { bad('moved text doesn\'t match where it came from'); return null; }
       const runs = runsSlice(src.runs, sa, sl);
       return sl === pl && (mine === null || theirs === null || mine === theirs)
         ? runs
@@ -996,8 +1143,49 @@
   // detail and hooks (dev → hooks) as for a Tracer (the report's; detail
   // 'moved' keeps only the category and whether it was moved, playback's).
   // Returns Map dev → { docs: { id: { text, len, runs } }, problems, revised }.
+  // Every `relink` entry's pieces, by the chain whose edit they place:
+  // { byDev: Map dev → Map n → [{ pieces, by: { dev, n } }], problems:
+  // Map dev → [problem] } (problems on the chain the relink is written in).
+  // A relink names its edit by `of`, on its own chain, or on the chain of
+  // `dev` when it has one. Several relinks for one edit apply in the order
+  // their chains are given, then in chain order.
+  function collectRelinks(chains) {
+    const byDev = new Map();
+    const problems = new Map();
+    const devs = new Set(chains.map((c) => c.dev));
+    for (const c of chains) {
+      for (const e of c.entries) {
+        if (e.kind !== 'relink') continue;
+        const bad = (problem) => {
+          if (!problems.has(c.dev)) problems.set(c.dev, []);
+          problems.get(c.dev).push({ n: e.n, problem });
+        };
+        const target = typeof e.dev === 'string' ? e.dev : c.dev;
+        if (!Number.isSafeInteger(e.of) || e.of < 1 || !Array.isArray(e.from) || !e.from.length) { bad('relink isn\'t well formed'); continue; }
+        if (!devs.has(target)) { bad('relink names a device whose log isn\'t here'); continue; }
+        if (target === c.dev && !(e.of < e.n)) { bad('relink points ahead of itself'); continue; }
+        if (!byDev.has(target)) byDev.set(target, new Map());
+        const m = byDev.get(target);
+        if (!m.has(e.of)) m.set(e.of, []);
+        m.get(e.of).push({ pieces: e.from, by: { dev: c.dev, n: e.n } });
+      }
+    }
+    return { byDev, problems };
+  }
+  // …and those whose edit never came: once every chain has been traced
+  function orphanRelinks(tracers) {
+    for (const t of tracers.values()) {
+      if (!t.relinks) continue;
+      for (const [n, list] of t.relinks) {
+        if (t.relinkUsed.has(n)) continue;
+        for (const r of list) t.problems.push({ n: r.by.n, ...(r.by.dev !== t.dev ? { relinkDev: r.by.dev } : {}), of: n, problem: 'relink names an entry that isn\'t there' });
+      }
+    }
+  }
+
   function traceAll(chains, { links = null, detail = false, hooks = null } = {}) {
     const tracers = new Map();
+    const rel = collectRelinks(chains);
     const resolve = (dev, n, doc) => {
       const t = tracers.get(dev);
       if (!t) return { error: 'from names a device whose log isn\'t here' };
@@ -1010,7 +1198,9 @@
       return { state };
     };
     for (const c of chains) {
-      tracers.set(c.dev, new Tracer(c.entries, { dev: c.dev, resolve, links: links && links.get(c.dev), detail, hooks: hooks && hooks(c.dev) }));
+      const t = new Tracer(c.entries, { dev: c.dev, resolve, links: links && links.get(c.dev), detail, hooks: hooks && hooks(c.dev), relinks: rel.byDev.get(c.dev) || null });
+      t.problems.push(...(rel.problems.get(c.dev) || []));
+      tracers.set(c.dev, t);
     }
     // what each device's text is wanted at, by the others
     for (const c of chains) {
@@ -1025,6 +1215,7 @@
       if (l) for (const v of l.values()) if (tracers.has(v.dev)) tracers.get(v.dev).want(v.n, v.doc);
     }
     for (const t of tracers.values()) t.advance();
+    orphanRelinks(tracers);
     const out = new Map();
     for (const [dev, t] of tracers) out.set(dev, { docs: t.docs, problems: t.problems, revised: t.revised });
     return out;
@@ -1032,7 +1223,11 @@
 
   // One chain on its own (a `from` naming another device is a problem)
   function trace(entries) {
-    const t = new Tracer(entries).advance();
+    const rel = collectRelinks([{ dev: null, entries }]);
+    const t = new Tracer(entries, { relinks: rel.byDev.get(null) || null });
+    t.problems.push(...(rel.problems.get(null) || []));
+    t.advance();
+    orphanRelinks(new Map([[null, t]]));
     return { docs: t.docs, problems: t.problems };
   }
 
@@ -1601,8 +1796,8 @@
     canonical, useHash, sha256hex, clearPart, entryHash, saltFor, commitment, normalizeManuscript, manuscriptHash,
     markupRanges, applyOps, applyLengths, insertOffsets, viewOf, sameChar,
     parseLines, parseChunk, readLog, logPaths, readExportFiles, EXPORT_EXTRAS, mergeArchives, expandArchivesSync, expandArchives, orderChunks, verifyChain, Replayer, replay,
-    runsTidy, runsSlice, runsCut, runsInsert, originOf, Tracer, trace, traceAll, matchArrivals,
-    detailOrigin, parseOrigin, originCat,
+    runsTidy, runsSlice, runsCut, runsInsert, originOf, Tracer, trace, traceAll, matchArrivals, collectRelinks,
+    detailOrigin, parseOrigin, originCat, looseOf, sameLoose, RELINKABLE, isJsonDocName,
     AUX_DOCS, JSON_DOCS, chapterDoc, docChapter, decodeEntities, chapterLines, manuscriptText, proseMask, composition, originsAt, editorOf,
     checkReceipts, matchStampEntries, coverage, clockCheck, deviceNames, checkChains, checkLog,
     SKEW, AHEAD, JUMP

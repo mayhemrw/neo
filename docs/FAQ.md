@@ -6,7 +6,7 @@ Straight answers about the Scribe's Log, versions, and working with an editor in
 
 ### What is the Scribe's Log?
 
-A record of how your book got written, kept by NEO while you write. It notes each change in short bursts (a second or two at a time, not every keystroke), which chapter it was in, and where the words came from: typed in NEO, pasted from outside, moved within the book, imported, or accepted from an editor. Each entry is chained to the one before it, so changing or removing an old entry breaks everything after it. And the chain gets timestamped by two outside services as you go.
+The Scribe's Log (the Slog, for short) is a record of how your book got written, kept by NEO while you write. It notes each change in short bursts (a second or two at a time, not every keystroke), which chapter it was in, and where the words came from: typed in NEO, pasted from outside, moved within the book, imported, or accepted from an editor. Each entry is chained to the one before it, so changing or removing an old entry breaks everything after it. And the chain gets timestamped by two outside services as you go.
 
 It's on for every book unless you turn it off. You don't have to think about it.
 
@@ -59,9 +59,29 @@ Pocket doesn't keep a log yet. Words written there reach the desktop as text tha
 
 Nothing gets recorded while it's off. What it recorded before stays in the book's folder. Turn it back on (**File → Scribe's Log → Log This Book**) and it picks up from there; the report shows what changed while it was off as its own line. Chapter History still works with the log off: NEO keeps a copy of each chapter you changed at the end of every session.
 
+If you make a report or an export while the Slog is off, NEO asks first. **Switch On and Export** (or **Switch On and Make the Report**) turns it back on, so words that changed while it was off can be matched to your earlier writing, then offers to switch it off again right after. **Export As Is** leaves it off.
+
+### I moved a paragraph. Does it still count as typed?
+
+Yes. Words keep where they were first written, wherever they end up: cut and pasted, dragged, sent to Darlings and back, copied out of your Notes. Typed stays typed and pasted stays pasted. The report adds a line saying how much was moved at some point, but it's counted under where it came from.
+
+### What's "Moved, origin unknown"?
+
+Words NEO knows came from inside the book, but whose first appearance it couldn't trace. It should be rare: before every report and export, NEO looks again through everything ever deleted from the book, and the book as it stood, and places what it can. What's left keeps this line, which is still better than unknown, since it didn't come from outside.
+
+### I sent a chapter to my editor and pasted their version back. What happens?
+
+The paste is logged as a paste. Then, before a report or an export, NEO matches it against your earlier writing in the book, piece by piece: the stretches your editor didn't touch go back to being typed, and the words they changed stay pasted (NEO can't tell who changed them). Curly versus straight quotes, dashes, and two spaces after a full stop don't count as changes, so an editor who only cleaned up the typography costs you nothing. A stretch has to match for at least 20 characters to count, so heavy line edits mostly stay pasted.
+
+The better route is **File → Export → Word for an Editor…** and **File → Import Review…**: your editor's changes come in marked as theirs ("From an editor"), and everything else stays yours, no matching needed.
+
+### Can matching make pasted text look typed when it wasn't?
+
+No. NEO only ever matches against writing that was already in this book's log before the paste, and the words take the origin of that writing, whatever it was. Text pasted from ChatGPT matches nothing you typed, so it stays pasted. Words that match an earlier paste stay pasted. And when the same words were written more than once, the earliest wins. Anything already recorded as typed, imported, or an editor's is never changed. The matches go into the log itself, so anyone checking an export sees exactly what NEO matched and can check it.
+
 ### I pasted from my old draft. Will that look bad?
 
-It shows as "Pasted from outside", and stays a paste even after you revise it (the report says "then revised"; anything you typed into it counts as typed). A draft brought in with **File → Import Manuscripts…** (which makes it a new book) shows as "Imported". The report doesn't score or judge any of this. It only says where the words came from.
+If that draft was written in this book in NEO (say you copied a chapter out to Word and pasted it back), NEO matches it to your earlier writing before a report or an export, and it counts as typed. A draft from elsewhere shows as "Pasted from outside", and stays a paste even after you revise it (the report says "then revised"; anything you typed into it counts as typed). A draft brought in with **File → Import Manuscripts…** (which makes it a new book) shows as "Imported". The report doesn't score or judge any of this. It only says where the words came from.
 
 ### Does the log slow NEO down or fill my disk?
 

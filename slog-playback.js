@@ -42,11 +42,13 @@
   /*  Where text came from                                               */
   /* ------------------------------------------------------------------ */
 
-  // The colors playback offers, from the checker's detailed origins: a
-  // paste stays a paste wherever it's moved; text from a file or from
-  // before the log began is imported; typed text moved within the book is
-  // moved; what's left (arrived and never traced, unlabeled, changed while
-  // the log was off) is other
+  // The colors playback offers, from the checker's detailed origins. Moved
+  // text keeps the color of where it was first written, wherever it's
+  // moved: typed stays typed, a paste stays a paste. Text from a file or
+  // from before the log began is imported; text moved within the book whose
+  // place the log couldn't trace is "moved, origin unknown"; what's left
+  // (arrived and never traced, unlabeled, changed while the log was off) is
+  // other
   const ORIGINS = ['typed', 'pasted', 'moved', 'imported', 'editor', 'other'];
   const groupCache = new Map();
   function originGroup(o) {
@@ -57,7 +59,7 @@
     if (p.cat === 'paste' || p.cat === 'drop') g = 'pasted';
     else if (p.cat === 'import' || p.cat === 'baseline' || p.cat === 'other book') g = 'imported';
     else if (V.editorOf(p.cat) !== null) g = 'editor';
-    else if (p.moved || p.cat === 'move') g = 'moved';
+    else if (p.cat === 'move') g = 'moved';
     else if (p.cat === 'typed') g = 'typed';
     else g = 'other';
     if (groupCache.size > 5000) groupCache.clear();
@@ -508,7 +510,7 @@
     const status = el('div', 'pb-status');
     const sessionLine = el('div', 'pb-session');
     const legend = el('div', 'pb-legend');
-    const LEGEND = { typed: t('Typed'), pasted: t('Pasted'), moved: t('Moved'), imported: t('Imported'), editor: t('From an editor'), other: t('Other') };
+    const LEGEND = { typed: t('Typed'), pasted: t('Pasted'), moved: t('Moved, origin unknown'), imported: t('Imported'), editor: t('From an editor'), other: t('Other') };
     for (const g of ORIGINS) {
       const item = el('span', 'pb-key pb-o-' + g, LEGEND[g]);
       legend.append(item);

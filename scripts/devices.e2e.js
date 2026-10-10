@@ -292,7 +292,7 @@ async function runAll() {
       const classOf = (needle) => { for (const m of html.matchAll(/<span class="([^"]*)">([^<]*)<\/span>/g)) if (m[2].includes(needle)) return m[1]; return null; };
       assert.equal(classOf(LAPTOP), 'pb-o-typed');
       assert.equal(classOf(OUTSIDE), 'pb-o-pasted');
-      assert.equal(classOf(WIND), 'pb-o-moved', 'typed on A, moved on B');
+      assert.equal(classOf(WIND), 'pb-o-typed', 'typed on A, moved on B: still typed');
       assert.match(classOf('Mara counted the boats twice.'), /pb-o-imported/);
     }],
     ['the verifier plays the export with the text through to the end', () => {

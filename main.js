@@ -1219,6 +1219,31 @@ async function slogWrapUp(dir, bookId) {
     : Promise.resolve({ tsa: false, ots: false });
   return { head, settled };
 }
+// Before an export or a report: words whose origin the log couldn't place
+// as they were written (a move whose place was lost, the writer's own words
+// pasted back from Word or an email, text changed while the log was off)
+// matched to earlier writing in the book and written into the log as
+// relink entries (slog-relink.js), so the report and every checker of the
+// export read the same thing. Only for a book whose log is on; a log that
+// doesn't check is left as it is. Returns how many relink entries went in.
+// (In the History helper's process, so NEO's window and menus never wait
+// on it; a book so long the scan runs past SLOG_SCAN_BUDGET keeps what was
+// found by then.)
+const SLOG_SCAN_BUDGET = 45000;
+async function slogScan(dir, bookId) {
+  const rec = scribe();
+  try {
+    const st = rec.status(dir, bookId);
+    if (!st || !st.on || !st.logging) return 0;
+    await rec.head(dir, bookId);
+    const { relinks, cut } = await historyAsk({ type: 'scan', dir, budget: SLOG_SCAN_BUDGET });
+    if (cut) logError('scribe\'s log scan', new Error('stopped after ' + SLOG_SCAN_BUDGET / 1000 + ' s; later edits left as they were'));
+    return relinks && relinks.length ? rec.relink(dir, bookId, relinks) : 0;
+  } catch (err) {
+    logError('scribe\'s log scan', err);
+    return 0;
+  }
+}
 // The manuscript's chapters in order (ids only, no titles), for an export's
 // manifest: a log without its words can't read them from book.json
 function slogChapters(meta) {
@@ -1238,7 +1263,10 @@ ipcMain.handle('slog:export', async (_e, bookId, opts = {}) => {
   const kind = opts.kind === 'full' ? 'full' : 'clear';
   if (!fs.existsSync(path.join(dir, slog.LOG_DIR, slog.LOG_INFO))) return { error: t('This book has no Scribe\'s Log yet.') };
   const win = BrowserWindow.getFocusedWindow();
-  // the session's chunk closes and its end is stamped, while the writer picks a place
+  // words the log couldn't place matched to earlier writing, into the log
+  // first; then the session's chunk closes and its end is stamped, while
+  // the writer picks a place
+  const traced = opts.scan === false ? 0 : await slogScan(dir, bookId);
   const { head, settled } = await slogWrapUp(dir, bookId);
   const meta = readJSON(path.join(dir, 'book.json'), {}) || {};
   const name = slogFileName(meta.title) + ' - ' + (kind === 'full' ? t('Scribe\'s Log (with text)') : t('Scribe\'s Log (no text)')) + ' ' + slogDay();
@@ -1264,7 +1292,7 @@ ipcMain.handle('slog:export', async (_e, bookId, opts = {}) => {
     const built = await slogFiles.buildExport(dir, { kind, meta: m, anchors, certs });
     const bytes = require('./slog-zip.js').zip(built.entries, { deflateRawSync: (b) => require('zlib').deflateRawSync(b, { level: 9 }), time: exported });
     fs.writeFileSync(filePath, bytes);
-    return { path: filePath, kind, stamped: !!stamped.tsa, intact: built.result.ok, files: built.entries.length };
+    return { path: filePath, kind, stamped: !!stamped.tsa, intact: built.result.ok, files: built.entries.length, traced };
   } catch (err) {
     logError('scribe\'s log export', err);
     return { error: t('Could not write the file ({why})', { why: (err && err.message) || String(err) }) };
@@ -1299,6 +1327,7 @@ ipcMain.handle('slog:report', async (_e, bookId, opts = {}) => {
   if (!fs.existsSync(path.join(dir, slog.LOG_DIR, slog.LOG_INFO))) return { error: t('This book has no Scribe\'s Log yet.') };
   const privacy = ['exact', 'dates', 'weeks'].includes(opts.privacy) ? opts.privacy : 'dates';
   const win = BrowserWindow.getFocusedWindow();
+  if (opts.scan !== false) await slogScan(dir, bookId);
   const { settled } = await slogWrapUp(dir, bookId);
   const meta = readJSON(path.join(dir, 'book.json'), {}) || {};
   // dated, and the privacy level named unless it's the usual dates only,

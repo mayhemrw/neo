@@ -160,6 +160,10 @@ const BORROWED = 'Borrowed words that are not the writer\'s own.';
 const GULLS = 'Gulls wheeled over the empty slips.';
 const HARBOR = 'The harbor was quiet before the storm.';
 const DEDICATION = 'For the harbor folk, who counted the boats.';
+// typed, then pasted back from outside as Word would send it: an em dash
+// for two hyphens, one space after a full stop
+const KEEPER_TYPED = 'The keeper counted seventeen gulls -- then shut the ledger.  Morning came slowly.';
+const KEEPER_PASTED = 'The keeper counted seventeen gulls \u2014 then shut the ledger. Morning came slowly.';
 const notes = {}; // what the run saw along the way, for the checks
 
 async function main() {
@@ -203,6 +207,17 @@ async function main() {
     wc.paste();
     await tick(300);
     await pause();
+    // an earlier copy pasted back from the system's clipboard history (as
+    // Win+V does), after something else was copied in NEO: still a move
+    await selectText(0, HARBOR);
+    wc.copy();
+    await tick(200);
+    clipboard.writeText(GULLS);
+    await caret(0, 2, true);
+    await type(' ');
+    wc.paste();
+    await tick(300);
+    await pause();
     // native undo of some typing
     await caret(0, 3, true);
     await type(' Three times.', 30);
@@ -221,6 +236,37 @@ async function main() {
     await key('Backspace');
     await pause();
     wc.undo();
+    await tick(300);
+    await pause();
+    // typed, deleted, then pasted back from outside with other typography:
+    // a paste, until the export's scan matches it to the typing
+    await caret(0, 2, true);
+    await type(' ' + KEEPER_TYPED, 20);
+    await pause();
+    notes.keeperOnPage = await js(`(() => {
+      const body = document.querySelectorAll('.chapter-body')[0];
+      body.focus();
+      const walk = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+      for (let t; (t = walk.nextNode());) {
+        const a = t.data.indexOf('The keeper counted');
+        const b = t.data.indexOf('slowly.');
+        if (a < 0 || b < a) continue;
+        const r = document.createRange();
+        r.setStart(t, a);
+        r.setEnd(t, b + 'slowly.'.length);
+        getSelection().removeAllRanges();
+        getSelection().addRange(r);
+        return t.data.slice(a, b + 'slowly.'.length);
+      }
+      return null;
+    })()`);
+    assert.ok(notes.keeperOnPage, 'the typed sentence is on the page');
+    await key('Backspace');
+    await pause();
+    clipboard.writeText(KEEPER_PASTED);
+    await caret(0, 2, true);
+    await type(' ');
+    wc.paste();
     await tick(300);
     await pause();
     // cut in NEO and pasted somewhere else: a move from what the cut deleted
@@ -414,10 +460,17 @@ async function main() {
     assert.ok(await js(`book.chapterOrder.some((c) => chapterKind(c) === 'dedication')`), 'the dedication is a page');
     // File → Scribe's Log → Export for Verification…: the screen, the kind
     // without the text, the save (where the dialog would ask)
+    // (with the Slog switched off first: the export asks to switch it on)
     dialog.showSaveDialog = async () => ({ canceled: false, filePath: EXPORT_TO });
+    await js('slogToggle({ type: \'scribesLog\', bookId: book.id, on: false })');
+    await tick(300);
     await js(`(() => { slogExport({ type: 'slogExport', bookId: book.id }); })()`);
     const screen = `[...document.querySelectorAll('.modal-backdrop')].pop()`;
     for (let i = 0; i < 100 && !(await js(`!!(${screen} && ${screen}.querySelector('.fr-choice'))`)); i++) await tick(50);
+    notes.offScreen = await js(`${screen}.innerText`);
+    await js(`${screen}.querySelector('.fr-choice').click()`);
+    for (let i = 0; i < 100 && !(await js(`!!(${screen} && /Export for Verification/.test(${screen}.innerText))`)); i++) await tick(50);
+    notes.onAfterAsk = await js('book.scribesLog !== false');
     notes.exportScreen = await js(`${screen}.innerText`);
     await js(`${screen}.querySelector('.fr-choice').click()`);
     for (let i = 0; i < 200 && !fs.existsSync(EXPORT_TO); i++) await tick(100);
@@ -520,7 +573,23 @@ async function main() {
       ['words from another device arrived', () => assert.ok(edits.some((e) => e.kind === 'edit' && e.src === 'arrived' && e.x.ins.join('').includes('Written elsewhere')))],
       ['the other device\'s version kept beside this one arrived too', () => assert.ok(edits.some((e) => e.kind === 'base' && e.src === 'arrived' && e.x.ins[0].includes('There.')))],
       ['words typed while the log was off are marked', () => assert.ok(edits.some((e) => e.cause === 'off' && e.x && e.x.ins.join('').includes('Off the record.')))],
-      ['…and the log notes it was off, then on', () => assert.deepEqual(entries.filter((e) => e.kind === 'off' || e.kind === 'on').map((e) => e.kind), ['off', 'on'])],
+      ['…and the log notes it was off, then on (twice: the second time from the export)', () => assert.deepEqual(entries.filter((e) => e.kind === 'off' || e.kind === 'on').map((e) => e.kind), ['off', 'on', 'off', 'on'])],
+      ['an export with the Slog off asks first, and switching on goes ahead', () => {
+        assert.match(notes.offScreen, /Your Slog is off/);
+        assert.match(notes.offScreen, /Switch On and Export/);
+        assert.match(notes.offScreen, /Export As Is/);
+        assert.equal(notes.onAfterAsk, true);
+        assert.match(notes.exportToast, /The Slog is on now/);
+        assert.match(notes.exportToast, /Switch It Off/);
+      }],
+      ['an earlier copy pasted back from clipboard history is a move', () => {
+        assert.ok(edits.filter((e) => e.src === 'move' && !e.cause && e.x && e.x.ins.join('').includes(GULLS)).length >= 2);
+      }],
+      ['the writer\'s words pasted back with other typography: a paste in the log, typed once the scan matched them', () => {
+        assert.ok(edits.some((e) => e.src === 'paste' && e.x && e.x.ins.join('').includes('Morning came slowly.')), 'logged as a paste');
+        assert.ok(entries.some((e) => e.kind === 'relink'), 'a relink entry');
+        assert.deepEqual([...new Set(originsOf(KEEPER_PASTED))], ['typed']);
+      }],
       ['typing after it came back on is typed', () => assert.ok(edits.some((e) => e.src === 'typed' && e.x && e.x.ins.join('').includes('Back on.')))],
       ['the book came in as an import', () => assert.ok(edits.some((e) => e.kind === 'base' && e.src === 'import' && e.file))],
       ['typing is typed, in bursts', () => assert.ok(edits.some((e) => e.src === 'typed' && e.ev > 3 && e.x && e.x.ins.join('').includes('The wind rose.')))],

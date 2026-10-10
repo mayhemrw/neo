@@ -533,6 +533,27 @@ function toast(msg, ms = 4000) {
   clearTimeout(toast._t);
   toast._t = setTimeout(() => { h.hidden = true; }, ms);
 }
+// …with one button on it, for a choice right after something the writer
+// asked for (never while they write): pressing it runs fn and the toast goes
+function toastAction(msg, label, fn, ms = 12000) {
+  const h = $('#hint');
+  h.textContent = '';
+  const words = document.createElement('span');
+  words.textContent = msg;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'hint-action';
+  btn.textContent = label;
+  btn.addEventListener('click', () => {
+    clearTimeout(toast._t);
+    h.hidden = true;
+    fn();
+  });
+  h.append(words, btn);
+  h.hidden = false;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { h.hidden = true; }, ms);
+}
 
 // Scripts that do not separate words with spaces: a whitespace count reports
 // one "word" for a whole sentence, so word goals and statistics read far too
@@ -10982,8 +11003,7 @@ const slogState = {
   seen: {},     // each document as the log was last told it (chapters by text, the rest by a signature)
   stack: [],    // labels in force: a paste, a drop, one of NEO's tools at work
   burst: null,  // { label, start, last, ev }: typing not yet described
-  timer: null,
-  clip: null    // what was last copied or cut in NEO, so pasting it back is a move
+  timer: null
 };
 const slogBridge = () => (window.neo && window.neo.slog) || null;
 const slogLive = () => !!(slogBridge() && book && slogState.bookId === book.id);
@@ -11167,24 +11187,66 @@ function slogStructural(label) {
   if (how) slogTask(how);
 }
 
+// NEO's own clipboard: the last SLOG_CLIPS things copied or cut in NEO, each
+// kept as a fingerprint of its text (never the text itself) on this
+// computer, across restarts (`neo-slog-clips` in localStorage). So a
+// passage cut, NEO quit and opened again, then pasted, is still a move, and
+// so is one pasted back from the system's clipboard history (Win+V, a Mac
+// clipboard manager) after other copies. A fingerprint that matched by
+// chance would gain nothing: a move's words only take an origin where the
+// log finds them in the book.
+const SLOG_CLIPS = 20;
+const SLOG_CLIPS_KEY = 'neo-slog-clips';
+function slogClipHash(s) {
+  let a = 0x811c9dc5;
+  let b = 0x9e3779b9;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193);
+    b = Math.imul(b ^ c, 0x5bd1e995);
+    b ^= b >>> 15;
+  }
+  return (a >>> 0).toString(16).padStart(8, '0') + (b >>> 0).toString(16).padStart(8, '0') + ':' + s.length;
+}
+function slogClips() {
+  try {
+    const list = JSON.parse(localStorage.getItem(SLOG_CLIPS_KEY) || '[]');
+    return Array.isArray(list) ? list.filter((c) => c && typeof c.h === 'string') : [];
+  } catch { return []; }
+}
+function slogClipRemember(text, how) {
+  const h = slogClipHash(text);
+  const list = [{ h, ...how }, ...slogClips().filter((c) => c.h !== h)].slice(0, SLOG_CLIPS);
+  try { localStorage.setItem(SLOG_CLIPS_KEY, JSON.stringify(list)); } catch { /* kept for this run only, then */ }
+  slogClipsHere = list;
+}
+// (this run's copy, for when localStorage can't be written)
+let slogClipsHere = null;
+function slogClipFind(text) {
+  const h = slogClipHash(text);
+  const saved = slogClips();
+  return (saved.length ? saved : slogClipsHere || []).find((c) => c.h === h) || null;
+}
+
 // The clipboard. Text copied or cut in NEO and pasted back is a move (the
 // main process finds where it came from: still in the book, deleted by the
-// cut, or in another book open earlier); anything else pasted is from
-// outside. A cut is an entry of its own, so the paste can point at it.
+// cut, or in another book open earlier; what it can't find, the export's
+// scan looks for again); anything else pasted is from outside. A cut is an
+// entry of its own, so the paste can point at it.
 const slogInBook = (el) => !!(el && el.closest && el.closest('#editor-view'));
 for (const type of ['copy', 'cut']) {
   document.addEventListener(type, (e) => {
     if (!slogLive() || !slogInBook(e.target)) return;
     const text = slogClipText(window.getSelection());
-    slogState.clip = text ? { text, cut: type === 'cut', bookId: book.id } : null;
+    if (text) slogClipRemember(text, { cut: type === 'cut', bookId: book.id });
     if (type === 'cut') slogTask({ src: 'typed' });
   }, true);
 }
 document.addEventListener('paste', (e) => {
   if (!slogLive() || !slogInBook(e.target)) return;
   const text = slogClipText(e.clipboardData && e.clipboardData.getData('text/plain'));
-  const clip = slogState.clip;
-  if (!clip || !text || text !== clip.text) { slogTask({ src: 'paste' }); return; }
+  const clip = text ? slogClipFind(text) : null;
+  if (!clip) { slogTask({ src: 'paste' }); return; }
   // (a passage copied out of a version: a restore, found where it was deleted)
   const how = clip.history ? { src: 'move', cause: 'restore' } : clip.cut ? { src: 'move' } : { src: 'move', copy: true };
   if (clip.bookId !== book.id) how.book = clip.bookId;
@@ -11304,23 +11366,62 @@ async function slogSaveAll() {
 async function slogExport(msg) {
   const b = slogBridge();
   if (!book || msg.bookId !== book.id || !b || !b.exportLog) return;
+  const switched = await slogOffFirst('export');
+  if (switched === null) return;
   const can = slogCanShow().map((p) => `<p>${escHtml(p)}</p>`).join('');
   const kind = await optionModal(escHtml(t('Export for Verification')),
     can + `<p>${escHtml(t('Either kind carries exact times, as each computer and each outside timestamp recorded them, and its own copy of the verifier, so anyone can check it in a web browser without NEO.'))}</p>`, [
       { label: escHtml(t('Without the text')), desc: escHtml(t('How the book was written, but none of its words. Every check still works except matching a manuscript word for word; a manuscript can still be matched against the log\'s fingerprint.')), value: 'clear' },
       { label: escHtml(t('With the text')), desc: escHtml(t('This export contains every word of this book as you wrote it, including every passage you deleted and every author name the book has had. Send it only to someone you\'d trust with your drafts.')), value: 'full', danger: true }
     ]);
-  if (!kind) return;
+  if (!kind) { if (switched) slogOffAgain(t('Nothing was exported.')); return; }
   await slogSaveAll();
   const added = await slogAddedLines();
   toast(t('Getting the log ready…'), 30000);
   let res;
   try { res = await b.exportLog(book.id, { kind, added }); } catch (err) { res = { error: (err && err.message) || String(err) }; }
-  if (!res) { $('#hint').hidden = true; return; }
+  if (!res) { if (switched) slogOffAgain(t('Nothing was exported.')); else $('#hint').hidden = true; return; }
   if (res.error) { toast(res.error, 8000); return; }
-  toast(res.stamped
+  const said = res.stamped
     ? t('Log exported. It ends on an outside timestamp.')
-    : t('Log exported. The last stretch of writing isn\'t timestamped yet (no network?): its times are as this computer reported them.'), 8000);
+    : t('Log exported. The last stretch of writing isn\'t timestamped yet (no network?): its times are as this computer reported them.');
+  if (switched) slogOffAgain(said);
+  else toast(said, 8000);
+}
+
+// Export for Verification and the Verification Report, for a book whose
+// Slog is switched off: switching it on first records what changed while
+// it was off (as changed while it was off), and lets the scan before the
+// export or report match those words to earlier writing; or it goes ahead
+// as it stands. Resolves to true (switched on), false (it was on, or
+// as it stands) or null (cancelled).
+async function slogOffFirst(what) {
+  if (!book || book.scribesLog !== false) return false;
+  const report = what === 'report';
+  const pick = await optionModal(escHtml(t('Your Slog is off')),
+    escHtml(t('The Scribe\'s Log (Slog) is switched off for this book. To trace what changed while it was off, it needs to switch on.')), [
+      {
+        label: escHtml(report ? t('Switch On and Make the Report') : t('Switch On and Export')),
+        desc: escHtml(t('Records what changed while it was off, matches those words to your earlier writing where it can, then carries on. You can switch it off again right after.')),
+        value: 'on'
+      },
+      {
+        label: escHtml(report ? t('Make the Report As Is') : t('Export As Is')),
+        desc: escHtml(t('Leaves the Slog off. Everything since it went off counts as changed while the log was off.')),
+        value: 'as'
+      }
+    ]);
+  if (!pick || !book) return null;
+  if (pick === 'as') return false;
+  await slogToggle({ bookId: book.id, on: true });
+  return true;
+}
+// …and after it, the toast that says how it went offers to switch it off again
+function slogOffAgain(said) {
+  const bookId = book && book.id;
+  toastAction(said + ' ' + t('The Slog is on now.'), t('Switch It Off'), () => {
+    if (book && book.id === bookId) slogToggle({ bookId, on: false });
+  }, 15000);
 }
 
 // File → Scribe's Log → Verification Report…: how exactly to show the
@@ -11329,6 +11430,8 @@ async function slogExport(msg) {
 async function slogReport(msg) {
   const b = slogBridge();
   if (!book || msg.bookId !== book.id || !b || !b.report) return;
+  const switched = await slogOffFirst('report');
+  if (switched === null) return;
   const choices = [
     { value: 'exact', label: t('Exact times'), desc: t('Each session\'s date and time of day.') },
     { value: 'dates', label: t('Dates only'), desc: t('Which days you wrote, not when in the day.') },
@@ -11368,14 +11471,16 @@ async function slogReport(msg) {
     bd.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); done(null); } });
     bd.querySelector('.m-ok').focus();
   });
-  if (!picked) return;
+  if (!picked) { if (switched) slogOffAgain(t('No report was made.')); return; }
   await slogSaveAll();
   toast(t('Getting the report ready…'), 30000);
   let res;
   try { res = await b.report(book.id, picked); } catch (err) { res = { error: (err && err.message) || String(err) }; }
-  if (!res) { $('#hint').hidden = true; return; }
+  if (!res) { if (switched) slogOffAgain(t('No report was made.')); else $('#hint').hidden = true; return; }
   if (res.error) { toast(res.error, 8000); return; }
-  toast(res.pdf ? t('Report saved, with a PDF beside it.') : t('Report saved.'), 6000);
+  const said = res.pdf ? t('Report saved, with a PDF beside it.') : t('Report saved.');
+  if (switched) slogOffAgain(said);
+  else toast(said, 6000);
 }
 
 // File → Scribe's Log → Merge Log into Archive
@@ -11495,7 +11600,7 @@ const historyEntryName = (e) => (e.named ? '“' + e.name + '”' : historyDate(
 function historyCopied(bookId, text) {
   if (!slogLive() || bookId !== book.id) return;
   const clip = slogClipText(text);
-  slogState.clip = clip ? { text: clip, cut: false, bookId, history: true } : null;
+  if (clip) slogClipRemember(clip, { cut: false, bookId, history: true });
 }
 // Restore This Version: the chapter's words replaced by the version's, as
 // one structural step (⌘Z, even from inside the text, puts them back), all

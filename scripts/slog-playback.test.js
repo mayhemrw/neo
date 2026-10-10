@@ -260,8 +260,9 @@ describe('playback: one computer', () => {
     checkFrames(pb, list, 'ch-1');
     const back = pb.frame(3, { origins: true });
     assert.equal(P.stepLabel(back.step, back.added, (s) => s), 'Restored from a version');
-    // restored text keeps its origin (typed, moved back)
-    assert.match(back.html, /pb-o-moved/);
+    // restored text keeps its origin: typed, colored as typed, never as moved
+    assert.match(back.html, /pb-o-typed/);
+    assert.doesNotMatch(back.html, /pb-o-moved/);
     assert.deepEqual(pb.problems, []);
   });
 

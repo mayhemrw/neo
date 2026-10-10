@@ -176,22 +176,32 @@
       const counts = {};
       const byHour = {};
       let moved = 0;
+      let relinked = 0;
+      let gap = 0;
       for (const [o, n] of count(final[c.doc])) {
         add(counts, catOf(o, revised), n);
         const p = V.parseOrigin(o);
         if (p.hour !== null) add(byHour, p.hour, n);
         if (p.moved) moved += n;
+        // matched to earlier writing when the log was checked (a relink), and
+        // of those, the ones that came back while the log was off or unlabeled
+        if (p.relinked) relinked += n;
+        if (p.relinked && p.gap) gap += n;
       }
       const total = Object.values(counts).reduce((a, n) => a + n, 0);
-      return { ...c, index: i + 1, counts, total, moved, byHour, deleted: Math.max(0, deleted.byDoc[c.doc] || 0) };
+      return { ...c, index: i + 1, counts, total, moved, relinked, gap, byHour, deleted: Math.max(0, deleted.byDoc[c.doc] || 0) };
     });
     const counts = {};
     const survivingByHour = {};
     let moved = 0;
+    let relinked = 0;
+    let gap = 0;
     for (const c of chapters) {
       for (const [k, n] of Object.entries(c.counts)) add(counts, k, n);
       for (const [h, n] of Object.entries(c.byHour)) add(survivingByHour, h, n);
       moved += c.moved;
+      relinked += c.relinked;
+      gap += c.gap;
     }
     const total = Object.values(counts).reduce((a, n) => a + n, 0);
 
@@ -312,7 +322,7 @@
       devices: devices.slice().sort((a, b) => (a.first ?? 0) - (b.first ?? 0)).map((d) => ({
         name: d.name, dev8: d.dev.slice(0, 8), chunks: d.chunks.length, entries: d.entries.length, first: d.first, last: d.last, ok: d.ok, arrivals: d.arrivals
       })),
-      counts, total, moved, chapters,
+      counts, total, moved, relinked, gap, chapters,
       deleted: Math.max(0, deleted.total), deletedByHour: deleted.byHour, survivingByHour,
       samples: samples.sort((a, b) => a.ts - b.ts),
       sessions,
@@ -428,7 +438,7 @@
       baseline: t('Already there when the log began'),
       arrived: t('Arrived from another device, not traced'),
       'other book': t('Copied from another book'),
-      move: t('Moved within the book, place not recorded'),
+      move: t('Moved, origin unknown'),
       'while off': t('Changed while the log was off'),
       unlogged: t('Not logged'),
       editor: t('From an editor'),
@@ -818,6 +828,8 @@ ${timeline()}
 <h2>${esc(t('Where the text came from'))}</h2>
 ${originTable()}
 ${s.moved ? `<p>${esc(t('{n} characters were moved within the book at some point; they\'re counted above under where they were first written.', { n: n(s.moved) }))}</p>` : ''}
+${s.relinked ? `<p>${esc(t('{n} characters came in without a recorded origin, or were pasted in, and match earlier writing in the book exactly, typography aside; they\'re counted above under where they were first written.', { n: n(s.relinked) }))}</p>` : ''}
+${s.gap ? `<p>${esc(t('Of those, {n} characters reappeared while the log was off or wasn\'t labeling changes. Their words trace to earlier writing; how they came back isn\'t recorded.', { n: n(s.gap) }))}</p>` : ''}
 ${s.counts['paste revised'] ? `<p class="muted">${esc(t('“Then revised” is pasted text that later had words put in or taken out inside it. Its characters still count as pasted; what was typed into it counts as typed.'))}</p>` : ''}
 <p class="muted">${esc(counted)}</p>
 ${s.chapters.length ? `<h3>${esc(t('By chapter'))}</h3>${chapterTable()}` : ''}

@@ -1671,6 +1671,12 @@ body:not(.night) #hint { background: #23211e; color: #f3efe6; border-color: #b89
 body:not(.night):not(.light) #bookshelf-view:not([hidden]) ~ #hint,
 body:not(.night):not(.light) #editor-view.board-on:not([hidden]) ~ #hint { background: #ece6d8; color: #1c1a17; border-color: #c9a86a; box-shadow: 0 4px 18px rgba(0,0,0,0.55); }
 body.bright #hint { font-size: 13.5px; padding: 9px 20px; }
+/* a toast's one button (toastAction): the toast's own colors, outlined */
+#hint .hint-action {
+  margin-left: 12px; padding: 2px 11px; border-radius: 12px; border: 1px solid currentColor;
+  background: transparent; color: inherit; font: inherit; cursor: pointer;
+}
+#hint .hint-action:hover, #hint .hint-action:focus-visible { background: rgba(127,127,127,0.18); outline: none; }
 
 /* 11px to grab, the thumb drawn 7px inside it (the border is see-through) */
 ::-webkit-scrollbar { width: 11px; height: 11px; }
