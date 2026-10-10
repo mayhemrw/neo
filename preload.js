@@ -9,7 +9,7 @@ contextBridge.exposeInMainWorld('neo', {
   writeLibrary: (data) => ipcRenderer.invoke('library:write', data),
 
   createBook: (meta) => ipcRenderer.invoke('book:create', meta),
-  duplicateBook: (bookId, title) => ipcRenderer.invoke('book:duplicate', bookId, title),
+  duplicateBook: (bookId, title, opts) => ipcRenderer.invoke('book:duplicate', bookId, title, opts),
   listBooks: () => ipcRenderer.invoke('library:listBooks'),
   readBookMeta: (bookId) => ipcRenderer.invoke('book:readMeta', bookId),
   writeBookMeta: (bookId, meta) => ipcRenderer.invoke('book:writeMeta', bookId, meta),
@@ -49,6 +49,8 @@ contextBridge.exposeInMainWorld('neo', {
   spellLearn: (word) => ipcRenderer.invoke('spell:learn', word),
   setSpellLanguage: (code) => ipcRenderer.invoke('spell:setLanguage', code),
   appVersion: () => ipcRenderer.invoke('app:version'),
+  // Help → How-To Guide… and Help → FAQ… (docs/, read by name)
+  guide: (name) => ipcRenderer.invoke('help:guide', name),
   openRelease: () => ipcRenderer.invoke('update:openRelease'),
 
   poetryState: (on) => ipcRenderer.send('poetry:state', on),
@@ -83,6 +85,11 @@ contextBridge.exposeInMainWorld('neo', {
   palette: {
     items: () => ipcRenderer.invoke('palette:items'),
     run: (key, label, path) => ipcRenderer.invoke('palette:run', key, label, path)
+  },
+  // an editor's Word file (phase 6; main.js; Pocket has none)
+  review: {
+    pick: () => ipcRenderer.invoke('review:pick'),
+    read: (path) => ipcRenderer.invoke('review:read', path)
   },
   // versions (main.js and slog-history.js; Pocket has none)
   history: {

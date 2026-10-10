@@ -10,6 +10,10 @@
 // History and rebuilds it to A's words, and each computer plays the
 // chapter back across both chains (A's after the merge, so from the
 // archive), ending exactly as its page; the verifier plays the export.
+// The Word round-trip too: A sends the book to an editor and imports the
+// editor's file; B accepts the changes; the editor's words keep their
+// origin on both computers ("From an editor (Reviewer 1)"), and no name
+// reaches the log.
 // The first run quits by closing its window with the book open (Windows'
 // close button), the second by File → Quit with the book open, the third
 // by File → Quit from the shelf; each session's last hash must be stamped
@@ -34,6 +38,8 @@ const WIND = 'The wind rose.';
 const OUTSIDE = 'A line from somewhere else entirely.';
 const LAPTOP = 'Seen from the laptop.';
 const DESK = 'Back at the desk.';
+const EDITOR = ' The sea was grey.';
+const EDITOR_NAME = 'Dana Editor';
 
 if (!process.versions.electron) runAll();
 else if (STEP === 'V') verifierStep();
@@ -294,6 +300,24 @@ async function runAll() {
       assert.match(w.status, /Step (\d+) of \1$/);
       for (const words of [WIND, LAPTOP, DESK, OUTSIDE]) assert.ok(w.text.includes(words), words);
     }],
+    ['A imported the editor\'s file; B accepted its changes', () => {
+      assert.deepEqual(notes.A1.review.lines, [EDITOR_NAME + ': 2 changes']);
+      assert.equal(notes.A1.review.open, 2);
+      assert.deepEqual(notes.B1.review.statuses, ['accepted', 'accepted']);
+      assert.equal(notes.B1.review.page.includes('silent slips') && notes.B1.review.page.includes('missing.' + EDITOR), true, notes.B1.review.page);
+    }],
+    ['the editor\'s words keep their origin on both computers, numbered, never named', () => {
+      for (const dev of [devA, devB]) {
+        assert.deepEqual(originsOf(byDev(dev), 'silent'), ['editor:Reviewer 1'], dev.slice(0, 8));
+        assert.deepEqual(originsOf(byDev(dev), EDITOR.trim()), ['editor:Reviewer 1'], dev.slice(0, 8));
+      }
+      assert.deepEqual(originsOf(byDev(devA), 'slips.'), ['import']);
+      const all = entries.flatMap((c) => c.entries);
+      assert.ok(all.some((e) => e.src === 'editor' && e.by === 'Reviewer 1' && e.cause === 'review'), 'B logged the accept as the editor\'s');
+      assert.ok(!all.some((e) => e.src === 'unlogged'), 'nothing unlogged');
+      for (const n of files.chunkNames(listing)) assert.ok(!listing.files.get(n).read().toString('utf8').includes('Dana'), 'no name in ' + n);
+      assert.ok(!fs.readFileSync(notes.A2.exports.full).includes('Dana'), 'no name in the export');
+    }],
     ['the verifier sent nothing anywhere', () => {
       assert.deepEqual(notes.V.requests, []);
       assert.deepEqual(notes.V.errors, []);
@@ -378,6 +402,13 @@ function deviceStep() {
     await tick(100);
   }
   const hint = () => js(`document.getElementById('hint').textContent`);
+  const until = async (cond, ms = 20000) => {
+    const end = Date.now() + ms;
+    while (!(await cond())) {
+      if (Date.now() > end) throw new Error('timed out waiting: ' + cond);
+      await tick(50);
+    }
+  };
   // the session's last line, and both services' receipts for it
   async function closeAndWaitForStamps(bookDir) {
     await js('backToShelf()');
@@ -454,6 +485,42 @@ function deviceStep() {
           const r = await window.neo.history.mark(book.id, 'Sent to Maria');
           return { name: r && r.name, error: (r && r.error) || null, text: chapterHTML[book.chapterOrder[0]] };
         })()`);
+        // File → Export → Word for an Editor…, then the editor's file back
+        // through File → Import Review… (the editor's changes as Word
+        // writes them: "empty" for "silent", a sentence added)
+        const sent = path.join(TMP, 'for-dana.docx');
+        save(sent);
+        const D = `document.getElementById('review-send-dialog')`;
+        await js(`(() => { window.__rv = doExport('review'); })()`);
+        await until(() => js(`!!${D}`));
+        await js(`${D}.querySelector('.rv-name').value = ${JSON.stringify(EDITOR_NAME)}; ${D}.querySelector('.rv-go').click()`);
+        await js(`window.__rv`);
+        const JSZip = require('jszip');
+        const zip = await JSZip.loadAsync(fs.readFileSync(sent));
+        let doc = await zip.file('word/document.xml').async('string');
+        let wid = 900;
+        const W = () => `w:id="${wid++}" w:author="${EDITOR_NAME}" w:date="2026-10-10T10:00:00Z"`;
+        const splice = (find, xml) => {
+          const i = doc.indexOf(find);
+          if (i < 0) throw new Error('not in the file: ' + find);
+          doc = doc.slice(0, i) + '</w:t></w:r>' + xml + '<w:r><w:t xml:space="preserve">' + doc.slice(i + find.length);
+        };
+        splice('empty', `<w:del ${W()}><w:r><w:delText xml:space="preserve">empty</w:delText></w:r></w:del><w:ins ${W()}><w:r><w:t xml:space="preserve">silent</w:t></w:r></w:ins>`);
+        const end = doc.indexOf('One was missing.') + 'One was missing.'.length;
+        doc = doc.slice(0, end) + '</w:t></w:r>' + `<w:ins ${W()}><w:r><w:t xml:space="preserve">${EDITOR}</w:t></w:r></w:ins>` + '<w:r><w:t xml:space="preserve">' + doc.slice(end);
+        zip.file('word/document.xml', doc);
+        const back = path.join(TMP, 'for-dana-edited.docx');
+        fs.writeFileSync(back, await zip.generateAsync({ type: 'nodebuffer' }));
+        const S = `document.getElementById('review-summary')`;
+        await js(`(() => { window.__ri = importReview(${JSON.stringify(back)}); })()`);
+        await until(() => js(`!!${S}`));
+        const lines = await js(`[...${S}.querySelectorAll('.rv-lines li')].map((li) => li.textContent).filter((l) => !/same threads/.test(l))`);
+        await js(`${S}.querySelector('.m-ok').click()`);
+        await js(`window.__ri`);
+        await until(() => js(`currentTab === 'review' && !rvs.busy`));
+        out.review = { lines, open: await js(`rvs.data.suggestions.filter((s) => s.status === 'open').length`) };
+        await js(`goToTab('manuscript')`);
+        await tick(400);
       } else if (STEP === 'B1') {
         // A's named version and A's session, in B's own History
         out.history = await js(`(async () => {
@@ -464,6 +531,21 @@ function deviceStep() {
           const text = named ? await window.neo.history.text(book.id, { named: named.file }, id) : null;
           return { me: list.me, versions: ch ? ch.versions.map((v) => v.dev) : [], named: named ? { dev: named.dev, text: text && text.text } : null };
         })()`);
+        // B takes the editor's changes, one at a time, in the Review tab
+        await until(() => js(`!!(rvs.data && rvs.data.suggestions.length)`));
+        await js(`reviewGoTo()`);
+        await until(() => js(`currentTab === 'review'`));
+        for (const id of await js(`rvs.data.suggestions.map((s) => s.id)`)) {
+          await js(`reviewDecideOne(${JSON.stringify(id)}, 'accept')`);
+          await until(() => js(`!rvs.busy`));
+          await pause();
+        }
+        out.review = {
+          statuses: await js(`rvs.data.suggestions.map((s) => s.status)`),
+          page: await js(`ReviewMatch.htmlText(chapterHTML[book.chapterOrder[0]])`)
+        };
+        await js(`goToTab('manuscript')`);
+        await tick(400);
         // B writes, and moves A's words to the end
         await caretEnd(0, 1);
         await type(' ' + LAPTOP);

@@ -88,8 +88,8 @@ function assertChecks(dir) {
   return res;
 }
 // mtimes a day and more back, as if the files had sat a while
-function age(file, ms) {
-  const t = (Date.now() - ms) / 1000;
+function age(file, ms, from = Date.now()) {
+  const t = (from - ms) / 1000;
   fs.utimesSync(file, t, t);
 }
 
@@ -311,7 +311,8 @@ describe('Merge Log into Archive', { concurrency: 1 }, () => {
     assert.ok(env.loose().includes(crashed));
     assertChecks(env.dir);
     // a day later, the unclosed chunk goes too
-    age(path.join(env.logDir, crashed), 25 * HOUR);
+    // (by the test's own clock, so the test doesn't run out with the calendar)
+    age(path.join(env.logDir, crashed), 25 * HOUR, env.clock + 25 * HOUR);
     res = F.mergeIntoArchive(env.dir, { dev: a.device(), now: () => env.clock + 25 * HOUR });
     assert.ok(!env.loose().includes(crashed));
     assert.deepEqual(env.loose().filter(V.isChunkName), []);

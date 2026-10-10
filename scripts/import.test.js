@@ -110,4 +110,12 @@ describe('import', () => {
     ], '<w:style w:type="paragraph" w:styleId="berschrift1"><w:name w:val="heading 1"/></w:style>'));
     assert.deepEqual(JSON.parse(JSON.stringify(r.chapters.map((c) => c.title))), ['Der Anfang', 'Das Ende']);
   });
+  test('Word with tracked changes (phase 6): a plain import reads the file as the editor left it', async () => {
+    const r = await importOne('lo-tracked.docx', fs.readFileSync(path.join(__dirname, 'fixtures/review/lo-tracked.docx')));
+    assert.deepEqual(texts(r), [[
+      'It was the best of times, it was the worst of times. And so it went.',
+      'It was the age of wisdom.',
+      'It was the epoch of belief.'
+    ]]);
+  });
 });

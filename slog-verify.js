@@ -648,7 +648,20 @@
   // Where an entry's own words come from, when no `from` piece says otherwise
   function originOf(e) {
     if (e.kind === 'edit' && e.src === 'unlogged' && e.cause === 'off') return 'while off';
+    if (e.src === 'editor') return editorOrigin(e.by);
     return typeof e.src === 'string' ? e.src : 'unlogged';
+  }
+  // An editor's text (a change from a Word review, accepted): "editor", or
+  // "editor:Reviewer 1" when the entry says which. Only the book's own
+  // numbering is read; anything else is just "editor".
+  const EDITOR_BY = /^Reviewer [1-9]\d{0,3}$/;
+  function editorOrigin(by) { return typeof by === 'string' && EDITOR_BY.test(by) ? 'editor:' + by : 'editor'; }
+  // …and back: the reviewer an origin category names ('' for an editor
+  // unnamed), or null when it isn't an editor's
+  function editorOf(cat) {
+    const c = String(cat || '');
+    if (c === 'editor') return '';
+    return c.startsWith('editor:') ? c.slice(7) : null;
   }
 
   // Detailed origins (a Tracer made with `detail`, for the report): each
@@ -1590,7 +1603,7 @@
     parseLines, parseChunk, readLog, logPaths, readExportFiles, EXPORT_EXTRAS, mergeArchives, expandArchivesSync, expandArchives, orderChunks, verifyChain, Replayer, replay,
     runsTidy, runsSlice, runsCut, runsInsert, originOf, Tracer, trace, traceAll, matchArrivals,
     detailOrigin, parseOrigin, originCat,
-    AUX_DOCS, JSON_DOCS, chapterDoc, docChapter, decodeEntities, chapterLines, manuscriptText, proseMask, composition, originsAt,
+    AUX_DOCS, JSON_DOCS, chapterDoc, docChapter, decodeEntities, chapterLines, manuscriptText, proseMask, composition, originsAt, editorOf,
     checkReceipts, matchStampEntries, coverage, clockCheck, deviceNames, checkChains, checkLog,
     SKEW, AHEAD, JUMP
   });

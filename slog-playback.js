@@ -47,7 +47,7 @@
   // before the log began is imported; typed text moved within the book is
   // moved; what's left (arrived and never traced, unlabeled, changed while
   // the log was off) is other
-  const ORIGINS = ['typed', 'pasted', 'moved', 'imported', 'other'];
+  const ORIGINS = ['typed', 'pasted', 'moved', 'imported', 'editor', 'other'];
   const groupCache = new Map();
   function originGroup(o) {
     if (o == null) return 'other';
@@ -56,6 +56,7 @@
     const p = V.parseOrigin(o);
     if (p.cat === 'paste' || p.cat === 'drop') g = 'pasted';
     else if (p.cat === 'import' || p.cat === 'baseline' || p.cat === 'other book') g = 'imported';
+    else if (V.editorOf(p.cat) !== null) g = 'editor';
     else if (p.moved || p.cat === 'move') g = 'moved';
     else if (p.cat === 'typed') g = 'typed';
     else g = 'other';
@@ -244,7 +245,7 @@
           n: e.n, ts: e.ts, kind: e.kind, ops: Array.isArray(e.ops) ? e.ops : [], ins: e.x && Array.isArray(e.x.ins) ? e.x.ins : null,
           reset: e.kind === 'doc' ? (e.act === 'new' ? 'new' : 'del') : null,
           runs: d ? groupRuns(d.runs) : [],
-          src: e.src, cause: e.cause, dur: e.dur, session: session.get(dev) || 0,
+          src: e.src, cause: e.cause, by: e.by, dur: e.dur, session: session.get(dev) || 0,
           step: (e.kind === 'edit' || e.kind === 'base') && e.src !== 'arrived'
         };
         const i = lane.list.push(le) - 1;
@@ -287,7 +288,7 @@
         if (toKey && before(key, toKey) > 0) return;
         steps.push({
           dev: lane.dev, name: devNames.get(lane.dev) || lane.dev.slice(0, 8), n: le.n, ts: le.ts, dur: le.dur,
-          kind: le.kind, src: le.src, cause: le.cause, session: lane.dev + ':' + le.session, key, li: i
+          kind: le.kind, src: le.src, cause: le.cause, by: le.by, session: lane.dev + ':' + le.session, key, li: i
         });
       });
     }
@@ -295,7 +296,7 @@
     steps.forEach((s, i) => {
       s.newSession = i === 0 || s.session !== steps[i - 1].session;
       delete s.key;
-      for (const k of ['cause', 'dur']) if (s[k] === undefined) delete s[k]; // (plain data, the same once copied)
+      for (const k of ['cause', 'by', 'dur']) if (s[k] === undefined) delete s[k]; // (plain data, the same once copied)
     });
 
     // where it starts: the version it plays from, or before the chapter was
@@ -431,6 +432,8 @@
       split: t('Chapter split'), join: t('Chapters joined'), outline: t('Outline'), darling: t('Darlings'), placeholder: t('Placeholder'),
       off: t('Changed while the log was off')
     };
+    // an editor's change, accepted: who, as the log numbers them
+    if (step.src === 'editor') return step.by ? t('From an editor ({name})', { name: step.by }) : t('From an editor');
     if (step.cause && CAUSES[step.cause]) return CAUSES[step.cause];
     if (!added && step.kind === 'edit') return t('Taken out');
     const SRCS = {
@@ -505,7 +508,7 @@
     const status = el('div', 'pb-status');
     const sessionLine = el('div', 'pb-session');
     const legend = el('div', 'pb-legend');
-    const LEGEND = { typed: t('Typed'), pasted: t('Pasted'), moved: t('Moved'), imported: t('Imported'), other: t('Other') };
+    const LEGEND = { typed: t('Typed'), pasted: t('Pasted'), moved: t('Moved'), imported: t('Imported'), editor: t('From an editor'), other: t('Other') };
     for (const g of ORIGINS) {
       const item = el('span', 'pb-key pb-o-' + g, LEGEND[g]);
       legend.append(item);

@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { Buffer } = require('buffer');
+const { GUIDES: GUIDE_FILES } = require('./guide.js');
 
 // Every disk request from the page passes through here: a write the system
 // refuses (see reportBlockedWrite) is explained to the writer, then the error
@@ -765,7 +766,8 @@ ipcMain.handle('book:create', (_e, meta) => {
 // its folder (chapters, notes, darlings, covers) written whole into a new
 // folder, then its book.json under the new id and title. A half-made copy
 // is removed; the original is only ever read.
-ipcMain.handle('book:duplicate', (_e, bookId, title) => {
+ipcMain.handle('book:duplicate', (_e, bookId, title, opts) => {
+  const withReview = !!(opts && opts.review);
   ensureLibrary();
   const src = bookDir(bookId);
   const meta = readJSON(path.join(src, 'book.json'), null);
@@ -777,7 +779,8 @@ ipcMain.handle('book:duplicate', (_e, bookId, title) => {
   const dest = bookDir(id);
   // a chapter iCloud hasn't brought down yet would be missing from the copy
   // (the Scribe's Log and versions aren't copied, so they needn't be down)
-  const own = (name) => name === slog.LOG_DIR || name === slogHistory.VERSIONS_DIR;
+  // (nor are an editor's files and what was decided about them, phase 6)
+  const own = (name) => name === slog.LOG_DIR || name === slogHistory.VERSIONS_DIR || name === REVIEWS_DIR || name === 'review.json';
   const waiting = (dir) => fs.readdirSync(dir, { withFileTypes: true }).some((e) => (e.isDirectory() ? !(dir === src && own(e.name)) && waiting(path.join(dir, e.name)) : /\.icloud$/.test(e.name)));
   if (waiting(src)) throw new Error('Some of this book is still downloading from iCloud. Try again in a moment');
   const copyDir = (from, to) => {
@@ -801,6 +804,12 @@ ipcMain.handle('book:duplicate', (_e, bookId, title) => {
     const copy = { ...meta, id, title: title || meta.title, created: now, modified: now };
     delete copy.uuid; // an ebook store sees a new book
     writeJSON(path.join(dest, 'book.json'), copy);
+    // the editor's changes and comments, when the writer asked for them: the
+    // same chapters (their ids are kept), so they go through the same way
+    if (withReview) {
+      const review = readJSON(path.join(src, 'review.json'), null);
+      if (review) writeJSON(path.join(dest, 'review.json'), review);
+    }
     writeCatalog();
     const logged = slogTap((s) => s.copied(dest, id, src));
     if (logged && typeof logged.catch === 'function') logged.catch((err) => logError('scribe\'s log', err));
@@ -1017,12 +1026,13 @@ ipcMain.handle('slog:status', (_e, bookId) => slogTap((s) => s.status(bookDir(bo
 // Named versions. mark: File → Name This Version… (the window has saved
 // everything first). named: the book's named versions, oldest first, each
 // with whether this computer made it. rename / remove: one version's file.
-// (auto: 'replace' when Replace All names one before it changes anything)
+// (auto: 'replace' when Replace All names one before it changes anything,
+// 'word' when a Word file goes to an editor)
 ipcMain.handle('history:mark', async (_e, bookId, name, auto) => {
   const clean = slogHistory.cleanName(name);
   if (!clean) return { error: t('A version needs a name.') };
   try {
-    return await history.mark(bookId, clean, auto === 'replace' ? 'replace' : null);
+    return await history.mark(bookId, clean, auto === 'replace' || auto === 'word' || auto === 'review' ? auto : null);
   } catch (err) {
     logError('versions', err);
     return { error: t('The version wasn\'t saved: {why}', { why: err.message }) };
@@ -1303,7 +1313,13 @@ ipcMain.handle('slog:report', async (_e, bookId, opts = {}) => {
   if (canceled || !filePath) return null;
   rememberExportFolder(filePath);
   try {
-    const html = await slogReportHtml(dir, meta, privacy);
+    // the editors' names, only when the writer asked (never in the log)
+    let editorNames = null;
+    if (opts.nameEditors) {
+      const review = readJSON(path.join(dir, 'review.json'), null);
+      if (review && Array.isArray(review.reviewers)) editorNames = require('./review-match.js').reviewerNames(review.reviewers);
+    }
+    const html = await slogReportHtml(dir, meta, privacy, editorNames);
     const file = /\.html?$/i.test(filePath) ? filePath : filePath + '.html';
     fs.writeFileSync(file, html, 'utf8');
     let pdf = null;
@@ -1318,7 +1334,7 @@ ipcMain.handle('slog:report', async (_e, bookId, opts = {}) => {
   }
 });
 // The report's page, from the book's log as it stands
-async function slogReportHtml(dir, meta, privacy) {
+async function slogReportHtml(dir, meta, privacy, editorNames = null) {
   const V = require('./slog-verify.js');
   const R = require('./slog-report.js');
   const { anchors, certs } = slogTrust();
@@ -1327,7 +1343,7 @@ async function slogReportHtml(dir, meta, privacy) {
   let tz = 'UTC';
   try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { /* UTC */ }
   return R.renderReport(stats, {
-    privacy, tz, locale: NeoI18n.getLocale(), t, canShow: slogCanShow(),
+    privacy, tz, locale: NeoI18n.getLocale(), t, canShow: slogCanShow(), editorNames,
     generator: 'NEO ' + app.getVersion(), generated: Date.now()
   });
 }
@@ -2421,6 +2437,41 @@ ipcMain.handle('import:files', async (_e, paths) => {
   return out;
 });
 
+// ---------------------------------------------------------------------------
+// The Word round-trip (phase 6): an editor's .docx read for its tracked
+// changes and comments (review-docx.js). The window matches it to the book
+// (review-match.js) and keeps what it found in review.json; nothing here
+// changes a chapter, and no copy of the file is kept (the writer has it).
+// A reviews/ folder an earlier build made is left alone (and not copied
+// by Duplicate).
+// ---------------------------------------------------------------------------
+const REVIEWS_DIR = 'reviews';
+async function reviewRead(fp) {
+  if (!/\.docx$/i.test(fp || '')) return { error: t('That isn’t a Word file (.docx).') };
+  try {
+    const RD = require('./review-docx.js');
+    // (a Word file with a novel in it is a few MB; pictures make it larger)
+    if (fs.statSync(fp).size > 512 * 1024 * 1024) return { error: t('{file} is too large to read as a review.', { file: path.basename(fp) }) };
+    const bytes = new Uint8Array(fs.readFileSync(fp));
+    const model = await RD.readDocx(bytes, require('./slog-zip.js'), (b) => require('zlib').inflateRawSync(b, { maxOutputLength: RD.MAX_PART }));
+    return { name: path.basename(fp), model };
+  } catch (err) {
+    logError('import review', err);
+    return { error: t('NEO couldn’t read {file}: {why}', { file: path.basename(fp), why: err.message }) };
+  }
+}
+ipcMain.handle('review:pick', async () => {
+  const win = BrowserWindow.getFocusedWindow();
+  const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+    title: t('Import Review'),
+    properties: ['openFile'],
+    filters: [{ name: t('Word'), extensions: ['docx'] }]
+  });
+  if (canceled || !filePaths.length) return null;
+  return reviewRead(filePaths[0]);
+});
+// a .docx dropped on the open book (the window has its path from the drop)
+ipcMain.handle('review:read', (_e, fp) => reviewRead(String(fp || '')));
 ipcMain.handle('import:pick', async () => {
   const win = BrowserWindow.getFocusedWindow();
   const { canceled, filePaths } = await dialog.showOpenDialog(win, {
@@ -2993,6 +3044,8 @@ function buildMenu() {
             { label: t('Paperback for KDP…'), click: () => sendToWindow({ type: 'export', format: 'paperback' }) },
             // agents' and editors' format, as Word or PDF (phase 5)
             { label: t('Manuscript Format…'), click: () => sendToWindow({ type: 'export', format: 'manuscript' }) },
+            // a Word file whose tracked changes and comments come back in (phase 6)
+            { label: t('Word for an Editor…'), click: () => sendToWindow({ type: 'export', format: 'review' }) },
             { type: 'separator' },
             {
               id: 'export-custom-chapter-titles',
@@ -3049,6 +3102,8 @@ function buildMenu() {
           accelerator: 'CmdOrCtrl+Shift+I',
           click: () => sendToWindow({ type: 'import' })
         },
+        // an editor's Word file, back with their changes and comments (phase 6)
+        { label: t('Import Review…'), click: () => sendToWindow({ type: 'importReview' }) },
         { label: t('Reshelve a Book…'), click: () => sendToWindow({ type: 'reshelve' }) },
         { label: t('Library Folder…'), click: () => { chooseLibraryFolder().catch((err) => logError('library folder', err)); } },
         { type: 'separator' },
@@ -3228,6 +3283,13 @@ function buildMenu() {
           ]
         },
         { type: 'separator' },
+        // an editor's changes and comments, to take or leave (phase 6)
+        {
+          label: t('Review'),
+          accelerator: 'CmdOrCtrl+Alt+R',
+          enabled: !!slogMenu.bookId,
+          click: () => sendToWindow({ type: 'tab', value: 'review' })
+        },
         // the open book's chapters as they were (slog-history.js)
         {
           label: t('Chapter History…'),
@@ -3316,6 +3378,9 @@ function buildMenu() {
           label: t('NEO Shortcuts'),
           click: () => sendToWindow({ type: 'help' })
         },
+        // docs/HOW-TO.md and docs/FAQ.md, shown in the window (guide.js)
+        { label: t('How-To Guide…'), click: () => sendToWindow({ type: 'guide', name: 'how-to' }) },
+        { label: t('FAQ…'), click: () => sendToWindow({ type: 'guide', name: 'faq' }) },
         { type: 'separator' },
         {
           label: t('About NEO'),
@@ -3497,6 +3562,13 @@ function compareVersions(a, b) {
 // toggling at the session level forces the engine to re-scan visible text —
 // newer Chromium ignores attribute changes on text it has already looked at
 ipcMain.handle('app:version', () => app.getVersion());
+// Help → How-To Guide… and Help → FAQ…: the guides that ship with NEO,
+// read from its own folder (never the library), by name only
+ipcMain.handle('help:guide', (_e, name) => {
+  const file = Object.prototype.hasOwnProperty.call(GUIDE_FILES, name) ? GUIDE_FILES[name] : null;
+  if (!file) return null;
+  try { return fs.readFileSync(path.join(__dirname, 'docs', file), 'utf8'); } catch (err) { logError('guide', err); return null; }
+});
 
 // Updating
 //

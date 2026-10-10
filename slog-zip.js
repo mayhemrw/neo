@@ -152,11 +152,17 @@
     }
     return { files, problems };
   }
-  async function unzip(bytes, inflateRaw = streamInflate) {
+  // `only`: the names wanted (the rest aren't unpacked); `max`: the most
+  // bytes one entry may unpack to, by what the zip says (a zip bomb is
+  // refused before it's inflated; an inflater handed in should hold to
+  // the same limit, since a zip can lie about its sizes)
+  async function unzip(bytes, inflateRaw = streamInflate, { only = null, max = Infinity } = {}) {
     const { entries } = parseZip(bytes);
     const files = {};
     const problems = [];
     for (const e of entries) {
+      if (only && !only.includes(e.name)) continue;
+      if (e.usize > max) { problems.push(`${e.name}: too large to read (${e.usize} bytes)`); continue; }
       try {
         files[e.name] = method(e) === 0 ? finish(e, e.data) : finish(e, new Uint8Array(await inflateRaw(e.data)));
       } catch (err) { problems.push(err.message); }
