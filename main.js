@@ -766,7 +766,8 @@ ipcMain.handle('book:create', (_e, meta) => {
 // its folder (chapters, notes, darlings, covers) written whole into a new
 // folder, then its book.json under the new id and title. A half-made copy
 // is removed; the original is only ever read.
-ipcMain.handle('book:duplicate', (_e, bookId, title) => {
+ipcMain.handle('book:duplicate', (_e, bookId, title, opts) => {
+  const withReview = !!(opts && opts.review);
   ensureLibrary();
   const src = bookDir(bookId);
   const meta = readJSON(path.join(src, 'book.json'), null);
@@ -803,6 +804,12 @@ ipcMain.handle('book:duplicate', (_e, bookId, title) => {
     const copy = { ...meta, id, title: title || meta.title, created: now, modified: now };
     delete copy.uuid; // an ebook store sees a new book
     writeJSON(path.join(dest, 'book.json'), copy);
+    // the editor's changes and comments, when the writer asked for them: the
+    // same chapters (their ids are kept), so they go through the same way
+    if (withReview) {
+      const review = readJSON(path.join(src, 'review.json'), null);
+      if (review) writeJSON(path.join(dest, 'review.json'), review);
+    }
     writeCatalog();
     const logged = slogTap((s) => s.copied(dest, id, src));
     if (logged && typeof logged.catch === 'function') logged.catch((err) => logError('scribe\'s log', err));
@@ -2432,14 +2439,13 @@ ipcMain.handle('import:files', async (_e, paths) => {
 
 // ---------------------------------------------------------------------------
 // The Word round-trip (phase 6): an editor's .docx read for its tracked
-// changes and comments (review-docx.js), and a copy kept in the book's
-// reviews/ folder. The window matches it to the book (review-match.js)
-// and keeps what it found in review.json; nothing here changes a chapter.
-// A file the window may keep is known by a token, never by a path the
-// window hands back.
+// changes and comments (review-docx.js). The window matches it to the book
+// (review-match.js) and keeps what it found in review.json; nothing here
+// changes a chapter, and no copy of the file is kept (the writer has it).
+// A reviews/ folder an earlier build made is left alone (and not copied
+// by Duplicate).
 // ---------------------------------------------------------------------------
 const REVIEWS_DIR = 'reviews';
-const reviewFiles = new Map(); // token → the file's path
 async function reviewRead(fp) {
   if (!/\.docx$/i.test(fp || '')) return { error: t('That isn’t a Word file (.docx).') };
   try {
@@ -2448,9 +2454,7 @@ async function reviewRead(fp) {
     if (fs.statSync(fp).size > 512 * 1024 * 1024) return { error: t('{file} is too large to read as a review.', { file: path.basename(fp) }) };
     const bytes = new Uint8Array(fs.readFileSync(fp));
     const model = await RD.readDocx(bytes, require('./slog-zip.js'), (b) => require('zlib').inflateRawSync(b, { maxOutputLength: RD.MAX_PART }));
-    const token = require('crypto').randomBytes(12).toString('hex');
-    reviewFiles.set(token, fp);
-    return { token, name: path.basename(fp), model };
+    return { name: path.basename(fp), model };
   } catch (err) {
     logError('import review', err);
     return { error: t('NEO couldn’t read {file}: {why}', { file: path.basename(fp), why: err.message }) };
@@ -2468,20 +2472,6 @@ ipcMain.handle('review:pick', async () => {
 });
 // a .docx dropped on the open book (the window has its path from the drop)
 ipcMain.handle('review:read', (_e, fp) => reviewRead(String(fp || '')));
-// keep a copy of a file read above in reviews/<name>.docx (a new name if
-// that's taken). Returns the copy's file name.
-ipcMain.handle('review:keep', (_e, bookId, token, name) => {
-  const from = reviewFiles.get(token);
-  if (!from) throw new Error('That file isn’t known any more');
-  const base = libName(String(name || 'review').replace(/[^\p{L}\p{N}._ -]+/gu, '-').replace(/^[.-]+/, '').slice(0, 80) || 'review');
-  const dir = path.join(bookDir(bookId), REVIEWS_DIR);
-  fs.mkdirSync(dir, { recursive: true });
-  let file = base + '.docx';
-  for (let n = 2; fs.existsSync(path.join(dir, file)); n++) file = base + '-' + n + '.docx';
-  writeFileDurable(path.join(dir, libName(file)), fs.readFileSync(from));
-  return file;
-});
-
 ipcMain.handle('import:pick', async () => {
   const win = BrowserWindow.getFocusedWindow();
   const { canceled, filePaths } = await dialog.showOpenDialog(win, {

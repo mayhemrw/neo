@@ -388,6 +388,19 @@ describe('review.json from two computers at once (mergeReview)', () => {
     assert.equal(m.suggestions[0].status, 'open');
     assert.deepEqual(m.threads[0].comments.map((c) => c.text), ['Hm?', 'Yes.', 'And?']);
   });
+  test('a reply edited here is changed, not doubled; edited here and answered there, both kept', () => {
+    const mine = { by: 'Me', at: '2026-10-09T10:00:00.000Z', text: 'Yes.', mine: true };
+    const base = Object.assign(blank(), { threads: [{ id: 't1', comments: [{ by: 'Dana', at: '1', text: 'Hm?', paraId: 'A1' }, mine] }] });
+    const local = JSON.parse(JSON.stringify(base));
+    local.threads[0].comments[1].text = 'Yes, on purpose.';
+    let m = M.mergeReview(base, local, JSON.parse(JSON.stringify(base)));
+    assert.deepEqual(m.threads[0].comments.map((c) => c.text), ['Hm?', 'Yes, on purpose.']);
+    const remote = JSON.parse(JSON.stringify(base));
+    remote.threads[0].comments.push({ by: 'Dana', at: '3', text: 'Fine.', paraId: 'A3' });
+    m = M.mergeReview(base, local, remote);
+    assert.deepEqual(m.threads[0].comments.map((c) => c.text), ['Hm?', 'Yes, on purpose.', 'Fine.']);
+  });
+
   test('two editors given one number on two computers are numbered apart, the same way on both', () => {
     const base = blank();
     const a = Object.assign(blank(), { reviewers: [{ name: 'Dana', num: 1 }] });

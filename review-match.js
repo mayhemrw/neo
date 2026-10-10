@@ -696,7 +696,9 @@
   // numbered apart again, the same way on both (by name).
   // -------------------------------------------------------------------------
   const REVIEW_LISTS = { rounds: 'id', imports: 'id', suggestions: 'id', threads: 'id', reviewers: 'name' };
-  const commentKey = (c) => (c && c.paraId) || [(c && c.by) || '', (c && c.at) || '', (c && c.text) || ''].join('\u0000');
+  // (the writer's own reply is known by when it was written: its words can
+  // be edited before it goes out)
+  const commentKey = (c) => (c && c.paraId) || [(c && c.by) || '', (c && c.at) || '', (c && !c.mine && c.text) || ''].join('\u0000');
   function mergeReview(base, local, remote) {
     const J = (x) => JSON.stringify(x);
     const out = Object.assign({}, local);
@@ -712,6 +714,7 @@
         const r = byR.get(e[idk]);
         if (!r || J(r) === J(e)) return e;
         if (B.has(e[idk]) && B.get(e[idk]) === J(e)) return r; // untouched here: the file's
+        if (B.has(e[idk]) && B.get(e[idk]) === J(r)) return e; // untouched there: this copy's
         if (list === 'threads') {
           const have = new Set((e.comments || []).map(commentKey));
           const more = (r.comments || []).filter((c) => !have.has(commentKey(c)));

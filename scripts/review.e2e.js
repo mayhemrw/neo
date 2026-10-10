@@ -288,8 +288,8 @@ test('Import Review: the editor’s change and comment are kept; nothing in the 
   assert.equal(imp.round, sent.round.id);
   assert.equal(imp.how, 'bookmarks');
   assert.equal(imp.file, 'two-cities-dana-edited.docx');
-  assert.equal(imp.copy, sent.round.id + '-Dana-Editor.docx');
-  assert.ok(fs.existsSync(path.join(await bookDirOf(), 'reviews', imp.copy)), 'the copy kept');
+  assert.equal(imp.copy, null);
+  assert.ok(!fs.existsSync(path.join(await bookDirOf(), 'reviews')), 'no copy of the file kept (the writer has it)');
   assert.deepEqual(review.rounds[0].imports, [imp.id]);
   assert.deepEqual(review.reviewers.map((r) => r.name), ['Dana Editor']);
   assert.match(review.reviewers[0].color, /^#[0-9a-f]{6}$/);
@@ -361,7 +361,7 @@ test('a file not from NEO: it asks which version, the closest first', async () =
   const review = await reviewJson();
   assert.equal(review.imports.length, 3);
   assert.equal(review.imports[2].how, 'headings');
-  assert.ok(fs.readdirSync(path.join(await bookDirOf(), 'reviews')).length === 3);
+  assert.ok(!fs.existsSync(path.join(await bookDirOf(), 'reviews')));
   let errors = '';
   try { errors = fs.readFileSync(path.join(LIB, 'neo-errors.log'), 'utf8'); } catch { /* none */ }
   assert.equal(errors, '');
@@ -603,6 +603,34 @@ test('a reply is typed in the margin: ⌘Enter sends it, as the writer’s; a dr
   assert.equal(await js(`Object.values(chapterHTML).some((h) => h.includes('Blackheath'))`), false);
 });
 
+test('your own reply can be edited until it goes to the editor; theirs never', async () => {
+  const edits = () => js(`[...${card(hillId)}.querySelectorAll('.rv-cm')].map((c) => !!c.querySelector('[data-tact="edit"]'))`);
+  assert.deepEqual(await edits(), [false, true], 'only the writer’s own reply');
+  await js(`${card(hillId)}.querySelector('[data-tact="edit"]').click()`);
+  await until(() => js(`!!${card(hillId)}.querySelector('.rv-editbox')`));
+  assert.equal(await js(`document.activeElement === ${card(hillId)}.querySelector('.rv-editbox')`), true);
+  // Esc leaves it as it was
+  await js(`${card(hillId)}.querySelector('.rv-editbox').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+  await until(() => js(`!${card(hillId)}.querySelector('.rv-editbox')`));
+  // Ctrl+Enter saves the new words
+  await js(`${card(hillId)}.querySelector('[data-tact="edit"]').click()`);
+  await until(() => js(`!!${card(hillId)}.querySelector('.rv-editbox')`));
+  const save = (text) => js(`(() => { const b = ${card(hillId)}.querySelector('.rv-editbox'); b.value = ${JSON.stringify(text)}; b.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true })); })()`);
+  await save('Shooter’s Hill.');
+  await until(async () => (await thread((x) => x.id === hillId)).comments[1].text === 'Shooter’s Hill.');
+  let th = await thread((x) => x.id === hillId);
+  assert.ok(th.comments[1].edited);
+  assert.equal(th.comments.length, 2, 'changed, not added');
+  assert.equal(await js(`${card(hillId)}.querySelectorAll('.rv-cm-text')[1].textContent`), 'Shooter’s Hill.');
+  // and back (the Save button this time)
+  await js(`${card(hillId)}.querySelector('[data-tact="edit"]').click()`);
+  await until(() => js(`!!${card(hillId)}.querySelector('.rv-editbox')`));
+  await js(`(() => { const b = ${card(hillId)}.querySelector('.rv-editbox'); b.value = 'Shooter’s Hill, near Blackheath.'; ${card(hillId)}.querySelector('[data-tact="edit-save"]').click(); })()`);
+  await until(async () => (await thread((x) => x.id === hillId)).comments[1].text === 'Shooter’s Hill, near Blackheath.');
+  th = await thread((x) => x.id === hillId);
+  assert.equal(th.comments.length, 2);
+});
+
 test('Resolve folds a thread; Resolve and Delete moves it to Deleted comments; ⌘Z and Put back bring it back', async () => {
   const n0 = +(await tabN());
   await js(`${card(extra.lovely)}.querySelector('[data-tact="resolve"]').click()`);
@@ -675,6 +703,9 @@ test('the next file for an editor carries the threads back: replies, done, nothi
   const th = review.threads.find((x) => x.id === hillId);
   assert.ok(th.comments.every((c) => (c.sent || []).length === 1), 'the ids it went with, kept');
   sent.back2 = { to, round: review.rounds[review.rounds.length - 1], m };
+  // sent: your reply is the editor's to read now, no longer to edit
+  await tick(200);
+  assert.equal(await js(`!!${card(hillId)} && !!${card(hillId)}.querySelector('[data-tact="edit"]')`), false);
 });
 
 test('a second round reads them back as the same threads, with the editor’s new reply', async () => {
@@ -1098,6 +1129,28 @@ test('on the Review tab the left edge doesn’t slide the Chapters pane over the
   assert.ok(Math.abs(bar.top - bar.scTop) < 2, 'stuck at the top: ' + JSON.stringify(bar));
   await shot('review-bar-sticky');
   await js(`$('#paper-scroll').scrollTop = 0`);
+});
+
+test('Duplicate asks whether the copy takes the review too, and does as told', async () => {
+  const meta = await js(`({ id: book.id, title: book.title })`);
+  const pending = await js(`reviewWaiting(rvs.data)`);
+  assert.ok(pending > 0, 'something waits');
+  const LASTBD = `[...document.querySelectorAll('.modal-backdrop:not([hidden])')].pop()`;
+  const copyWith = async (choice) => {
+    const before = new Set(fs.readdirSync(LIB));
+    await js(`(() => { window.__dup = duplicateBook(${JSON.stringify(meta)}); })()`);
+    await until(() => js(`!!${LASTBD} && /Copy the editor/.test(${LASTBD}.textContent)`));
+    await js(`${LASTBD}.querySelectorAll('.fr-choice')[${choice}].click()`);
+    await js(`window.__dup`);
+    const made = fs.readdirSync(LIB).filter((d) => !before.has(d) && d.startsWith('book-'));
+    assert.equal(made.length, 1);
+    return path.join(LIB, made[0]);
+  };
+  const withIt = await copyWith(0);
+  const r = JSON.parse(fs.readFileSync(path.join(withIt, 'review.json'), 'utf8'));
+  assert.equal(r.suggestions.filter((x) => x.status === 'open').length + r.threads.filter((x) => !x.deleted && !x.resolved).length, pending, 'the same things wait in the copy');
+  const without = await copyWith(1);
+  assert.ok(!fs.existsSync(path.join(without, 'review.json')), 'left with the original');
 });
 
 test('Import Review… is in the palette, and does nothing on the shelf', async () => {

@@ -2059,9 +2059,27 @@ async function duplicateBook(meta) {
     await saveMeta();
     await new Promise((resolve) => setTimeout(resolve, 300)); // notes and sidecars, written alongside
   }
+  // an editor's changes and comments still waiting: the writer says
+  // whether the copy takes them too (a copy made before going through them,
+  // to be safe, should still have them to go through)
+  let withReview = false;
+  if (window.neo.review && window.ReviewMatch) {
+    let waiting = 0;
+    try { waiting = reviewWaiting(await reviewLoad(meta.id)); } catch { /* none */ }
+    if (waiting) {
+      const pick = await optionModal(escHtml(t('Copy the editor’s changes too?')),
+        escHtml(t('“{title}” has {n} editor’s changes and comments waiting in its Review tab.', { title: meta.title, n: waiting })),
+        [
+          { label: escHtml(t('Copy them')), desc: escHtml(t('The copy opens with the same changes and comments to go through.')), value: 'with' },
+          { label: escHtml(t('Leave them with the original')), desc: escHtml(t('The copy starts with no review.')), value: 'without' }
+        ]);
+      if (!pick) return;
+      withReview = pick === 'with';
+    }
+  }
   let copy;
   try {
-    copy = await window.neo.duplicateBook(meta.id, t('{title} (copy)', { title: meta.title }));
+    copy = await window.neo.duplicateBook(meta.id, t('{title} (copy)', { title: meta.title }), { review: withReview });
   } catch (err) {
     window.neo.logError('duplicate: ' + (err && err.stack || err));
     toast(t('Couldn’t copy the book: {error}', { error: plainError(err) }), 8000);
@@ -16303,7 +16321,7 @@ async function exportForEditor() {
       window.neo.logError('review: ' + (err && err.stack || err));
       why = why || plainError(err);
     }
-    if (book && book.id === bookId && rvs.bookId === bookId) { rvs.data = review; reviewTabShow(); }
+    if (book && book.id === bookId && rvs.bookId === bookId) { rvs.data = review; rvs.editing = null; reviewTabShow(); if (currentTab === 'review') reviewRender(); }
     const file = saved.split(/[\\/]/).pop();
     if (out.left) toast(t('{n} comment threads aren’t on a chapter in the book, so they stayed out of the file. They’re still in the Review tab.', { n: out.left }), 6000);
     if (version && !why) toast(t('Saved {file} for {name}. The book as it was sent is the version “{version}” in Chapter History.', { file, name: to, version: version.name }), 8000);
@@ -16469,7 +16487,7 @@ const reviewNewId = (pre) => pre + Date.now().toString(36) + Math.random().toStr
 
 // File → Import Review… (or a .docx dropped on the open book): the editor's
 // file read in main (review-docx.js), matched to the version it was sent
-// from (review-match.js), a copy kept in reviews/, and every change and
+// from (review-match.js), and every change and
 // comment kept in review.json. Nothing in the book changes here.
 let reviewImporting = false;
 // A file sent from another book (it says so, or its round is that book's):
@@ -16564,11 +16582,8 @@ async function importReview(filePath = null, already = null) {
     const names = Object.keys(found.counts);
     const at = Date.now();
     const importId = reviewNewId('i');
-    let copy = null;
-    try {
-      const day = new Date(at).toISOString().slice(0, 10).replace(/-/g, '');
-      copy = await rv.keep(bookId, got.token, (round ? round.id : 'r' + day) + '-' + safeName(names[0] || fallback));
-    } catch (err) { window.neo.logError('review copy: ' + (err && err.stack || err)); }
+    // (no copy of the file is kept: the writer has it)
+    const copy = null;
     // reviewers keep their color from round to round
     for (const n of names) {
       if (!review.reviewers.some((r) => r.name === n)) {
@@ -16623,7 +16638,7 @@ async function importReview(filePath = null, already = null) {
 /* Nothing here touches the writing page's look: the tab shows only while */
 /* something waits.                                                       */
 
-const rvs = { bookId: null, data: null, cur: null, curT: null, busy: false, unfold: new Set(), showDeleted: false, drafts: new Map(), hide: new Set(), own: null, ownDraft: '', colors: null };
+const rvs = { bookId: null, data: null, cur: null, curT: null, busy: false, unfold: new Set(), showDeleted: false, drafts: new Map(), hide: new Set(), own: null, ownDraft: '', colors: null, editing: null };
 
 const reviewOpen = (d) => (d ? d.suggestions.filter((s) => s.status === 'open') : []);
 const reviewOpenThreads = (d) => (d ? d.threads.filter((th) => !th.resolved && !th.deleted) : []);
@@ -16651,6 +16666,7 @@ async function reviewOpened(bookId) {
   rvs.hide.clear();
   rvs.own = null;
   rvs.colors = null;
+  rvs.editing = null;
   reviewTabShow();
   if (!window.neo.review || !window.ReviewMatch) return;
   let d = null;
@@ -17604,10 +17620,19 @@ const reviewWhen = (at) => {
   const d = new Date(at);
   return Number.isFinite(d.getTime()) ? d.toLocaleDateString(NeoI18n.getLocale(), { month: 'short', day: 'numeric' }) : '';
 };
-function reviewCommentHtml(c, i) {
+// (the writer's own reply can be edited until it goes to the editor in a file)
+const reviewCanEdit = (c) => !!(c && c.mine && !(Array.isArray(c.sent) && c.sent.length));
+function reviewCommentHtml(c, i, th) {
   const color = c.mine ? 'var(--accent)' : reviewColor(c.by);
-  return `<div class="rv-cm${i ? ' rv-reply' : ''}${c.mine ? ' rv-mine' : ''}" style="--rv:${escAttr(color)}"><div class="rv-cm-by"><i></i>${escHtml(c.mine ? reviewMe() : c.by || '')}<span class="rv-cm-at">${escHtml(reviewWhen(c.at))}</span></div>` +
-    `<div class="rv-cm-text">${escHtml(c.text || '').replace(/\n/g, '<br>')}</div></div>`;
+  const editing = th && rvs.editing === th.id + ':' + i && reviewCanEdit(c);
+  const edit = th && !editing && reviewCanEdit(c)
+    ? `<button type="button" class="rv-mini rv-edit" data-tact="edit" data-ci="${i}" title="${escAttr(t('Until it goes to the editor'))}">${escHtml(t('Edit'))}</button>` : '';
+  const text = editing
+    ? `<textarea class="rv-editbox" data-ci="${i}" rows="2" aria-label="${escAttr(t('Your reply'))}">${escHtml(c.text || '')}</textarea>` +
+      `<div class="rv-acts"><button type="button" class="rv-mini" data-tact="edit-save" data-ci="${i}">${escHtml(t('Save'))}</button><button type="button" class="rv-mini" data-tact="edit-cancel">${escHtml(t('Cancel'))}</button></div>`
+    : `<div class="rv-cm-text">${escHtml(c.text || '').replace(/\n/g, '<br>')}</div>`;
+  return `<div class="rv-cm${i ? ' rv-reply' : ''}${c.mine ? ' rv-mine' : ''}" style="--rv:${escAttr(color)}"><div class="rv-cm-by"><i></i>${escHtml(c.mine ? reviewMe() : c.by || '')}<span class="rv-cm-at">${escHtml(reviewWhen(c.at))}</span>${edit}</div>` +
+    text + '</div>';
 }
 function reviewMarginHtml(threads) {
   let html = '';
@@ -17628,7 +17653,7 @@ function reviewMarginHtml(threads) {
     if (folded) {
       body = `<div class="rv-fold">${escHtml(reviewSnip(first.text, 70))}${th.comments.length > 1 ? ` <span class="rv-n">+${th.comments.length - 1}</span>` : ''}</div>`;
     } else {
-      body = quote + th.comments.map(reviewCommentHtml).join('') +
+      body = quote + th.comments.map((c, i) => reviewCommentHtml(c, i, th)).join('') +
         (th.resolved ? '' : `<textarea class="rv-replybox" rows="1" placeholder="${escAttr(t('Reply…'))}" aria-label="${escAttr(t('Reply'))}">${escHtml(rvs.drafts.get(th.id) || '')}</textarea>`) +
         '<div class="rv-acts">' +
         (th.resolved
@@ -17712,6 +17737,32 @@ async function reviewThreadSet(id, act) {
   reviewTabShow();
   if (currentTab === 'review') reviewRender();
 }
+// the writer's own reply, changed before it went out (an empty one is left as it was)
+async function reviewEditReply(id, ci, text) {
+  text = String(text || '').trim();
+  const th = reviewMine() && rvs.data.threads.find((x) => x.id === id);
+  const c = th && th.comments[ci];
+  rvs.editing = null;
+  if (!c || !reviewCanEdit(c) || !text || text === c.text) { if (currentTab === 'review') reviewRender(); return false; }
+  const was = { text: c.text, edited: c.edited };
+  c.text = text;
+  c.edited = new Date().toISOString();
+  try { await reviewSave(book.id, rvs.data); } catch (err) {
+    Object.assign(c, was);
+    window.neo.logError('review: ' + (err && err.stack || err));
+    toast(t('Couldn’t save the reply: {error}', { error: plainError(err) }), 8000);
+  }
+  if (currentTab === 'review') reviewRender();
+  reviewSelectThread(id, { scroll: false });
+  return true;
+}
+function reviewEditOpen(id, ci) {
+  rvs.editing = id + ':' + ci;
+  reviewRender();
+  const box = document.querySelector(`#review-view .rv-thread[data-tid="${CSS.escape(id)}"] .rv-editbox`);
+  if (box) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+}
+
 // a reply, typed here: the writer's, sent back with the next file
 async function reviewReply(id, text) {
   text = String(text || '').replace(/\s+$/, '').replace(/^\s+/, '');
@@ -17891,7 +17942,11 @@ async function reviewSetColor(name, color) {
       if (tb.dataset.tact === 'reply') {
         const box = card.querySelector('.rv-replybox');
         reviewReply(id, box && box.value).then((ok) => { if (ok) reviewSelectThread(id, { scroll: false, focus: true }); });
-      } else reviewThreadSet(id, tb.dataset.tact);
+      } else if (tb.dataset.tact === 'edit') reviewEditOpen(id, +tb.dataset.ci);
+      else if (tb.dataset.tact === 'edit-save') {
+        const box = card.querySelector('.rv-editbox');
+        reviewEditReply(id, +tb.dataset.ci, box && box.value);
+      } else if (tb.dataset.tact === 'edit-cancel') { rvs.editing = null; reviewRender(); reviewSelectThread(id, { scroll: false }); } else reviewThreadSet(id, tb.dataset.tact);
       return;
     }
     const card = e.target.closest('.rv-thread');
@@ -17967,6 +18022,22 @@ async function reviewSetColor(name, color) {
         rvs.ownDraft = '';
         reviewRender();
         reviewFocus();
+      }
+      return;
+    }
+    const ed = e.target.closest && e.target.closest('.rv-editbox');
+    if (ed && !e.isComposing && e.keyCode !== 229) {
+      const id = ed.closest('.rv-thread').dataset.tid;
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        e.stopPropagation();
+        reviewEditReply(id, +ed.dataset.ci, ed.value);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        rvs.editing = null;
+        reviewRender();
+        reviewSelectThread(id, { scroll: false });
       }
       return;
     }

@@ -2420,6 +2420,9 @@ body.night .rv-page { box-shadow: 0 4px 30px rgba(0,0,0,0.7); border: 1px solid 
 .rv-cm-by > i { width: 7px; height: 7px; border-radius: 50%; background: var(--rv); display: inline-block; }
 .rv-cm-at { margin-left: auto; font-size: 10.5px; }
 .rv-cm-text { margin-top: 2px; line-height: 1.45; white-space: normal; word-break: break-word; }
+.rv-editbox { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; resize: vertical; font: inherit; font-size: 12.5px; padding: 5px 7px; border-radius: 4px; border: 1px solid var(--accent); background: transparent; color: inherit; }
+.rv-cm-by .rv-edit { margin-left: 6px; opacity: 0; transition: opacity 0.15s; }
+.rv-cm:hover .rv-edit, .rv-edit:focus-visible { opacity: 1; }
 .rv-replybox { display: block; width: 100%; box-sizing: border-box; margin-top: 8px; resize: none; overflow: hidden; font: inherit; font-size: 12.5px; padding: 5px 7px; border-radius: 4px; border: 1px solid #3a3936; background: transparent; color: inherit; }
 .rv-replybox:focus { outline: none; border-color: var(--accent); }
 .rv-thread .rv-acts { opacity: 0; transition: opacity 0.12s; flex-wrap: wrap; }
