@@ -1,0 +1,57 @@
+name: Watch Hugh's NEO
+
+# Every 4 hours, checks hughhowey/neo for new commits and releases and posts
+# them to Discord, flagging files Scribe has changed too.
+#
+# Setup: add a repo secret named DISCORD_WEBHOOK (Settings > Secrets and
+# variables > Actions) holding a Discord channel webhook URL. To test, run it
+# by hand: Actions tab > Watch Hugh's NEO > Run workflow. The first run posts
+# a "Now watching" message; after that it only posts when something's new.
+
+on:
+  schedule:
+    - cron: '23 */4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watch-upstream
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+
+      - name: Restore what was seen last time
+        uses: actions/cache/restore@v4
+        with:
+          path: .upstream-state
+          key: upstream-state-${{ github.run_id }}
+          restore-keys: upstream-state-
+
+      - name: Check Hugh's repo and post to Discord
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          GITHUB_TOKEN: ${{ github.token }}
+          UPSTREAM: hughhowey/neo
+          UPSTREAM_BRANCH: main
+          FORK_REF: ${{ github.repository_owner }}:${{ github.event.repository.default_branch }}
+          STATE_DIR: .upstream-state
+        run: |
+          if [ -z "$DISCORD_WEBHOOK" ]; then
+            echo "::error::No DISCORD_WEBHOOK secret set. Add it under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          bash .github/scripts/watch-upstream.sh
+
+      - name: Remember what was seen
+        uses: actions/cache/save@v4
+        with:
+          path: .upstream-state
+          key: upstream-state-${{ github.run_id }}
